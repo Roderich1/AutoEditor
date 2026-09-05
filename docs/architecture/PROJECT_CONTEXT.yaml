@@ -1,0 +1,328 @@
+project:
+  name: "Content Engine"
+  status: "design_complete_ready_for_v0_implementation"
+  primary_language_for_documentation: "Spanish"
+  product_type: "personal-first AI-assisted content repurposing platform"
+  core_value_proposition: >-
+    Transform long technical recordings into useful short-form clip candidates,
+    preserve creator control through human review, and generate deterministic
+    vertical renders with synchronized subtitles while reducing manual editing time.
+
+vision:
+  creator_journey:
+    - learn_technology
+    - record_real_process
+    - upload_or_process_video
+    - transcribe
+    - understand_content
+    - identify_candidate_segments
+    - rank_candidates
+    - human_review
+    - render_approved_clips
+    - generate_metadata
+    - publish_in_future_versions
+    - collect_analytics_in_future_versions
+    - learn_from_performance_in_future_versions
+  content_topics:
+    - Linux
+    - Ubuntu Server
+    - DevOps
+    - Docker
+    - Kubernetes
+    - Cloud Computing
+    - Networking
+    - Artificial Intelligence
+    - Full Stack Development
+    - Backend Development
+    - Automation
+  philosophy: >-
+    Document real learning, real projects, real errors, real debugging, real solutions,
+    and real outcomes. Avoid manufactured or fake "viral" moments.
+
+engineering_algorithm:
+  sequence:
+    - question_requirements
+    - delete_unnecessary_parts
+    - simplify_remaining_system
+    - build_and_measure
+    - accelerate_real_bottlenecks
+    - automate_validated_workflows
+    - scale_only_when_required
+  anti_pattern: "scale_or_automate_before_validating_the_core_problem"
+
+north_star:
+  primary: "time_to_ready_content"
+  supporting:
+    - manual_editing_time_saved
+    - candidate_acceptance_rate
+    - candidate_edit_rate
+    - successful_render_rate
+    - usable_clips_per_video
+    - ai_cost_per_video
+    - ai_cost_per_accepted_clip
+
+v0:
+  purpose: "validate the technical core before building product infrastructure"
+  interface: "CLI"
+  persistence: "filesystem run folders"
+  processing: "local"
+  language: "Python 3.12"
+  project_manager: "uv"
+  media_engine: "FFmpeg + ffprobe"
+  transcription:
+    primary_adapter: "faster-whisper"
+    must_support_word_timestamps: true
+    must_support_vad: true
+  analysis:
+    architecture: "provider abstraction"
+    initial_adapter: "OpenAI"
+    output: "strict structured schema validated with Pydantic"
+  human_in_the_loop: true
+  database: false
+  redis: false
+  frontend: false
+  n8n: false
+  docker: "only after bare-metal pipeline works"
+  kubernetes: false
+  social_publishing: false
+
+v0_pipeline:
+  - inspect_media
+  - extract_normalized_audio
+  - transcribe_with_timestamps
+  - normalize_transcript_without_semantic_rewrite
+  - chunk_transcript_with_overlap
+  - generate_raw_candidates
+  - validate_candidate_schema
+  - validate_timestamps_and_duration
+  - snap_boundaries_to_natural_speech
+  - calculate_score_deterministically
+  - deduplicate_temporal_overlaps
+  - rank_candidates
+  - generate_low_cost_previews
+  - human_review_approve_reject_edit
+  - build_clip_local_subtitles
+  - render_vertical_clip
+  - create_run_report
+
+candidate_engine:
+  main_risk: "candidate quality"
+  preferred_categories:
+    - problem_solution
+    - error_learning
+    - quick_tutorial
+    - explanation
+    - discovery
+    - opinion
+    - result
+    - before_after
+    - tip
+    - story
+    - demonstration
+  candidate_rules:
+    minimum_duration_seconds: 20
+    maximum_duration_seconds: 90
+    default_minimum_score: 65
+    default_target_candidates: 10
+    default_max_candidates: 15
+    default_deduplication_iou: 0.60
+    default_boundary_snap_window_seconds: 2.5
+  scoring:
+    total_calculated_by_llm: false
+    formula:
+      hook: 0.25
+      value: 0.20
+      context_independence: 0.20
+      clarity: 0.15
+      engagement_potential: 0.10
+      relevance: 0.10
+  total_score_range: "0-100"
+  terminology:
+    forbidden_claim: "detect viral moments"
+    preferred: "detect segments with high engagement potential"
+
+human_review:
+  decisions:
+    - approved
+    - rejected
+    - edited
+  optional_rejection_reasons:
+    - poor_context
+    - weak_hook
+    - not_useful
+    - bad_boundary
+    - duplicate
+    - too_long
+    - too_short
+    - incorrect_transcript
+    - other
+  primary_metric: "candidate_acceptance_rate"
+
+rendering:
+  final_master:
+    aspect_ratio: "9:16"
+    resolution: "1080x1920"
+    container: "MP4"
+    video_codec: "H.264"
+    audio_codec: "AAC"
+  presets:
+    - vertical_blur
+    - vertical_crop
+  default_preset_for_technical_screen_content: "vertical_blur"
+  subtitles:
+    source_of_truth: "transcript word timestamps"
+    formats:
+      - SRT
+      - ASS
+    burned_variant: true
+  master_clean_strategy: true
+  platform_specific_branding_later: true
+
+architecture:
+  v0_style: "modular monolith / simplified hexagonal architecture"
+  layers:
+    - CLI
+    - application_services
+    - domain
+    - ports
+    - adapters
+  key_ports:
+    - TranscriberPort
+    - ContentAnalyzerPort
+    - RendererPort
+  adapters:
+    - FFprobeAdapter
+    - FFmpegAdapter
+    - FasterWhisperTranscriber
+    - OpenAIContentAnalyzer
+    - FilesystemRunRepository
+  principle: "domain must not import concrete AI/media providers"
+
+v1_future:
+  architecture: "modular monolith + asynchronous background workers"
+  planned_components:
+    backend: "FastAPI"
+    frontend: "React/Next.js + TypeScript"
+    database: "PostgreSQL"
+    queue: "Redis + Python worker abstraction"
+    storage_initial: "local filesystem"
+    storage_future: "S3-compatible abstraction"
+  explicitly_not_required:
+    - Kubernetes
+    - microservices
+    - Kafka
+    - service_mesh
+
+future_distribution:
+  principle: "platform adapters isolated from core"
+  publisher_interface:
+    - publish
+    - get_status
+    - delete_or_unpublish_when_supported
+  platforms_planned:
+    - YouTube
+    - TikTok
+    - Instagram
+    - Facebook
+  caution: "verify current platform API policies, scopes, audits, upload rules, and branding restrictions at implementation time"
+  n8n_role: "external workflow orchestration, not core media processing"
+
+future_analytics:
+  goal: "close the feedback loop between clip characteristics and real performance"
+  possible_metrics:
+    - views
+    - likes
+    - comments
+    - shares
+    - retention
+    - watch_time
+    - completion_rate
+  future_output_examples:
+    - "problem→solution clips outperform explanations"
+    - "specific duration bands improve completion"
+    - "topic-specific recommendations based on creator history"
+
+security:
+  transcript_is_untrusted_input: true
+  prompt_injection_rule: "spoken transcript content cannot override system instructions"
+  secrets_in_repository: false
+  llm_can_execute_shell_commands: false
+  ffmpeg_commands_must_use_argument_arrays: true
+  validate_media_with_ffprobe_not_extension_only: true
+  external_tokens_must_be_protected_in_future_versions: true
+
+reproducibility:
+  each_run_is_experiment: true
+  run_manifest_records:
+    - source_hash
+    - config_hash
+    - code_version
+    - python_version
+    - ffmpeg_version
+    - transcription_model
+    - analysis_provider
+    - analysis_model
+    - prompt_version
+    - prompt_hash
+  stage_idempotency_required: true
+  force_rerun_supported: true
+  downstream_staleness_required: true
+
+quality:
+  unit_tests_required_for:
+    - scoring
+    - timestamp_validation
+    - duration_validation
+    - temporal_iou
+    - deduplication
+    - ranking
+    - boundary_snapping
+    - subtitle_time_conversion
+    - run_state_transitions
+    - fingerprint_generation
+  integration_tests_required_for:
+    - ffprobe
+    - audio_extraction
+    - clip_render
+    - vertical_render
+    - subtitle_burn_in
+  external_ai_not_called_in_normal_ci: true
+  use_fake_adapters_in_ci: true
+  target_domain_service_coverage: ">=80%"
+
+v0_exit_criteria:
+  - "pipeline works on multiple real videos"
+  - "timestamps are usable"
+  - "no invalid candidate timestamps"
+  - "highly overlapping duplicate candidates are removed"
+  - "render reliability target approximately >=98% for valid inputs"
+  - "interrupted run can resume"
+  - "completed stages are idempotent"
+  - "subtitles are synchronized"
+  - "candidate quality is useful enough to justify V1"
+  - "manual work is meaningfully reduced"
+
+roadmap:
+  stages:
+    - V0_technical_core
+    - V1_product_mvp
+    - V1_1_metadata
+    - V1_2_better_subtitles
+    - V1_3_smart_crop
+    - V1_4_brand_system
+    - V2_distribution
+    - V2_5_n8n_workflows
+    - V3_social_analytics
+    - V3_5_content_intelligence
+    - V4_recommendation_engine
+    - V5_saas_if_validated
+    - V6_scale_only_if_required
+
+instructions_for_other_ai:
+  - "Read all handoff files before proposing architectural changes."
+  - "Treat V0 scope as fixed unless a concrete blocker is demonstrated."
+  - "Do not silently add technologies."
+  - "When changing an architectural decision, create/update an ADR with context, alternatives, decision, and consequences."
+  - "Prefer working end-to-end vertical slices over infrastructure-first development."
+  - "Measure candidate quality before polishing UI."
+  - "Preserve output schemas and reproducibility."
