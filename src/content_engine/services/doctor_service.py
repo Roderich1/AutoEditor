@@ -6,9 +6,13 @@ import platform
 import sys
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
-from content_engine.config import Settings
+from content_engine.config import Settings, config_sources
+from content_engine.domain.exceptions import ContentEngineError
 from content_engine.utils.subprocess import run_command
+
+ANALYSIS_MODEL_PLACEHOLDER = "SET_MODEL_HERE"
 
 
 @dataclass(frozen=True)
@@ -20,8 +24,15 @@ class Check:
 
 
 class DoctorService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        config_path: Path | None = None,
+        require_ai: bool = False,
+    ) -> None:
         self.settings = settings
+        self.config_path = config_path
+        self.require_ai = require_ai
 
     def run(self) -> list[Check]:
         return [
@@ -31,19 +42,9 @@ class DoctorService:
             self._ass_check(),
             self._workspace_check(),
             self._module_check("faster-whisper", "faster_whisper"),
-            Check("Configuration", True, "valid"),
-            Check(
-                "OpenAI credentials",
-                bool(os.getenv("OPENAI_API_KEY")),
-                "configured" if os.getenv("OPENAI_API_KEY") else "OPENAI_API_KEY is missing",
-                required=False,
-            ),
-            Check(
-                "Analysis model",
-                self.settings.analysis.model != "SET_MODEL_HERE",
-                self.settings.analysis.model,
-                required=False,
-            ),
+            self._configuration_check(),
+            self._credentials_check(),
+            self._analysis_model_check(),
         ]
 
     @staticmethod
@@ -54,29 +55,52 @@ class DoctorService:
     @staticmethod
     def _command_check(name: str, executable: str, argument: str) -> Check:
         try:
-            line = run_command([executable, argument]).stdout.splitlines()[0]
-            return Check(name, True, line)
-        except Exception as error:
+            lines = run_command([executable, argument]).stdout.splitlines()
+        except ContentEngineError as error:
             return Check(name, False, str(error))
+        return Check(name, True, lines[0] if lines else "no version reported")
 
     @staticmethod
     def _ass_check() -> Check:
         try:
             output = run_command(["ffmpeg", "-hide_banner", "-filters"]).stdout
-            ok = any(line.split()[1:2] == ["ass"] for line in output.splitlines())
-            return Check("ASS subtitles", ok, "filter available" if ok else "filter unavailable")
-        except Exception as error:
+        except ContentEngineError as error:
             return Check("ASS subtitles", False, str(error))
+        ok = any(line.split()[1:2] == ["ass"] for line in output.splitlines())
+        return Check("ASS subtitles", ok, "filter available" if ok else "filter unavailable")
 
     def _workspace_check(self) -> Check:
-        root = self.settings.workspace.root
+        runs_root = self.settings.workspace.root.joinpath("runs")
         try:
-            root.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=root, delete=True):
+            runs_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=runs_root, delete=True):
                 pass
-            return Check("Workspace", True, str(root))
         except OSError as error:
-            return Check("Workspace", False, str(error))
+            return Check("Workspace", False, f"{runs_root}: {error}")
+        return Check("Workspace", True, str(self.settings.workspace.root))
+
+    def _configuration_check(self) -> Check:
+        """The settings parsed, so report where they came from rather than a tautology."""
+        return Check("Configuration", True, " + ".join(config_sources(self.config_path)))
+
+    def _credentials_check(self) -> Check:
+        present = bool(os.getenv("OPENAI_API_KEY"))
+        return Check(
+            "OpenAI credentials",
+            present,
+            "configured" if present else "OPENAI_API_KEY is missing",
+            required=self.require_ai,
+        )
+
+    def _analysis_model_check(self) -> Check:
+        model = self.settings.analysis.model
+        configured = model != ANALYSIS_MODEL_PLACEHOLDER
+        return Check(
+            "Analysis model",
+            configured,
+            model if configured else f"{model} (placeholder)",
+            required=self.require_ai,
+        )
 
     @staticmethod
     def _module_check(name: str, module: str) -> Check:

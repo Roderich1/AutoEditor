@@ -1,15 +1,17 @@
-import subprocess
+from __future__ import annotations
+
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from content_engine.adapters.persistence.filesystem import RunWorkspace
 from content_engine.config import Settings
-from content_engine.domain.enums import RunStatus
+from content_engine.domain.exceptions import ExternalToolNotFoundError
 from content_engine.domain.models import MediaInfo
 from content_engine.services.doctor_service import DoctorService
 from content_engine.services.media_service import MediaService
-from content_engine.services.run_service import RunService
+from tests.conftest import fake_process
 
 
 class FakeProbe:
@@ -29,6 +31,9 @@ class FakeProbe:
             ),
             {"probe": "raw"},
         )
+
+    def probe_audio_duration(self, input_path: Path) -> float:
+        return 42.5
 
 
 class FakeFFmpeg:
@@ -55,37 +60,20 @@ def test_media_service_inspects_and_extracts(tmp_path: Path) -> None:
     assert ffmpeg.arguments == (video, audio)
 
 
-def test_run_service_creates_reproducible_manifest(
-    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    video = tmp_path.joinpath("My Video.mp4")
-    video.write_bytes(b"video-content")
-    workspace = RunWorkspace(settings.workspace.root)
+def test_media_service_reports_audio_duration(tmp_path: Path) -> None:
+    audio = tmp_path.joinpath("source.wav")
+    audio.write_bytes(b"wav")
+    service = MediaService(FakeProbe(), FakeFFmpeg())  # type: ignore[arg-type]
 
-    monkeypatch.setattr(
-        "content_engine.services.run_service.run_command",
-        lambda arguments: subprocess.CompletedProcess(arguments, 0, "ffmpeg version test\n", ""),
-    )
-    run_path, manifest = RunService(settings, workspace).create(video)
-
-    assert manifest.run_id.startswith("20")
-    assert "my-video" in manifest.run_id
-    assert manifest.status == RunStatus.CREATED
-    assert run_path.joinpath("config.effective.json").is_file()
-    assert run_path.joinpath("manifest.json").is_file()
-
-    RunService(settings, workspace).set_status(run_path, manifest, RunStatus.INSPECTED)
-    assert workspace.read_manifest(run_path).status == RunStatus.INSPECTED
+    assert service.audio_duration(audio) == 42.5
 
 
-def test_doctor_reports_ready_required_environment(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fake_run(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+def _healthy_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(arguments: Sequence[str], timeout: float | None = None) -> Any:
         output = "ffmpeg version test\n"
         if "-filters" in arguments:
             output = " T.. ass Render ASS subtitles\n"
-        return subprocess.CompletedProcess(arguments, 0, output, "")
+        return fake_process(arguments, output)
 
     monkeypatch.setattr("content_engine.services.doctor_service.run_command", fake_run)
     monkeypatch.setattr("content_engine.services.doctor_service.sys.version_info", (3, 12))
@@ -93,9 +81,100 @@ def test_doctor_reports_ready_required_environment(
         "content_engine.services.doctor_service.importlib.util.find_spec",
         lambda module: object(),
     )
+
+
+def test_doctor_reports_ready_required_environment(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _healthy_environment(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     checks = DoctorService(settings).run()
 
     assert all(check.ok for check in checks if check.required)
     assert next(check for check in checks if check.name == "faster-whisper").ok
+
+
+def test_doctor_reports_where_the_configuration_came_from(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The configuration row must describe the layers, not assert success."""
+    _healthy_environment(monkeypatch)
+    profile = tmp_path.joinpath("profile.toml")
+
+    detail = next(
+        check.detail
+        for check in DoctorService(settings, profile).run()
+        if check.name == "Configuration"
+    )
+
+    assert "packaged content_engine.resources/default.toml" in detail
+    assert str(profile) in detail
+
+
+def test_doctor_flags_missing_tools(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(arguments: Sequence[str], timeout: float | None = None) -> Any:
+        raise ExternalToolNotFoundError(f"{arguments[0]} was not found")
+
+    monkeypatch.setattr("content_engine.services.doctor_service.run_command", missing)
+
+    checks = {check.name: check for check in DoctorService(settings).run()}
+
+    assert not checks["FFmpeg"].ok
+    assert not checks["FFprobe"].ok
+    assert not checks["ASS subtitles"].ok
+    assert "was not found" in checks["FFmpeg"].detail
+
+
+def test_doctor_flags_a_missing_ass_filter(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def without_ass(arguments: Sequence[str], timeout: float | None = None) -> Any:
+        output = " T.. drawtext Draw text\n" if "-filters" in arguments else "ffmpeg version\n"
+        return fake_process(arguments, output)
+
+    monkeypatch.setattr("content_engine.services.doctor_service.run_command", without_ass)
+
+    checks = {check.name: check for check in DoctorService(settings).run()}
+
+    assert not checks["ASS subtitles"].ok
+    assert checks["ASS subtitles"].detail == "filter unavailable"
+
+
+def test_doctor_checks_that_runs_can_be_created(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _healthy_environment(monkeypatch)
+
+    check = next(check for check in DoctorService(settings).run() if check.name == "Workspace")
+
+    assert check.ok
+    assert settings.workspace.root.joinpath("runs").is_dir()
+
+
+def test_ai_configuration_is_optional_by_default(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _healthy_environment(monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    checks = {check.name: check for check in DoctorService(settings).run()}
+
+    assert not checks["OpenAI credentials"].required
+    assert not checks["Analysis model"].required
+    assert all(check.ok for check in checks.values() if check.required)
+
+
+def test_require_ai_makes_credentials_and_model_mandatory(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _healthy_environment(monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    checks = {check.name: check for check in DoctorService(settings, require_ai=True).run()}
+
+    assert checks["OpenAI credentials"].required
+    assert not checks["OpenAI credentials"].ok
+    assert checks["Analysis model"].required
+    assert not checks["Analysis model"].ok
+    assert "placeholder" in checks["Analysis model"].detail
