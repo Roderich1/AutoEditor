@@ -1,0 +1,7 @@
+[transcription]
+model = "large-v3"
+device = "auto"
+compute_type = "auto"
+beam_size = 5
+word_timestamps = true
+vad_filter = true

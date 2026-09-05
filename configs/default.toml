@@ -1,0 +1,44 @@
+[workspace]
+root = "workspace"
+
+[transcription]
+provider = "faster-whisper"
+model = "large-v3"
+device = "auto"
+compute_type = "auto"
+beam_size = 5
+word_timestamps = true
+vad_filter = true
+
+[analysis]
+provider = "openai"
+model = "SET_MODEL_HERE"
+prompt_version = "v1"
+
+[analysis.chunking]
+window_seconds = 360
+overlap_seconds = 30
+
+[analysis.candidates]
+min_duration_seconds = 20
+max_duration_seconds = 90
+min_score = 65
+target_candidates = 10
+max_candidates = 15
+dedupe_iou = 0.60
+
+[preview]
+enabled = true
+width = 540
+height = 960
+
+[render]
+width = 1080
+height = 1920
+preset = "vertical_blur"
+video_codec = "libx264"
+encoder_preset = "medium"
+crf = 20
+audio_codec = "aac"
+audio_bitrate = "192k"
+burn_subtitles = true
