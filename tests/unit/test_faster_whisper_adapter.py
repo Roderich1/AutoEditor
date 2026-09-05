@@ -120,3 +120,47 @@ def test_a_missing_package_is_reported_as_a_transcription_error(
             _options(),
             ResolvedHardware(device="cpu", compute_type="int8"),
         )
+
+
+class _Word:
+    def __init__(self, word: str, start: float | None, end: float | None) -> None:
+        self.word = word
+        self.start = start
+        self.end = end
+        self.probability = 0.8
+
+
+class _Segment:
+    def __init__(self, start: float, end: float, text: str, words: list[_Word] | None) -> None:
+        self.start = start
+        self.end = end
+        self.text = text
+        self.words = words
+
+
+def test_provider_segments_are_translated_verbatim() -> None:
+    """Translation only. Correcting timestamps is the domain's job, not the adapter's."""
+    segment = _Segment(1.0, 2.0, "  hola  mundo ", [_Word("hola", 1.0, 1.5)])
+
+    converted = FasterWhisperTranscriber._convert_segment(segment)
+
+    assert converted.start == 1.0
+    assert converted.end == 2.0
+    assert converted.text == "  hola  mundo "
+    assert converted.words[0].word == "hola"
+    assert converted.words[0].probability == 0.8
+
+
+def test_words_without_timestamps_are_dropped() -> None:
+    words = [_Word("bueno", 1.0, 1.5), _Word("sin-tiempo", None, None)]
+    segment = _Segment(1.0, 2.0, "bueno", words)
+
+    converted = FasterWhisperTranscriber._convert_segment(segment)
+
+    assert [word.word for word in converted.words] == ["bueno"]
+
+
+def test_a_segment_without_words_is_allowed() -> None:
+    converted = FasterWhisperTranscriber._convert_segment(_Segment(0.0, 1.0, "texto", None))
+
+    assert converted.words == ()

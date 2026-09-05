@@ -52,7 +52,7 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=content_engine --cov-report=term-missing"
+addopts = "--cov=content_engine --cov-report=term-missing --cov-fail-under=80"
 markers = [
     "integration: exercises real FFmpeg or ffprobe; skipped with a reason when absent",
     "slow: downloads or runs a real transcription model",

@@ -40,3 +40,12 @@ def test_reading_a_manifest_that_does_not_exist(tmp_path: Path) -> None:
 
     with pytest.raises(CorruptArtifactError, match="has no manifest"):
         workspace.read_manifest(run_path)
+
+
+def test_a_manifest_that_is_not_an_object_is_rejected(tmp_path: Path) -> None:
+    workspace = RunWorkspace(tmp_path)
+    run_path = workspace.create("valid-run")
+    run_path.joinpath("manifest.json").write_text("[1, 2, 3]", encoding="utf-8")
+
+    with pytest.raises(CorruptArtifactError, match="does not contain a manifest object"):
+        workspace.read_manifest(run_path)

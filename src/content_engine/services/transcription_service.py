@@ -9,7 +9,6 @@ from pathlib import Path
 from content_engine.config import TranscriptionSettings
 from content_engine.domain.models import (
     METRICS_SCHEMA_VERSION,
-    TRANSCRIPT_SCHEMA_VERSION,
     ResolvedHardware,
     Transcript,
     TranscriptionMetrics,
@@ -125,7 +124,3 @@ class TranscriptionService:
         write_text(output_directory.joinpath("transcript.txt"), build_plain_text(transcript))
         write_text(output_directory.joinpath("transcript.srt"), build_srt(transcript))
         return TranscriptionOutcome(transcript=transcript, metrics=metrics)
-
-    @staticmethod
-    def schema_version() -> int:
-        return TRANSCRIPT_SCHEMA_VERSION

@@ -178,3 +178,37 @@ def test_require_ai_makes_credentials_and_model_mandatory(
     assert checks["Analysis model"].required
     assert not checks["Analysis model"].ok
     assert "placeholder" in checks["Analysis model"].detail
+
+
+def test_workspace_check_reports_a_permission_problem(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+
+    check = next(check for check in DoctorService(settings).run() if check.name == "Workspace")
+
+    assert not check.ok
+    assert "read-only file system" in check.detail
+
+
+def test_ffmpeg_version_degrades_gracefully(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing FFmpeg must not stop a run from being created."""
+    from content_engine.adapters.persistence.filesystem import RunWorkspace
+    from content_engine.domain.exceptions import ExternalToolNotFoundError as NotFound
+    from content_engine.services.run_service import RunService
+
+    def missing(arguments: Sequence[str], **kwargs: Any) -> Any:
+        raise NotFound("ffmpeg was not found")
+
+    monkeypatch.setattr("content_engine.services.run_service.run_command", missing)
+    video = tmp_path.joinpath("v.mp4")
+    video.write_bytes(b"video")
+
+    _, manifest = RunService(settings, RunWorkspace(settings.workspace.root)).create(video)
+
+    assert manifest.versions.ffmpeg == "unavailable"

@@ -180,3 +180,22 @@ def test_probe_audio_duration_returns_seconds(
     _stub(monkeypatch, _probe_payload(duration="3.25"))
 
     assert FFprobeAdapter().probe_audio_duration(media_file) == 3.25
+
+
+def test_incomplete_stream_metadata_is_rejected(
+    media_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = _probe_payload()
+    del payload["streams"][0]["width"]
+    _stub(monkeypatch, payload)
+
+    with pytest.raises(InvalidMediaError, match="Incomplete media metadata"):
+        FFprobeAdapter().probe(media_file)
+
+
+def test_an_unparseable_frame_rate_degrades_to_zero(
+    media_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub(monkeypatch, _probe_payload(avg_frame_rate="not-a-fraction", r_frame_rate=""))
+
+    assert FFprobeAdapter().probe(media_file)[0].fps == 0.0
