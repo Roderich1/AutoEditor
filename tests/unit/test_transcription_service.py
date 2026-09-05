@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
-from content_engine.config import TranscriptionSettings
+from content_engine.config import Settings, TranscriptionSettings
 from content_engine.domain.models import Transcript, TranscriptSegment, TranscriptWord
 from content_engine.services.transcription_service import TranscriptionService
 
@@ -29,7 +29,7 @@ class FakeTranscriber:
         )
 
 
-def test_transcription_exports_all_formats(tmp_path: Path) -> None:
+def test_transcription_exports_all_formats(tmp_path: Path, settings: Settings) -> None:
     audio = tmp_path.joinpath("source.wav")
     audio.write_bytes(b"wav")
     output = tmp_path.joinpath("transcript")
@@ -37,7 +37,7 @@ def test_transcription_exports_all_formats(tmp_path: Path) -> None:
     TranscriptionService(FakeTranscriber()).transcribe(
         audio,
         output,
-        TranscriptionSettings(model="fake"),
+        settings.transcription,
     )
 
     assert output.joinpath("transcript.json").is_file()

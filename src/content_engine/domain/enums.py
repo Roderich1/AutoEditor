@@ -16,3 +16,42 @@ class RunStatus(StrEnum):
     FAILED_TRANSCRIPTION = "FAILED_TRANSCRIPTION"
     FAILED_ANALYSIS = "FAILED_ANALYSIS"
     FAILED_RENDER = "FAILED_RENDER"
+
+
+class RunStage(StrEnum):
+    """Pipeline stage a run can be executing or can have failed in."""
+
+    INSPECT = "inspect"
+    AUDIO = "audio"
+    TRANSCRIPTION = "transcription"
+    ANALYSIS = "analysis"
+    RENDER = "render"
+
+
+class TranscriptionProvider(StrEnum):
+    FASTER_WHISPER = "faster-whisper"
+
+
+class Device(StrEnum):
+    AUTO = "auto"
+    CPU = "cpu"
+    CUDA = "cuda"
+
+
+class ComputeType(StrEnum):
+    AUTO = "auto"
+    INT8 = "int8"
+    INT8_FLOAT16 = "int8_float16"
+    INT8_BFLOAT16 = "int8_bfloat16"
+    FLOAT16 = "float16"
+    BFLOAT16 = "bfloat16"
+    FLOAT32 = "float32"
+
+
+class AnalysisProvider(StrEnum):
+    OPENAI = "openai"
+
+
+class RenderPreset(StrEnum):
+    VERTICAL_BLUR = "vertical_blur"
+    VERTICAL_CROP = "vertical_crop"

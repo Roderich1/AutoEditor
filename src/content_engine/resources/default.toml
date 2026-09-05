@@ -1,3 +1,12 @@
+# Canonical Content Engine defaults.
+#
+# This file is the single source of truth for default values. The Pydantic models
+# in content_engine.config declare types and invariants only; they intentionally
+# carry no default values, so a key removed here fails loudly instead of silently
+# falling back to a second copy of the same value.
+#
+# Profiles under configs/ are overlays merged on top of this file.
+
 [workspace]
 root = "workspace"
 
@@ -26,6 +35,7 @@ min_score = 65
 target_candidates = 10
 max_candidates = 15
 dedupe_iou = 0.60
+boundary_snap_seconds = 2.5
 
 [preview]
 enabled = true

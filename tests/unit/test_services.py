@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from content_engine.adapters.persistence.filesystem import RunWorkspace
-from content_engine.config import Settings, WorkspaceSettings
+from content_engine.config import Settings
 from content_engine.domain.enums import RunStatus
 from content_engine.domain.models import MediaInfo
 from content_engine.services.doctor_service import DoctorService
@@ -56,11 +56,10 @@ def test_media_service_inspects_and_extracts(tmp_path: Path) -> None:
 
 
 def test_run_service_creates_reproducible_manifest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     video = tmp_path.joinpath("My Video.mp4")
     video.write_bytes(b"video-content")
-    settings = Settings(workspace=WorkspaceSettings(root=tmp_path.joinpath("workspace")))
     workspace = RunWorkspace(settings.workspace.root)
 
     monkeypatch.setattr(
@@ -80,10 +79,8 @@ def test_run_service_creates_reproducible_manifest(
 
 
 def test_doctor_reports_ready_required_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    settings = Settings(workspace=WorkspaceSettings(root=tmp_path))
-
     def fake_run(arguments: list[str]) -> subprocess.CompletedProcess[str]:
         output = "ffmpeg version test\n"
         if "-filters" in arguments:
