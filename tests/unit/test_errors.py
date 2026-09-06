@@ -36,6 +36,7 @@ from content_engine.domain.exceptions import (
     RenderError,
     RunNotFoundError,
     TranscriptionError,
+    TranscriptionProviderError,
     UnsupportedSchemaVersionError,
 )
 from tests.conftest import fake_process
@@ -58,6 +59,7 @@ runner = CliRunner()
         (UnsupportedSchemaVersionError("x"), EXIT_INVALID_INPUT),
         (IncompatibleArtifactError("x"), EXIT_INVALID_INPUT),
         (TranscriptionError("x"), EXIT_TRANSCRIPTION),
+        (TranscriptionProviderError("x"), EXIT_TRANSCRIPTION),
         (AnalysisError("x"), EXIT_ANALYSIS),
         (ExternalProviderError("x"), EXIT_ANALYSIS),
         (InvalidCandidateError("x"), EXIT_ANALYSIS),
@@ -199,3 +201,10 @@ def test_a_failed_inspection_keeps_the_run_and_records_the_stage(
     assert manifest["failure"]["stage"] == RunStage.INSPECT.value
     assert manifest["failure"]["error_type"] == "NoAudioStreamError"
     assert "no audio stream" in manifest["failure"]["message"]
+
+
+def test_a_transcription_provider_failure_is_not_an_analysis_failure() -> None:
+    """The shell must not be told an analysis stage failed that never ran."""
+    assert issubclass(TranscriptionProviderError, TranscriptionError)
+    assert not issubclass(TranscriptionProviderError, ExternalProviderError)
+    assert TranscriptionProviderError("x").exit_code == EXIT_TRANSCRIPTION

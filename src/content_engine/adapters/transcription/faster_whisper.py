@@ -2,7 +2,7 @@ import importlib
 from pathlib import Path
 from typing import Any
 
-from content_engine.domain.exceptions import ExternalProviderError, TranscriptionError
+from content_engine.domain.exceptions import TranscriptionError, TranscriptionProviderError
 from content_engine.domain.models import (
     RawSegment,
     RawTranscription,
@@ -64,7 +64,7 @@ class FasterWhisperTranscriber:
             )
             segments = tuple(self._convert_segment(segment) for segment in raw_segments)
         except (OSError, RuntimeError, ValueError) as error:
-            raise ExternalProviderError(
+            raise TranscriptionProviderError(
                 f"faster-whisper failed on {hardware.device}/{hardware.compute_type}: {error}"
             ) from error
 

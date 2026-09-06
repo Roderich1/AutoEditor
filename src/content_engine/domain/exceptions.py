@@ -89,6 +89,18 @@ class TranscriptionError(ContentEngineError):
     title = "Transcription failed"
 
 
+class TranscriptionProviderError(TranscriptionError):
+    """The speech-to-text provider itself failed.
+
+    It is still a transcription failure, so it carries the transcription exit
+    code. ExternalProviderError belongs to the analysis provider and must not be
+    used here: the shell would then be told an analysis stage failed that never
+    ran.
+    """
+
+    title = "Transcription provider failed"
+
+
 class AnalysisError(ContentEngineError):
     exit_code = EXIT_ANALYSIS
     title = "Analysis failed"
