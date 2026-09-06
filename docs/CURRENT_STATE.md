@@ -46,7 +46,7 @@ Python 3.12.10, FFmpeg 9.0.1:
 | `analyze --fixture` without a credential, from the wheel | exit 0, recorded as `fixture` with prompt `fake-fixture/v1`, never as Gemini |
 | Fixture artifacts offered to the provider, and the reverse | exit 3 both ways, nothing written; no special case, the stage configuration digest decides |
 | Credential or credential name anywhere under a run directory | none; searched recursively as bytes |
-| Provider reuse with the credential removed, from the wheel | exit 0, reuse reported, no client built, the variable never read, all four artifacts and the manifest byte-identical |
+| Provider reuse with the credential removed | exit 0, reuse reported, no client built, the variable never read, all four artifacts and the manifest byte-identical. Asserted in the unit suite against a stand-in analyzer, **not** from the wheel: producing the provider artifacts to reuse would itself need a real call |
 | An unknown `analysis.prompt_version`, from the wheel | exit 2 before the run is touched, in both fixture and provider mode, with no silent reuse of the artifacts the known prompt produced |
 | Wheel in a clean venv, arbitrary working directory with spaces and non-ASCII characters | `doctor`, `inspect`, `run`, `transcribe` all work |
 | Real faster-whisper transcription | passed, model `small` on cpu/int8, 34 s of Spanish technical speech |
