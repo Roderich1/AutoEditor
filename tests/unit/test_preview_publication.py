@@ -51,6 +51,7 @@ from content_engine.services.preview_service import (
     STAGING_DIRNAME,
     PreviewPlan,
     PreviewService,
+    resolve_pending_rollback,
     verify_previews,
 )
 from tests.conftest import chunk_of, collect, raw_candidate, speech_transcript
@@ -538,7 +539,16 @@ class TestFailuresDuringRestoration:
         published: tuple[Path, PreviewPlan, str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The next invocation resolves the pending rollback before generating."""
+        """The next invocation resolves the pending backup before generating.
+
+        This deliberately does **not** assert through `generate`. A second
+        `generate` that publishes a fresh set successfully leaves a complete,
+        verifiable directory whether or not the previous set was recovered, so
+        it cannot tell recovery from replacement. `TestResumingAPartialRestore`
+        calls `resolve_pending_rollback` on its own for exactly that reason;
+        what is checked here is only that a pending backup does not block the
+        next run.
+        """
         directory, plan, fingerprint, digest = published
         before = snapshot(directory)
 
@@ -548,14 +558,12 @@ class TestFailuresDuringRestoration:
         with pytest.raises((RenderError, OSError)):
             engine.generate(plan, directory, LATER)
 
-        # The interesting assertion is this one. Without it the test passes over
-        # the defect: a run that destroyed the backup simply republishes a fresh
-        # set on the next attempt and looks like it recovered.
         assert directory.joinpath(ROLLBACK_DIRNAME).is_dir(), "the backup was deleted"
         assert recoverable(directory) | before == recoverable(directory)
 
         monkeypatch.undo()
-        outcome = service("third").generate(plan, directory, LATER)
+        engine = service("third")
+        outcome = engine.generate(plan, directory, LATER)
         assert not directory.joinpath(ROLLBACK_DIRNAME).exists()
         assert verify_previews(
             directory, outcome.fingerprint, outcome.stage_config_sha256, plan
@@ -852,3 +860,180 @@ def read_index_from(directory: Path) -> Any:
 
     payload = json.loads(directory.joinpath(PREVIEW_INDEX_FILENAME).read_text(encoding="utf-8"))
     return PreviewIndex.model_validate(payload)
+
+
+class TestResumingAPartialRestore:
+    """A restore that stopped half-way is finished, not started again.
+
+    This is the defect the phase protocol was missing. `PHASE_PLACING` means
+    "the previews directory holds files from the failed publication", and its
+    undo deletes them before moving the previous set back. That is correct the
+    first time and catastrophic the second: once some of the previous set has
+    been moved back, the directory no longer holds only new files, and re-running
+    the same branch deletes the very files that were just recovered. The backup
+    is then emptied of them too, because they had already left it.
+
+    So the journal has to record that the deletion half is over.
+    `PHASE_RESTORING` is that record: it is written after the last deletion and
+    before the first move back, and its undo never deletes anything.
+
+    Every test here resolves the backup by calling `resolve_pending_rollback`
+    directly. Going through `generate` would publish a fresh set, and a fresh
+    set is complete and verifiable whether or not anything was recovered -- it
+    hides exactly the loss under test.
+    """
+
+    #: Five files are published: three previews plus the two artifacts. The
+    #: restore therefore has five moves, and these are the second, a middle one
+    #: and the last.
+    POSITIONS = (2, 3, 5)
+
+    def strand_mid_restore(
+        self,
+        directory: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        plan: PreviewPlan,
+        nth_restore: int,
+    ) -> None:
+        """Fail the publication, then fail the restore at `nth_restore`."""
+        monkeypatch.setattr(preview_service, "write_json", fail_on_write(PREVIEW_INDEX_FILENAME))
+        monkeypatch.setattr(Path, "replace", fail_on_restore(nth_restore, persistent=True))
+        engine = service("second")
+        with pytest.raises(RenderError):
+            engine.generate(plan, directory, LATER)
+        monkeypatch.undo()
+
+    @pytest.mark.parametrize("nth", POSITIONS)
+    @pytest.mark.parametrize("shortlist", ["same", "grown", "shrunk"])
+    def test_resolving_restores_the_previous_set_exactly(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+        source: Path,
+        nth: int,
+        shortlist: str,
+    ) -> None:
+        directory, plan, fingerprint, digest = published
+        before = snapshot(directory)
+        assert len(before) == 5, before.keys()
+
+        failing = {
+            "same": plan,
+            "grown": plan_for(source, four_candidates()),
+            "shrunk": shorter(plan),
+        }[shortlist]
+        self.strand_mid_restore(directory, monkeypatch, failing, nth)
+
+        # Step 4 of the report: at this moment nothing has been lost yet.
+        assert recoverable(directory) | before == recoverable(directory)
+
+        resolve_pending_rollback(directory)
+
+        assert snapshot(directory) == before, (
+            "resolving a half-finished restore must put the previous set back "
+            "byte for byte, not delete what had already been recovered"
+        )
+        assert not directory.joinpath(ROLLBACK_DIRNAME).exists()
+        assert verify_previews(directory, fingerprint, digest, plan).previews
+
+    @pytest.mark.parametrize("nth", POSITIONS)
+    def test_the_backup_is_kept_until_the_last_file_is_back(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+        nth: int,
+    ) -> None:
+        """A resolution that fails again still leaves everything reachable."""
+        directory, plan, fingerprint, digest = published
+        before = snapshot(directory)
+        self.strand_mid_restore(directory, monkeypatch, plan, nth)
+
+        monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
+        with pytest.raises(RenderError):
+            resolve_pending_rollback(directory)
+        monkeypatch.undo()
+
+        assert directory.joinpath(ROLLBACK_DIRNAME).is_dir()
+        assert recoverable(directory) | before == recoverable(directory)
+
+        resolve_pending_rollback(directory)
+        assert snapshot(directory) == before
+        assert verify_previews(directory, fingerprint, digest, plan).previews
+
+    def test_several_failures_at_different_positions_still_recover(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Four invocations, each stopping somewhere different, then success.
+
+        The counter restarts every time because each invocation installs its own
+        injector, so "fail on the second move" means the second move *of what is
+        left*. Between attempts the previous set must stay wholly reachable, and
+        at the end it must be back exactly.
+        """
+        directory, plan, fingerprint, digest = published
+        before = snapshot(directory)
+        self.strand_mid_restore(directory, monkeypatch, plan, 2)
+
+        for position in (2, 1, 2):
+            monkeypatch.setattr(Path, "replace", fail_on_restore(position, persistent=True))
+            with pytest.raises(RenderError):
+                resolve_pending_rollback(directory)
+            monkeypatch.undo()
+            assert directory.joinpath(ROLLBACK_DIRNAME).is_dir()
+            assert recoverable(directory) | before == recoverable(directory)
+
+        resolve_pending_rollback(directory)
+        assert snapshot(directory) == before
+        assert not directory.joinpath(ROLLBACK_DIRNAME).exists()
+        assert verify_previews(directory, fingerprint, digest, plan).previews
+
+    @pytest.mark.parametrize("nth", POSITIONS)
+    def test_the_journal_records_that_deleting_is_over(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+        nth: int,
+    ) -> None:
+        """The phase must move off `placing` before the first file goes back.
+
+        Without this the resumed undo cannot tell "the directory holds new
+        files" from "the directory holds files I already recovered", and it
+        deletes the second as though it were the first.
+        """
+        directory, plan, _, _ = published
+        self.strand_mid_restore(directory, monkeypatch, plan, nth)
+
+        journal = json.loads(
+            directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL).read_text(encoding="utf-8")
+        )
+        assert journal["phase"] == "restoring"
+
+    def test_a_resumed_restore_deletes_nothing_from_the_previews_directory(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Asserted directly: no unlink of a published file during a resume."""
+        directory, plan, fingerprint, digest = published
+        before = snapshot(directory)
+        self.strand_mid_restore(directory, monkeypatch, plan, 3)
+        recovered = sorted(path.name for path in directory.iterdir() if path.is_file())
+        assert recovered, "two files should already be back"
+
+        unlinked: list[str] = []
+        real_unlink = Path.unlink
+
+        def watched(self: Path, missing_ok: bool = False) -> None:
+            if ROLLBACK_DIRNAME not in str(self):
+                unlinked.append(self.name)
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", watched)
+        resolve_pending_rollback(directory)
+        monkeypatch.undo()
+
+        assert unlinked == [], f"a resumed restore deleted {unlinked}"
+        assert snapshot(directory) == before
+        assert verify_previews(directory, fingerprint, digest, plan).previews
