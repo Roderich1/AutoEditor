@@ -81,9 +81,13 @@ exit 2 before the run is touched, in both fixture and provider mode.
 
 ## What is still unmeasured
 
-The deterministic half is verified against hand-written proposals, and the
-adapter is verified against doubles. Neither is a measurement of candidate
-quality: that requires real model output over real videos, and the evaluation
-the specification asks for needs at least five representative sources. A single
-video can demonstrate that the integration works and give a first signal. It
-cannot show that the engine picks good clips.
+The integration has now been exercised for real: seven live Gemini calls over a
+35-minute video, 23 proposals, 15 selected, reuse proved with the credential
+removed. See `docs/CURRENT_STATE.md` for the numbers.
+
+That is one video. Eight of eleven intervals written down beforehand overlap a
+selected candidate, but only two reach the IoU 0.50 the specification names, and
+the intervals were chosen from a transcript by someone who had not watched the
+video. The evaluation the specification asks for needs at least five
+representative sources. A single video demonstrates that the integration works
+and gives a first signal; it cannot show that the engine picks good clips.

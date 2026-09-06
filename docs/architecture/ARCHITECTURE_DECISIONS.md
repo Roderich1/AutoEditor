@@ -1181,17 +1181,22 @@ claim is not evidence of a mismatch.
 - Retry counts and backoff are module constants, not configuration. They change
   how long a failure takes, never what the artifacts contain, so they are
   deliberately outside the stage configuration and the fingerprint.
-- **`model` is the identifier that was requested, not the backend revision that
-  answered.** The response carries `modelVersion`, documented only as "the model
-  version used to generate the response"; the published reference does not say
-  whether it returns the alias (`gemini-3.5-flash-lite`) or a dated build
-  (`gemini-3.5-flash-lite-001`), and no call has been made from this repository
-  to observe which. The adapter therefore accepts a reported value that is the
-  requested model or the requested model followed by `-`, refuses anything else,
-  and records the requested identifier in every artifact.
+- **`model` is the identifier that was requested, and — as observed — also the
+  one reported back.** The response carries `modelVersion`, documented only as
+  "the model version used to generate the response", and the published reference
+  does not say whether it returns the alias or a dated build. It has now been
+  measured rather than guessed: across eight real calls on 2026-09-06,
+  `modelVersion` came back as **`gemini-3.5-flash-lite`** every time — the alias
+  that was requested, with no revision suffix. The adapter accepts the requested
+  model or the requested model followed by `-`, refuses anything else, and
+  records the requested identifier in every artifact.
 
-  No schema was widened to hold a resolved model, because widening one requires
-  knowing what a real response contains, and this branch does not. The reported
+  So on this evidence a separate `model_resolved` field would hold a copy of
+  `model` and nothing more, and none was added. This is one provider on one day;
+  should a future run report a suffixed build, the field becomes justified and
+  `reported_models` is where that will first show up.
+
+  No schema was widened to hold a resolved model. The reported
   values are collected on the analyzer as `reported_models` and surfaced in
   exactly one place: the diagnostics printed by the opt-in live test in
   `tests/ai/`. They do **not** reach `analyze`'s output, the manifest or any

@@ -386,46 +386,85 @@ and schema version. `manifest.stages["analysis"]` records the fingerprint, the
 digest of that file, the schema version and the completion time, exactly as the
 transcription stage does.
 
-## The real video, and where it stopped
+## The real video: the first real Gemini run
 
-A 35-minute Spanish Linux tutorial held locally under `samples-local/`
-(ignored by Git, never committed, never sent anywhere) was taken as far as this
-machine can take it.
+A 35-minute Spanish Linux tutorial held locally under `samples-local/` (ignored
+by Git, never committed, never sent anywhere — Gemini receives transcript
+chunks, never media).
 
 | Step | Result |
 |---|---|
 | `ffprobe` | 2101.61 s (35.0 min), 640x360, h264 at 23.976 fps, AAC stereo 44.1 kHz, 55.1 MB |
 | `content-engine run` | reached `AUDIO_READY`; normalised WAV extracted |
-| `content-engine transcribe --config configs/fast.toml` | 1346 segments, 6398 words, language `es`, 618.95 s on cpu/int8, RTF 0.2945, model `small` |
-| Chunking, at the packaged 360 s window and 30 s overlap | **7 chunks**, 125 to 392 segments each, 6323 to 16139 characters, 78074 characters in total |
-| `content-engine analyze` (provider mode) | **exit 2**: `GEMINI_API_KEY` is not set |
+| `content-engine transcribe --config configs/fast.toml` | 1346 segments, 6398 words, `es`, 618.95 s on cpu/int8, RTF 0.2945, model `small` |
+| Chunking, 360 s window and 30 s overlap | **7 chunks**, 125–392 segments each, 78 074 characters in total |
+| `content-engine analyze RUN_ID --config configs/fast.toml` | **exit 0 in 202 s**, one call per chunk, no retries, no `--force` |
+| Second `analyze`, credential present | exit 0 in 0.5 s, "Candidates reused", all four artifacts and the manifest byte-identical |
+| Second `analyze`, credential removed from the process | exit 0 in 0.48 s, same reuse, byte-identical — a call is impossible without a key, so this is the proof of zero calls |
 
-Checked again after the identity/reuse fix, with the credential still absent
-from the process, user and machine environments and no `.env` present. The
-answer is unchanged and the reason is unchanged.
+Recorded by the run: status `ANALYZED`, provider `gemini`, model
+`gemini-3.5-flash-lite`, `prompt_version` `clip_candidates/v1`, `prompt_sha256`
+`557e5539…`, `fixture_sha256` null, fingerprint `b6f2c48acd57`. All four
+artifacts UTF-8 without BOM and LF. All seven raw responses parse as JSON. Every
+selected candidate lies inside the source **and** inside its own chunk. Neither
+the credential nor the string `GEMINI_API_KEY` appears in any of the 13 files
+under the run, and `workspace/runs/` is ignored, so nothing reached Git.
 
-The refusal was checked rather than assumed: after it, `manifest.json` was
-byte-identical to the copy taken beforehand, the run was still `TRANSCRIBED`
-with no `failure`, and `analysis/` contained zero files. `doctor --require-ai`
-reports the same block as `Analysis credentials FAIL`.
+### Consumption
 
-So a real Gemini run on this video would be **7 calls** over roughly 78 000
-characters of transcript plus the prompt — an order of magnitude, not a
-measurement, because no call was made.
+| | |
+|---|---|
+| Calls | 8 — 7 for the production, 1 for the opt-in live test |
+| Retries | 0 |
+| Wall time | 202 s for the seven, ~29 s per chunk |
+| Tokens, measured | only for the opt-in call: 1771 in, 5 out. **The command does not report tokens**, so the seven production calls are unmeasured |
+| Cost | **not calculable here**. The API returns token counts, not prices, and the command does not surface them |
+| `modelVersion` reported | `gemini-3.5-flash-lite` on every call — the alias, with no revision suffix |
 
-**Nothing about candidate quality is known.** The profile used was `fast`
-(`small` model), chosen explicitly and recorded here; it is not the profile a
-quality evaluation should use. To finish the experiment:
+### The funnel
 
-```bash
-setx GEMINI_API_KEY "..."        # or export, in the shell that will run it
-uv run content-engine doctor --require-ai
-uv run content-engine analyze RUN_ID
+```text
+proposed          23      across 7 chunks (1 to 5 per chunk)
+invalid            2      1 too_long (106.4 s), 1 too_short (12.2 s)
+below min score    0
+deduplicated       0
+beyond the cap     6
+selected          15      max_candidates = 15, so the cap bound
 ```
 
-A second invocation without `--force` must then reuse all four artifacts and
-make no call at all, which is the cheap way to confirm the run really happened
-once.
+Boundary snapping had almost nothing to do: 5 of 15 boundaries moved at all,
+mean absolute adjustment 0.06 s, and every start snapped to a segment start.
+That is a fact about the prompt format rather than a quality result — the chunk
+text presents one timestamped line per segment, so the model returns segment
+boundaries because those are the numbers in front of it.
+
+### Preliminary quality, on one video
+
+Eleven intervals were written down from the transcript **before** the call, kept
+outside Git. Comparing them to what was selected, by temporal IoU:
+
+- **8 of 11** overlap a selected candidate at IoU > 0.15;
+- **2 of 11** reach the IoU 0.50 the specification names for evaluation
+  (distributions 0.68, `cp -r` 0.67);
+- the hidden-files interval was refused as `too_short` (12.2 s), which was
+  predicted in the manual notes and is the rule working;
+- the `pwd` and relative-path intervals were proposed and fell out at the cap,
+  not for being wrong.
+
+Candidates that look genuinely useful: `cp` refusing a directory without `-r`
+(problem → cause → fix), removing a non-empty directory, case sensitivity, and
+what a distribution is. Weak ones: several are screen narration ("vamos a venir
+acá a este icono") that reads as context-dependent however complete the idea is,
+and the `small` transcription garbles technical vocabulary, so a topic or hook
+can be wrong where the interval is right.
+
+**What this does and does not establish.** The integration is real: a live
+provider, a versioned prompt, structured output, seven calls, four artifacts,
+proved reuse. The preliminary signal on this one video is encouraging. General
+candidate quality remains **undemonstrated** — one video, eleven intervals I
+chose from text without watching it, and a loose threshold on most of the
+matches. The specification asks for at least five representative videos, and
+that work has not been done.
 
 ## Known limitations
 
@@ -439,30 +478,24 @@ once.
   non-ASCII characters in a source path are replaced with U+FFFD inside
   `manifest.failure.message`. `manifest.input.path` is unaffected and remains
   exact.
-- **`model` is the identifier requested, not the revision that answered.** The
-  response carries `modelVersion`, documented only as "the model version used to
-  generate the response"; the published reference does not say whether it
-  returns the alias or a dated build, and no call has been made here to observe
-  it. The adapter accepts the requested model or a dated variant of it, refuses
-  anything else, and records the requested identifier. No schema was widened to
-  hold a resolved model, because that needs evidence from a real response that
-  this branch does not have. ADR-027 records what would change if a live run
-  showed a specific revision.
-- `analysis.model` is set to `gemini-3.5-flash-lite`, confirmed against the
-  current published model list as stable and available. **It has still never been
-  called.** The adapter, the prompt and the parser are complete and verified
-  against doubles, but no request has left this machine, because `GEMINI_API_KEY`
-  is not set here. Everything below about candidate quality therefore remains
-  unmeasured, and the first real call is the outstanding work of PR C.
+- **`model` is the identifier requested. It is also what the provider reported
+  back**, on every one of the eight calls made so far: `modelVersion` came back
+  as the bare alias `gemini-3.5-flash-lite`, never a suffixed build. A separate
+  `model_resolved` field would therefore duplicate `model`, and none was added.
+  One provider, one day; `reported_models` is where a suffixed build would first
+  appear.
+- **The command reports no token usage.** The provider returns counts and the
+  adapter accumulates them, but nothing surfaces them from `analyze`, so the
+  seven production calls are unmeasured and their cost is not calculable from
+  this repository. Only the opt-in live test prints them.
 - `configs/quality.toml` restates the packaged defaults verbatim, so it is a
   no-op overlay. The profiles are not shipped inside the wheel either, so a
   wheel-only installation has no `--config` profile to point at.
-- The candidate engine has never seen real model output. Every proposal it has
-  processed was written by hand into a fixture or by a test double, so the
-  pipeline and the adapter are verified and the *quality* of what they rank is
-  entirely unmeasured. CE-026, CE-028 and CE-029 make that measurement possible;
-  they do not make it. The specification asks for at least five representative
-  videos before candidate quality is treated as known.
+- The candidate engine has now seen real model output exactly once, on one
+  video. That is enough to show the integration works end to end and to give a
+  first signal; it is not a measurement of candidate quality. The specification
+  asks for at least five representative videos, and the transcript used here came
+  from the `small` model, which garbles technical vocabulary.
 - An unparseable provider response is not persisted. `raw_response` is only
   carried on a successful batch and nothing is written until all four artifacts
   are valid, so the malformed reply — the single most useful artifact for
@@ -496,10 +529,11 @@ V0.4, the Candidate Intelligence Engine (CE-023–CE-033). The foundation
 pipeline (CE-030–CE-033) and the `analyze` command as `1b15e0f`. CE-026, CE-028
 and CE-029 are on `feat/gemini-candidate-provider`, pending review.
 
-That completes CE-023–CE-033 as code. What it does not complete is the reason
-the subsystem exists: no real call has been made from this machine, so candidate
-quality is still entirely unmeasured. The next work is running real videos
-through the finished pipeline and reporting what comes out.
+That completes CE-023–CE-033, and the first real run has now happened: seven
+live calls over a 35-minute video, 15 candidates selected from 23 proposals,
+reuse proved without a credential. What is still missing is the reason the
+subsystem exists — candidate quality measured over a representative set. One
+video is a signal, not a measurement.
 
 ## Deferred to V0.7 (CE-047 to CE-052)
 
