@@ -16,11 +16,13 @@ FFmpeg 9.0.1:
 | Check | Result |
 |---|---|
 | `uv run ruff check .` | passed |
-| `uv run ruff format --check .` | passed, 59 files |
+| `uv run ruff format --check .` | passed, 61 files |
 | `uv run mypy src` | passed, 30 files, strict |
-| `uv run pytest` | 285 passed |
-| `uv run pytest` from a working directory outside the repository | 285 passed |
+| `uv run pytest` | 595 passed |
+| `uv run pytest` from a working directory outside the repository | 595 passed, no stray files |
 | `uv run pytest -m integration` | 13 passed with real FFmpeg |
+| Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
+| Stage configuration coherent with the manifest | fingerprint rebuilt from the artifact matches the recorded one |
 | `uv build` | wheel and sdist built; the wheel ships `content_engine/resources/default.toml` |
 | Wheel in a clean venv, arbitrary working directory with spaces and non-ASCII characters | `doctor`, `inspect`, `run`, `transcribe` all work |
 | Real faster-whisper transcription | passed, model `small` on cpu/int8, 34 s of Spanish technical speech |
@@ -30,12 +32,16 @@ FFmpeg 9.0.1:
 ### Real-speech smoke test
 
 `samples-local/smoke-spanish-technical.mp4` (34.2 s, git-ignored, never
-committed), transcribed from the installed wheel with `configs/fast.toml`:
-language `es` at 0.96, 4 segments, 54 words, contiguous SRT numbering, every
-word inside its segment, last timestamp 32.31 s against a 34.23 s audio
-duration, RTF 0.27 once the model is cached. A second invocation reused the
-transcript; changing `beam_size` was refused as incompatible; `--force`
-regenerated it and updated the fingerprint.
+committed), transcribed from the installed wheel, in a directory outside the
+repository whose name contains spaces and non-ASCII characters, with
+`configs/fast.toml` on a run created under the defaults: language `es` at 0.96,
+4 segments, 54 words, contiguous SRT numbering, every word inside its segment,
+last timestamp 32.31 s against a 34.23 s audio duration, RTF 0.22 once the model
+is cached. A second invocation reused the transcript and left
+`transcript/config.effective.json` byte-identical; changing `beam_size` was
+refused as incompatible and also left it untouched; `--force` regenerated both
+the transcript and the stage configuration. No artifact contained `NaN`,
+`Infinity` or `-Infinity`, and no `.tmp` survived.
 
 Accuracy is usable but not clean on technical vocabulary: the `small` model
 rendered *systemctl* as "el sistema CETELE" and *compruebo* as "comprego".
@@ -48,7 +54,7 @@ Coverage:
 
 | Scope | Coverage |
 |---|---|
-| Total | 99% (1097 statements, 14 missed) |
+| Total | 99% (1145 statements, 14 missed) |
 | Domain | 100% |
 | Services | 100% |
 | CLI | 98% |
@@ -109,6 +115,17 @@ This baseline must be updated after every milestone or PR.
   one.
 - Every run artifact, `transcript.txt` and `transcript.srt` included, is written
   atomically; a failed write leaves no partial file and no `.tmp`.
+- The stage writes `transcript/config.effective.json` with what it actually ran,
+  including the resolved device and compute type, and
+  `manifest.stages.transcription.stage_config_sha256` ties the manifest to it.
+  The run-level `config.effective.json` still records the configuration the run
+  was created with. Verified on the real sample: the recorded fingerprint is
+  reconstructible from the stage configuration artifact.
+- `NaN`, `Infinity` and `-Infinity` are refused wherever a real number is
+  required: configuration, ffprobe output, provider output, every domain model,
+  and `write_json` as a last defence.
+- `manifest.json` is at schema 2. A manifest written by an earlier build is
+  refused rather than reinterpreted, which is the documented behaviour.
 
 ### V0.4 Candidate Intelligence Engine
 

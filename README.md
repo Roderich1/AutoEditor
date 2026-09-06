@@ -33,14 +33,25 @@ Esa es la única copia canónica: los modelos Pydantic validan tipos e invariant
 pero no repiten los valores. La configuración funciona igual desde el repositorio,
 desde un wheel instalado y desde cualquier directorio de trabajo.
 
-Los perfiles de `configs/` son overlays que se fusionan sobre esos valores:
+### Perfiles
+
+`configs/fast.toml` y `configs/quality.toml` son overlays versionados que se
+fusionan sobre los valores canónicos:
 
 ```console
 uv run content-engine run sample.mp4 --config configs/quality.toml
 ```
 
-Una clave desconocida o una relación inválida se rechazan indicando exactamente
-qué falla, en lugar de ignorarse en silencio.
+Son perfiles semánticos, no atajos: `fast` significa "el más rápido que sigue
+siendo útil" y `quality` significa "el mejor disponible". `quality.toml` coincide
+hoy con los valores por omisión, y eso es intencional — nombra una intención que
+sobrevive a un cambio de los defaults. Viven en el repositorio, no dentro del
+paquete, así que una instalación solo-wheel no los trae; cualquier TOML externo
+sirve igual mediante `--config`. Empaquetar perfiles incorporados o añadir un
+`--profile` queda fuera de esta entrega.
+
+Una clave desconocida, una relación inválida o un número no finito (`nan`, `inf`)
+se rechazan indicando exactamente qué falla, en lugar de ignorarse en silencio.
 
 Variables de entorno:
 
@@ -59,9 +70,31 @@ absoluta resuelta.
 Cada ejecución vive en `workspace/runs/RUN_ID` y es un experimento:
 
 - `manifest.json` — estado, hashes, versiones y etapas completadas
-- `config.effective.json` — configuración completa, para diagnóstico
+- `config.effective.json` — configuración con la que se **creó** el run
 - `media/probe.json`, `audio/source.wav`
-- `transcript/` — `transcript.json`, `.txt`, `.srt` y `metrics.json`
+- `transcript/` — `transcript.json`, `.txt`, `.srt`, `metrics.json` y
+  `config.effective.json`
+
+### Dos niveles de configuración
+
+Un run guarda dos configuraciones, deliberadamente:
+
+| Artefacto | Qué describe |
+|---|---|
+| `config.effective.json` (raíz) | La configuración con la que se creó el experimento |
+| `transcript/config.effective.json` | Lo que la etapa de transcripción ejecutó realmente |
+
+Difieren siempre que `transcribe --config` apunta a otro perfil, algo legítimo
+—es como se compara un modelo contra otro sobre el mismo audio— pero nunca
+silencioso: el comando avisa de la divergencia. La configuración de etapa además
+resuelve `auto` al dispositivo y al tipo de cómputo que la máquina eligió, cosa
+que la del run no puede saber.
+
+`manifest.stages.transcription` guarda el `fingerprint`, que decide si un
+transcript puede reutilizarse, y `stage_config_sha256`, que ata el manifiesto a
+ese artefacto legible. El fingerprint decide; la configuración de etapa explica.
+`manifest.versions.transcription_model` nombra el modelo que realmente produjo el
+transcript, no el que estaba configurado al crear el run.
 
 El `run_id` identifica una ejecución; `config_sha256` identifica el experimento y
 es idéntico entre máquinas. `transcribe` reutiliza un transcript solamente cuando
@@ -72,9 +105,16 @@ mezclar artefactos incompatibles. `--force` regenera.
 Una ejecución que falla conserva su directorio, su estado `FAILED_*` y el motivo,
 para poder diagnosticarla.
 
-Todas las rutas se construyen con `pathlib.Path` y los artefactos se escriben en
-UTF-8 con saltos LF, por lo que el mismo código produce los mismos bytes en
-Windows 11 y Ubuntu 24.04.
+Todas las rutas se construyen con `pathlib.Path` y **todos** los artefactos se
+escriben de forma atómica, en UTF-8 con saltos LF y sin BOM, por lo que el mismo
+código produce los mismos bytes en Windows 11 y Ubuntu 24.04. Un fallo de
+escritura no deja ni un archivo parcial ni un `.tmp`. `.gitattributes` aplica la
+misma política al texto del propio repositorio.
+
+Ningún artefacto puede contener `NaN`, `Infinity` ni `-Infinity`: no son JSON
+estándar y no describen duraciones, posiciones ni probabilidades. Se rechazan en
+el borde —configuración, salida del proveedor, modelos de dominio— y `write_json`
+los vuelve a rechazar como última barrera.
 
 ## Desarrollo
 

@@ -394,13 +394,56 @@ portable: hardware that resolved differently is a different execution and must
 not be treated as interchangeable. Hardware is therefore resolved *before* the
 reuse decision, not after.
 
+### Run configuration and stage configuration
+
 `transcribe` may be invoked with a `--config` profile other than the one `run`
 recorded. That is allowed — it is how a model is compared against another on the
-same audio — but it is never silent: the command reports the divergence between
-the two `config_sha256` values, and `manifest.versions.transcription_model` is
-updated to the model that actually produced the transcript.
-`manifest.config_sha256` keeps the configuration the run was *created* under, so
-it is not rewritten after the fact.
+same audio — but it is never silent, and it means a run legitimately holds two
+configurations:
+
+```text
+run config    configuration the experiment was created with
+stage config  configuration a stage actually executed
+```
+
+```text
+config.effective.json               the run configuration
+transcript/config.effective.json    the transcription stage configuration
+```
+
+The run configuration is written once, at creation, and is never rewritten after
+the fact: it is the record of the experiment that was set up. The stage
+configuration is written by the stage that produced the artifacts beside it, and
+records what really ran, including the device and compute type that `auto`
+resolved to on this machine — something the run configuration cannot know because
+it is decided later.
+
+Keeping only the first was the original defect. A run created under `large-v3`
+and transcribed under `small` recorded `large-v3` everywhere, so the run
+described an experiment that never happened. Keeping only the second would lose
+the setup the experiment was designed with.
+
+`manifest.versions.transcription_model` therefore names the model that actually
+produced the transcript, the command reports when the two `config_sha256` values
+diverge, and `StageRecord` carries both hashes:
+
+```text
+fingerprint          decides whether the artifact may be reused
+stage_config_sha256  ties the manifest to the readable stage configuration
+```
+
+The fingerprint is opaque on purpose — it is a decision, not a description. It is
+not, on its own, an adequate record: nobody can reverse a digest to find out what
+beam size produced a transcript. The stage configuration is what makes the run
+explain itself, and the two are kept consistent by construction, because every
+field of the stage configuration that affects the output is also in the
+fingerprint payload. A test reconstructs the recorded fingerprint from the stage
+configuration artifact, so the pair cannot drift apart unnoticed.
+
+Only `transcription` writes a stage configuration today. CE-047–CE-052 will
+generalise the shape — `manifest.stages` is already a map and `StageRecord`
+already carries the hash — but no generic stage service exists yet, and inventing
+one before a second stage needs it would be guessing.
 
 `manifest.json` carries `schema_version`. A manifest from an unknown schema is
 refused rather than guessed at. `stages` is a map so CE-047–CE-052 can add
@@ -487,7 +530,14 @@ Not an ADR, but binding on every artifact the engine writes under `workspace/`:
   the final path nor a `.tmp` beside it;
 - JSON never serialized with a `default=` coercion that would hide an
   unserializable value;
-- versioned with a `schema_version` where the artifact is read back later.
+- versioned with a `schema_version` where the artifact is read back later;
+- free of `NaN`, `Infinity` and `-Infinity`. They are Python extensions no
+  conforming JSON parser accepts, and none of them describes a duration, a
+  position in audio, a probability or a ratio. Every domain model refuses them
+  at the boundary through `allow_inf_nan=False`, provider output is checked with
+  `math.isfinite` before any comparison touches it — every ordering test against
+  NaN is false, so an unchecked NaN would be silently clamped to whatever bound
+  it was compared with — and `write_json` refuses them again as a last defence.
 
 The point is that a run produced on Windows and the same run produced on Ubuntu
 are byte-comparable. This contract governs generated artifacts only — repository
