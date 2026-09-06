@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from content_engine.adapters.analysis import fixture_analyzer as module
 from content_engine.adapters.analysis.fixture_analyzer import (
@@ -364,3 +365,39 @@ def test_replaying_a_fixture_leaves_the_credential_untouched(
     FixtureAnalyzer(_fixture()).find_candidates(CHUNK, _context())
 
     assert "GEMINI_API_KEY" not in seen
+
+
+# --- a batch says one thing or the other, never both -------------------------
+
+
+def test_a_batch_cannot_both_fail_and_return_candidates() -> None:
+    """A recorded failure means the call did not produce candidates. A batch
+    carrying both describes two outcomes, and whichever the replay honours, the
+    other half is a silent instruction nobody reads.
+    """
+    with pytest.raises(ValidationError, match="failed"):
+        FixtureBatch(
+            chunk_id="chunk_0000",
+            raw_response="",
+            candidates=[raw_candidate(10.0, 39.0)],
+            error="provider exploded",
+        )
+
+
+def test_a_failing_batch_may_still_keep_the_response_as_evidence() -> None:
+    """The response is what the provider said before it was judged a failure,
+    which is exactly the thing worth keeping about a failure."""
+    batch = FixtureBatch(chunk_id="chunk_0000", raw_response="{ truncated", error="parse failed")
+
+    assert batch.raw_response == "{ truncated"
+    assert batch.candidates == []
+
+
+def test_a_fixture_that_both_fails_and_returns_candidates_is_refused(tmp_path: Path) -> None:
+    payload = _fixture().model_dump(mode="json")
+    payload["batches"][0]["error"] = "provider exploded"
+    path = tmp_path.joinpath("f.json")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CorruptArtifactError, match="not a valid analysis fixture"):
+        load_fixture(path)

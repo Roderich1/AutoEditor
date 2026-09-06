@@ -628,3 +628,89 @@ def test_the_chunks_artifact_is_written_beside_the_candidates(harness: Harness) 
     assert payload["window_seconds"] == 360
     assert payload["overlap_seconds"] == 30
     assert len(payload["chunks"]) == 1
+
+
+# --- recovery ----------------------------------------------------------------
+
+
+def test_a_verified_reuse_recovers_a_run_that_had_failed(harness: Harness) -> None:
+    """A failed --force does not destroy the artifacts of the run before it, so
+    a later invocation that proves those artifacts still match every input is
+    looking at a run that is complete. Leaving it FAILED_ANALYSIS would report a
+    failure that the evidence on disk contradicts, and every later stage reads
+    the status.
+    """
+    _analyze(harness)
+    original = harness.fixture_path.read_bytes()
+    _rewrite_fixture(harness, FixtureBatch(chunk_id="chunk_0000", error="provider exploded"))
+    assert _analyze(harness, "--force").exit_code == EXIT_ANALYSIS
+    assert harness.manifest()["status"] == RunStatus.FAILED_ANALYSIS
+    harness.fixture_path.write_bytes(original)
+
+    result = _analyze(harness)
+
+    assert result.exit_code == EXIT_SUCCESS
+    manifest = harness.manifest()
+    assert manifest["status"] == RunStatus.ANALYZED
+    assert manifest["failure"] is None
+
+
+def test_recovery_keeps_the_stage_record_it_verified(harness: Harness) -> None:
+    """The run is recovered, not re-analysed: the fingerprint that was checked
+    is the one that stays recorded."""
+    _analyze(harness)
+    record = harness.manifest()["stages"][RunStage.ANALYSIS.value]
+    original = harness.fixture_path.read_bytes()
+    _rewrite_fixture(harness, FixtureBatch(chunk_id="chunk_0000", error="boom"))
+    _analyze(harness, "--force")
+    harness.fixture_path.write_bytes(original)
+
+    _analyze(harness)
+
+    assert harness.manifest()["stages"][RunStage.ANALYSIS.value] == record
+
+
+def test_recovery_says_so_rather_than_reporting_a_plain_reuse(harness: Harness) -> None:
+    """ "Candidates reused" while the manifest still said FAILED_ANALYSIS was the
+    misleading half of this: the command reported success about a run it left
+    recorded as failed."""
+    _analyze(harness)
+    original = harness.fixture_path.read_bytes()
+    _rewrite_fixture(harness, FixtureBatch(chunk_id="chunk_0000", error="boom"))
+    _analyze(harness, "--force")
+    harness.fixture_path.write_bytes(original)
+
+    output = cli_output(_analyze(harness))
+
+    assert "recovered" in output.lower()
+    assert harness.manifest()["status"] == RunStatus.ANALYZED
+
+
+def test_a_refusal_does_not_recover_a_failed_run(harness: Harness) -> None:
+    """Recovery is what a *proof* buys. A run whose artifacts no longer match
+    stays failed."""
+    _analyze(harness)
+    _rewrite_fixture(harness, FixtureBatch(chunk_id="chunk_0000", error="boom"))
+    _analyze(harness, "--force")
+    _rewrite_fixture(
+        harness,
+        FixtureBatch(
+            chunk_id="chunk_0000", raw_response="[]", candidates=[raw_candidate(20.0, 45.0)]
+        ),
+    )
+
+    result = _analyze(harness)
+
+    assert result.exit_code == EXIT_INVALID_INPUT
+    assert harness.manifest()["status"] == RunStatus.FAILED_ANALYSIS
+
+
+def test_reuse_of_an_already_analyzed_run_does_not_rewrite_the_manifest(
+    harness: Harness,
+) -> None:
+    _analyze(harness)
+    before = harness.run_path.joinpath("manifest.json").read_bytes()
+
+    _analyze(harness)
+
+    assert harness.run_path.joinpath("manifest.json").read_bytes() == before
