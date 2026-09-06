@@ -21,7 +21,7 @@ not the same as a set a later run will accept.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -230,11 +230,6 @@ def fail_on_move_aside(nth: int) -> Callable[..., Any]:
     return guarded
 
 
-@pytest.fixture
-def failures(monkeypatch: pytest.MonkeyPatch) -> Iterator[pytest.MonkeyPatch]:
-    yield monkeypatch
-
-
 #: Each entry installs one failure at one step of publication.
 INJECTIONS: dict[str, Callable[[pytest.MonkeyPatch], None]] = {
     "first-move-aside": lambda mp: mp.setattr(Path, "replace", fail_on_move_aside(1)),
@@ -257,7 +252,7 @@ class TestPublicationIsAllOrNothing:
     def test_a_failure_leaves_the_previous_set_byte_identical(
         self,
         published: tuple[Path, PreviewPlan, str, str],
-        failures: pytest.MonkeyPatch,
+        monkeypatch: pytest.MonkeyPatch,
         injection: str,
         shortlist: str,
         source: Path,
@@ -276,10 +271,11 @@ class TestPublicationIsAllOrNothing:
             "grown": plan_for(source, grown),
             "shrunk": shorter(plan),
         }[shortlist]
-        INJECTIONS[injection](failures)
+        INJECTIONS[injection](monkeypatch)
 
+        engine = service("second")
         with pytest.raises((RenderError, OSError)):
-            service("second").generate(regenerate, directory, LATER)
+            engine.generate(regenerate, directory, LATER)
 
         assert snapshot(directory) == before
 
@@ -287,22 +283,23 @@ class TestPublicationIsAllOrNothing:
     def test_the_previous_set_still_verifies_after_a_failure(
         self,
         published: tuple[Path, PreviewPlan, str, str],
-        failures: pytest.MonkeyPatch,
+        monkeypatch: pytest.MonkeyPatch,
         injection: str,
     ) -> None:
         """Surviving files are not enough: the set has to remain reusable."""
         directory, plan, fingerprint, digest = published
-        INJECTIONS[injection](failures)
+        INJECTIONS[injection](monkeypatch)
 
+        engine = service("second")
         with pytest.raises((RenderError, OSError)):
-            service("second").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
 
         assert verify_previews(directory, fingerprint, digest, plan).previews
 
     def test_a_failure_while_the_old_set_is_being_moved_aside_restores_it(
         self,
         published: tuple[Path, PreviewPlan, str, str],
-        failures: pytest.MonkeyPatch,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The moment at which part of the previous set has left the directory.
 
@@ -312,10 +309,12 @@ class TestPublicationIsAllOrNothing:
         """
         directory, plan, fingerprint, digest = published
         before = snapshot(directory)
-        failures.setattr(Path, "replace", fail_on_move_aside(2))
+        monkeypatch.setattr(Path, "replace", fail_on_move_aside(2))
 
+        engine = service("second")
+        smaller = shorter(plan)
         with pytest.raises((RenderError, OSError)):
-            service("second").generate(shorter(plan), directory, LATER)
+            engine.generate(smaller, directory, LATER)
 
         assert snapshot(directory) == before
         assert verify_previews(directory, fingerprint, digest, plan).previews
@@ -323,16 +322,18 @@ class TestPublicationIsAllOrNothing:
     def test_a_shrinking_shortlist_that_fails_keeps_the_dropped_preview(
         self,
         published: tuple[Path, PreviewPlan, str, str],
-        failures: pytest.MonkeyPatch,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The preview the new set would drop must come back with the rest."""
         directory, plan, fingerprint, digest = published
         dropped = preview_filename(plan.candidates[-1].id)
         assert directory.joinpath(dropped).is_file()
-        failures.setattr(preview_service, "write_json", fail_on_write(PREVIEW_INDEX_FILENAME))
+        monkeypatch.setattr(preview_service, "write_json", fail_on_write(PREVIEW_INDEX_FILENAME))
 
+        engine = service("second")
+        smaller = shorter(plan)
         with pytest.raises((RenderError, OSError)):
-            service("second").generate(shorter(plan), directory, LATER)
+            engine.generate(smaller, directory, LATER)
 
         assert directory.joinpath(dropped).is_file()
         assert verify_previews(directory, fingerprint, digest, plan).previews
@@ -341,14 +342,15 @@ class TestPublicationIsAllOrNothing:
     def test_no_temporary_directory_survives_a_failure(
         self,
         published: tuple[Path, PreviewPlan, str, str],
-        failures: pytest.MonkeyPatch,
+        monkeypatch: pytest.MonkeyPatch,
         injection: str,
     ) -> None:
         directory, plan, _, _ = published
-        INJECTIONS[injection](failures)
+        INJECTIONS[injection](monkeypatch)
 
+        engine = service("second")
         with pytest.raises((RenderError, OSError)):
-            service("second").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
 
         assert [path.name for path in directory.iterdir() if path.is_dir()] == []
         assert list(directory.rglob("*.tmp")) == []
