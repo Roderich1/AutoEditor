@@ -39,7 +39,7 @@ FFmpeg 9.0.1:
 | Restore failure repeated three times | the backup is still complete after each attempt |
 | A pending backup on a later invocation | restored deterministically from its journal, or refused untouched when the journal is missing, unreadable, of another schema, or names an unknown phase |
 | `preview_service.py` coverage | 100% |
-| Diff against `main` | 27 files, +7781/−46 |
+| Diff against `main` | 27 files, +7792/−46 |
 | SonarCloud quality gate | passes; Reliability and Security both A |
 | `uv run pytest -m integration --no-cov` | 22 passed with real FFmpeg; 9 of them are the new preview pipeline |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |

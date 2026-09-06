@@ -544,8 +544,9 @@ class TestFailuresDuringRestoration:
 
         self.publication_fails(monkeypatch)
         monkeypatch.setattr(Path, "replace", fail_on_restore(2))
+        engine = service("second")
         with pytest.raises((RenderError, OSError)):
-            service("second").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
 
         # The interesting assertion is this one. Without it the test passes over
         # the defect: a run that destroyed the backup simply republishes a fresh
@@ -574,8 +575,9 @@ class TestFailuresDuringRestoration:
         monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
 
         for _ in range(3):
+            engine = service("second")
             with pytest.raises((RenderError, OSError)):
-                service("second").generate(plan, directory, LATER)
+                engine.generate(plan, directory, LATER)
             assert directory.joinpath(ROLLBACK_DIRNAME).is_dir()
             assert recoverable(directory) | before == recoverable(directory)
 
@@ -590,15 +592,17 @@ class TestFailuresDuringRestoration:
 
         self.publication_fails(monkeypatch)
         monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
+        engine = service("second")
         with pytest.raises((RenderError, OSError)):
-            service("second").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         pending = snapshot(directory.joinpath(ROLLBACK_DIRNAME))
         assert pending, "the failed restore should have left a backup"
 
         # The next attempt still cannot restore, and must not silently discard
         # what it cannot put back.
+        engine = service("third")
         with pytest.raises((RenderError, OSError)):
-            service("third").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         assert recoverable(directory) | before == recoverable(directory)
 
     def test_a_rollback_with_no_journal_is_refused_untouched(
@@ -612,8 +616,9 @@ class TestFailuresDuringRestoration:
         rollback.joinpath("candidate_cand_unknown.mp4").write_bytes(b"from an older build")
         stranded = snapshot(rollback)
 
+        engine = service("second")
         with pytest.raises(RenderError, match=ROLLBACK_DIRNAME):
-            service("second").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
 
         assert snapshot(rollback) == stranded
 
@@ -650,8 +655,9 @@ class TestAPendingBackupIsInterpretedOrLeftAlone:
         """Leave a real pending backup behind, and return the data it holds."""
         monkeypatch.setattr(preview_service, "write_json", fail_on_write(PREVIEW_INDEX_FILENAME))
         monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
+        engine = service("second")
         with pytest.raises(RenderError):
-            service("second").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
         data = self.held_data(directory)
         assert data, "the stranded backup should hold the previous set"
@@ -667,8 +673,9 @@ class TestAPendingBackupIsInterpretedOrLeftAlone:
         payload["schema_version"] = 99
         journal.write_text(json.dumps(payload), encoding="utf-8")
 
+        engine = service("third")
         with pytest.raises(RenderError, match="schema"):
-            service("third").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         assert self.held_data(directory) == held
 
     def test_a_journal_naming_an_unknown_phase_is_refused(
@@ -679,8 +686,9 @@ class TestAPendingBackupIsInterpretedOrLeftAlone:
         journal = directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL)
         journal.write_text(json.dumps({"schema_version": 1, "phase": "halfway"}), encoding="utf-8")
 
+        engine = service("third")
         with pytest.raises(RenderError, match="halfway"):
-            service("third").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         assert self.held_data(directory) == held
 
     def test_an_unreadable_journal_is_refused(
@@ -692,8 +700,9 @@ class TestAPendingBackupIsInterpretedOrLeftAlone:
             "{truncated", encoding="utf-8"
         )
 
+        engine = service("third")
         with pytest.raises(RenderError, match="cannot be read"):
-            service("third").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         assert self.held_data(directory) == held
 
     def test_a_journal_that_is_not_an_object_is_refused(
@@ -703,8 +712,9 @@ class TestAPendingBackupIsInterpretedOrLeftAlone:
         held = self.strand(directory, monkeypatch, plan)
         directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL).write_text("[]", encoding="utf-8")
 
+        engine = service("third")
         with pytest.raises(RenderError, match="rollback journal"):
-            service("third").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         assert self.held_data(directory) == held
 
     def test_an_empty_backup_with_no_journal_is_cleared(
@@ -738,11 +748,10 @@ class TestAPendingBackupIsInterpretedOrLeftAlone:
         staging = directory.joinpath(STAGING_DIRNAME)
         staging.mkdir(exist_ok=True)
         index = read_index_from(directory.joinpath(ROLLBACK_DIRNAME))
+        config = preview_stage_config(width=540, height=960)
 
         with pytest.raises(RenderError, match="has not been restored"):
-            PreviewService._publish(
-                directory, staging, index, preview_stage_config(width=540, height=960)
-            )
+            PreviewService._publish(directory, staging, index, config)
         assert self.held_data(directory) == held
 
 
@@ -760,8 +769,9 @@ class TestTheJournalWriteItself:
         before = snapshot(directory)
         monkeypatch.setattr(preview_service, "write_json", fail_on_write(ROLLBACK_JOURNAL))
 
+        engine = service("second")
         with pytest.raises(OSError, match=ROLLBACK_JOURNAL):
-            service("second").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
 
         assert not directory.joinpath(ROLLBACK_DIRNAME).exists()
         assert snapshot(directory) == before
@@ -787,8 +797,9 @@ class TestTheMovingAsidePhase:
         # Fail the second move-aside, so the phase is still `moving_aside`, and
         # fail the restore that follows.
         monkeypatch.setattr(Path, "replace", fail_on_move_aside_then_restore(2))
+        engine = service("second")
         with pytest.raises(RenderError):
-            service("second").generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
 
         journal = json.loads(
             directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL).read_text(encoding="utf-8")
