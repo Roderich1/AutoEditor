@@ -132,6 +132,7 @@ def test_failure_is_recorded_with_stage_and_cause(run_service: RunService, video
 
 
 def test_recovering_from_a_failure_clears_it(run_service: RunService, video: Path) -> None:
+    """ADR-018: failure describes why a run is stopped now, not its history."""
     run_path, manifest = run_service.create(video)
     run_service.fail(run_path, manifest, RunStage.INSPECT, ValueError("transient"))
     run_service.advance(run_path, manifest, RunStatus.INSPECTED)
@@ -141,13 +142,41 @@ def test_recovering_from_a_failure_clears_it(run_service: RunService, video: Pat
     assert stored.failure is None
 
 
+def test_a_later_stage_advancing_also_clears_an_earlier_failure(
+    run_service: RunService, video: Path
+) -> None:
+    """A manifest at AUDIO_READY must not still carry a FAILED_INSPECT record."""
+    run_path, manifest = run_service.create(video)
+    run_service.fail(run_path, manifest, RunStage.INSPECT, ValueError("transient"))
+    run_service.advance(run_path, manifest, RunStatus.INSPECTED)
+    run_service.advance(run_path, manifest, RunStatus.AUDIO_READY)
+
+    stored = run_service.workspace.read_manifest(run_path)
+    assert stored.status == RunStatus.AUDIO_READY
+    assert stored.failure is None
+
+
+def test_a_retry_that_fails_again_replaces_the_previous_failure(
+    run_service: RunService, video: Path
+) -> None:
+    run_path, manifest = run_service.create(video)
+    run_service.fail(run_path, manifest, RunStage.INSPECT, ValueError("first"))
+    run_service.fail(run_path, manifest, RunStage.INSPECT, TypeError("second"))
+
+    stored = run_service.workspace.read_manifest(run_path)
+    assert stored.failure is not None
+    assert stored.failure.error_type == "TypeError"
+    assert stored.failure.message == "second"
+
+
 def test_stage_records_carry_a_fingerprint(run_service: RunService, video: Path) -> None:
     run_path, manifest = run_service.create(video)
-    run_service.record_stage(run_path, manifest, RunStage.TRANSCRIPTION, "abc123", 1)
+    run_service.record_stage(run_path, manifest, RunStage.TRANSCRIPTION, "abc123", "def456", 1)
 
     stored = run_service.workspace.read_manifest(run_path)
     record = stored.stages[RunStage.TRANSCRIPTION.value]
     assert record.fingerprint == "abc123"
+    assert record.stage_config_sha256 == "def456"
     assert record.schema_version == 1
 
 

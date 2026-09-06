@@ -64,7 +64,7 @@ def test_every_required_metric_is_present(tmp_path: Path, settings: Settings) ->
 
     for field in REQUIRED_FIELDS:
         assert field in payload, field
-    assert metrics.model == "fake-model"
+    assert metrics.model == settings.transcription.model
 
 
 def test_real_time_factor_relates_processing_to_audio(tmp_path: Path, settings: Settings) -> None:

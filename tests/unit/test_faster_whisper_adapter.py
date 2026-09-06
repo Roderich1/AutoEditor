@@ -15,6 +15,7 @@ from content_engine.domain.models import ResolvedHardware, TranscriptionOptions
 
 def _options(device: str = "auto", compute_type: str = "auto") -> TranscriptionOptions:
     return TranscriptionOptions(
+        provider="faster-whisper",
         model="tiny",
         device=device,
         compute_type=compute_type,

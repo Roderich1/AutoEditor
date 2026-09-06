@@ -8,6 +8,7 @@ from content_engine.domain.models import ResolvedHardware, TranscriptionOptions
 from content_engine.domain.transcript_rules import transcription_fingerprint
 
 OPTIONS = TranscriptionOptions(
+    provider="faster-whisper",
     model="large-v3",
     device="auto",
     compute_type="auto",
@@ -32,6 +33,7 @@ def _fingerprint(**overrides: object) -> str:
 
 def vars_of(options: TranscriptionOptions) -> dict[str, object]:
     return {
+        "provider": options.provider,
         "model": options.model,
         "device": options.device,
         "compute_type": options.compute_type,
@@ -49,6 +51,7 @@ def test_identical_inputs_produce_the_same_fingerprint() -> None:
     "override",
     [
         {"audio_sha256": "b" * 64},
+        {"provider": "another-provider"},
         {"model": "small"},
         {"beam_size": 1},
         {"word_timestamps": False},

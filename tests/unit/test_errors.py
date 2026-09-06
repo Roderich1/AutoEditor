@@ -39,6 +39,7 @@ from content_engine.domain.exceptions import (
     TranscriptionProviderError,
     UnsupportedSchemaVersionError,
 )
+from content_engine.domain.models import MANIFEST_SCHEMA_VERSION
 from tests.conftest import fake_process
 
 runner = CliRunner()
@@ -140,7 +141,7 @@ def test_missing_audio_reports_the_missing_artifact(
 
 def _manifest_payload(run_id: str) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": MANIFEST_SCHEMA_VERSION,
         "run_id": run_id,
         "created_at": "2026-01-01T00:00:00Z",
         "status": RunStatus.AUDIO_READY.value,

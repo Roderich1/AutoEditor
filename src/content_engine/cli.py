@@ -206,6 +206,7 @@ def transcribe(
             manifest,
             RunStage.TRANSCRIPTION,
             fingerprint,
+            outcome.stage_config_sha256,
             TRANSCRIPT_SCHEMA_VERSION,
         )
 

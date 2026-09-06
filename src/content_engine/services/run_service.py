@@ -114,10 +114,19 @@ class RunService:
         manifest: RunManifest,
         stage: RunStage,
         fingerprint: str,
+        stage_config_sha256: str,
         schema_version: int,
     ) -> RunManifest:
+        """Record a completed stage and the configuration that produced it.
+
+        The fingerprint decides whether the stage's output can be reused. The
+        configuration hash ties the manifest to the readable effective
+        configuration the stage wrote beside its artifacts, so the run explains
+        itself without anyone having to reverse an opaque digest.
+        """
         manifest.stages[stage.value] = StageRecord(
             fingerprint=fingerprint,
+            stage_config_sha256=stage_config_sha256,
             schema_version=schema_version,
             completed_at=datetime.now(UTC),
         )

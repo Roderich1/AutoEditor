@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -69,7 +69,10 @@ class FakeTranscriber:
         hardware: ResolvedHardware,
     ) -> RawTranscription:
         self.calls.append(options)
-        return self.result
+        # The real adapter reports back the model it was asked to load, so the
+        # fake must too: a fake that answers with a fixed name would hide any
+        # disagreement between the requested model and the recorded one.
+        return replace(self.result, model=options.model)
 
 
 class FakeClock:
