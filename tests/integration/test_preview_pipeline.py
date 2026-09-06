@@ -200,9 +200,9 @@ class TestRealPreviews:
         broken = tmp_path.joinpath("no es un contenedor.mp4")
         broken.write_bytes(b"this is not a container")
         directory = tmp_path.joinpath("previews")
+        service = PreviewService(FFmpegPreviewRenderer(), FFprobeAdapter())
+        plan = plan_for(broken, shortlist())
         with pytest.raises(RenderError):
-            PreviewService(FFmpegPreviewRenderer(), FFprobeAdapter()).generate(
-                plan_for(broken, shortlist()), directory, GENERATED_AT
-            )
+            service.generate(plan, directory, GENERATED_AT)
         survivors = sorted(path.name for path in directory.rglob("*")) if directory.exists() else []
         assert survivors == []

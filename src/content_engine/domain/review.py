@@ -58,6 +58,11 @@ REVIEW_RULES_VERSION = 1
 #: Bumped whenever the review fingerprint payload changes shape.
 REVIEW_FINGERPRINT_VERSION = 1
 
+#: How much free text a rejection detail may carry. Named rather than inlined
+#: because the prompt has to tell a reviewer the limit before they hit it, and
+#: two copies of the number would drift.
+DETAIL_MAX_LENGTH = 2000
+
 
 def _require_utc(value: datetime, field: str) -> datetime:
     """Refuse a timestamp that is naive or in another zone.
@@ -153,7 +158,7 @@ class RejectedDecision(_Decision):
 
     decision: Literal[ReviewDecisionType.REJECTED] = ReviewDecisionType.REJECTED
     reason: EditorialReason | None = None
-    detail: str | None = Field(default=None, max_length=2000)
+    detail: str | None = Field(default=None, max_length=DETAIL_MAX_LENGTH)
 
     @model_validator(mode="after")
     def validate_reason(self) -> RejectedDecision:

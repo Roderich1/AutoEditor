@@ -65,6 +65,12 @@ from content_engine.utils.json import read_json, write_json
 #: prefixed with a dot so a directory listing does not present it as content.
 STAGING_DIRNAME = ".staging"
 
+#: Where the previously published set is held while the new one is assembled,
+#: so a failure part-way through can put it back. Beside the staging directory
+#: and for the same reason: restoring must be a rename, never a copy, so it
+#: cannot fail for want of space at the moment things have already gone wrong.
+ROLLBACK_DIRNAME = ".rollback"
+
 #: Written in this order, and the order matters: the file the reuse check looks
 #: for first is written last, so an interrupted run cannot leave a directory
 #: that looks complete.
@@ -119,9 +125,10 @@ class PreviewService:
         try:
             records = self._render_all(plan, staging)
             index = self._build_index(plan, records, generated_at)
-            self._commit(directory, staging, index, plan.config)
+            self._publish(directory, staging, index, plan.config)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+            shutil.rmtree(directory.joinpath(ROLLBACK_DIRNAME), ignore_errors=True)
 
         return PreviewOutcome(
             index=index,
@@ -175,6 +182,15 @@ class PreviewService:
             raise RenderError(
                 f"The preview for {candidate.id} has no audio stream. A silent proxy cannot "
                 "be reviewed."
+            )
+        # A track that exists is not the track that was asked for. Checking the
+        # video codec and not this one let an encode that stream-copied the
+        # source audio, or transcoded it to something else, pass verification
+        # and be recorded in the index as though it were AAC.
+        if media.audio_codec != config.expected_audio_codec:
+            raise RenderError(
+                f"The preview for {candidate.id} holds {media.audio_codec} audio; "
+                f"{config.expected_audio_codec} was requested"
             )
         drift = abs(media.duration_seconds - candidate.duration)
         if drift > config.duration_tolerance_seconds:
@@ -244,29 +260,93 @@ class PreviewService:
         return index
 
     @staticmethod
-    def _commit(
+    def _publish(
         directory: Path,
         staging: Path,
         index: PreviewIndex,
         config: PreviewStageConfig,
     ) -> None:
-        """Move the verified set into place and describe it.
+        """Replace the published set with the staged one, all of it or none of it.
 
-        Stale previews are removed first: a shortlist that changed leaves files
-        named after candidates nobody will be shown, and a directory holding
-        previews of two different analyses cannot be verified as either.
+        Publication touches several files: one MP4 per candidate, some of which
+        may have to disappear because the shortlist changed, plus the stage
+        configuration and the index. Doing that in place cannot be made atomic
+        by ordering alone -- every ordering has a point at which a failure
+        leaves half of one set and half of another, with the index describing
+        neither. And an unverifiable mixture is strictly worse than either set:
+        the previous previews were reusable, and a `--force` that fails is
+        supposed to cost nothing.
+
+        So the whole published set is moved aside first, into a directory beside
+        the staging one, and only then is the new set assembled. A failure at
+        any point puts the old set back exactly as it was, byte for byte, and
+        re-raises. Success deletes the copy.
+
+        The moves are renames within one directory, so they are cheap however
+        large the previews are, and the restore path is renames too -- it
+        performs no encode, allocates no space and cannot fail for want of any.
         """
         directory.mkdir(parents=True, exist_ok=True)
-        wanted = {entry.filename for entry in index.previews}
-        for existing in directory.glob("candidate_*.mp4"):
-            if existing.name not in wanted:
-                existing.unlink()
-        for entry in index.previews:
-            staging.joinpath(entry.filename).replace(directory.joinpath(entry.filename))
-        write_json(
-            directory.joinpath(PREVIEW_STAGE_CONFIG_FILENAME), config.model_dump(mode="json")
-        )
-        write_json(directory.joinpath(PREVIEW_INDEX_FILENAME), index.model_dump(mode="json"))
+        rollback = directory.joinpath(ROLLBACK_DIRNAME)
+        shutil.rmtree(rollback, ignore_errors=True)
+        rollback.mkdir(parents=True, exist_ok=True)
+
+        # What actually happened, rather than what was meant to. The undo below
+        # needs to distinguish an old file that has been moved aside from a new
+        # one that has been placed, and it cannot tell them apart by name --
+        # regenerating an unchanged shortlist reuses every name. Inferring it
+        # from the directory contents is what made the first version of this
+        # delete previous previews that had not been moved aside yet.
+        moved_aside: list[str] = []
+        placed: list[str] = []
+
+        try:
+            # Moving the old set aside is itself part of the transaction. Doing
+            # it before the guard would leave a failure half-way through the
+            # move with a partly emptied directory and nothing to put back --
+            # the same defect this method exists to remove, one step earlier.
+            for path in sorted(directory.iterdir()):
+                if path.is_file() and (path.suffix == ".mp4" or path.name in ARTIFACT_FILENAMES):
+                    path.replace(rollback.joinpath(path.name))
+                    moved_aside.append(path.name)
+            for entry in index.previews:
+                staging.joinpath(entry.filename).replace(directory.joinpath(entry.filename))
+                placed.append(entry.filename)
+            for name, payload in (
+                (PREVIEW_STAGE_CONFIG_FILENAME, config.model_dump(mode="json")),
+                (PREVIEW_INDEX_FILENAME, index.model_dump(mode="json")),
+            ):
+                write_json(directory.joinpath(name), payload)
+                placed.append(name)
+        except BaseException:
+            PreviewService._roll_back(directory, rollback, moved_aside, placed)
+            raise
+        shutil.rmtree(rollback, ignore_errors=True)
+
+    @staticmethod
+    def _roll_back(
+        directory: Path,
+        rollback: Path,
+        moved_aside: list[str],
+        placed: list[str],
+    ) -> None:
+        """Undo a partial publication, leaving the previous set byte for byte.
+
+        Two steps, in this order and driven by what was recorded rather than by
+        what is on disk. Everything the failed attempt managed to place is
+        removed, so a new preview whose name is not in the old set cannot
+        survive as a stray. Then everything that was moved aside goes back.
+
+        ``missing_ok`` is deliberate: ``write_json`` is atomic, so a name can be
+        in ``placed`` and yet absent if the failure happened inside the write,
+        and refusing to continue over one absent file would abandon the restore
+        half-done -- which is the state this whole method exists to prevent.
+        """
+        for name in placed:
+            directory.joinpath(name).unlink(missing_ok=True)
+        for name in moved_aside:
+            rollback.joinpath(name).replace(directory.joinpath(name))
+        shutil.rmtree(rollback, ignore_errors=True)
 
 
 def _load(path: Path, description: str) -> dict[str, object]:

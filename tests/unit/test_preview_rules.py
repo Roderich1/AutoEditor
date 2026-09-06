@@ -266,41 +266,54 @@ class TestIndexInvariants:
         """CE-034 with nothing selected: an honest record of zero previews."""
         assert index().previews == []
 
+    # The next four are refused by PreviewRecord, before an index exists. Each
+    # builds nothing else inside the `raises` block, so the test cannot pass
+    # because some other construction happened to fail.
+
     def test_a_declared_duration_must_match_the_interval(self) -> None:
         with pytest.raises(ValidationError, match="duration"):
-            index(record(duration=30.0))
+            record(duration=30.0)
 
     def test_a_filename_that_names_another_candidate_is_refused(self) -> None:
         with pytest.raises(ValidationError, match="filename"):
-            index(record(filename="candidate_cand_other.mp4"))
+            record(filename="candidate_cand_other.mp4")
 
     def test_a_filename_with_a_path_separator_is_refused(self) -> None:
         with pytest.raises(ValidationError):
-            index(record(filename="../candidate_cand_0001.mp4"))
-
-    def test_dimensions_must_match_the_index(self) -> None:
-        with pytest.raises(ValidationError, match="540"):
-            index(record(width=360))
-
-    def test_a_repeated_candidate_is_refused(self) -> None:
-        with pytest.raises(ValidationError, match="more than once"):
-            index(record(), record())
-
-    def test_ranks_must_be_contiguous_from_one(self) -> None:
-        with pytest.raises(ValidationError, match="rank"):
-            index(record("cand_0001", rank=1), record("cand_0002", rank=3))
-
-    def test_a_preview_reaching_past_the_source_is_refused(self) -> None:
-        with pytest.raises(ValidationError, match="source"):
-            index(record(start=100.0, end=130.0, duration=30.0, measured_duration_seconds=30.0))
+            record(filename="../candidate_cand_0001.mp4")
 
     def test_a_measured_duration_far_from_the_interval_is_refused(self) -> None:
         with pytest.raises(ValidationError, match="measured"):
-            index(record(measured_duration_seconds=45.0))
+            record(measured_duration_seconds=45.0)
 
     def test_an_empty_file_is_refused(self) -> None:
         with pytest.raises(ValidationError):
-            index(record(size_bytes=0))
+            record(size_bytes=0)
+
+    # The rest are refused by PreviewIndex, over records that are each valid on
+    # their own. They are built first, so the refusal can only come from the
+    # index.
+
+    def test_dimensions_must_match_the_index(self) -> None:
+        smaller = record(width=360, height=640)
+        with pytest.raises(ValidationError, match="540"):
+            index(smaller)
+
+    def test_a_repeated_candidate_is_refused(self) -> None:
+        first, again = record(), record()
+        with pytest.raises(ValidationError, match="more than once"):
+            index(first, again)
+
+    def test_ranks_must_be_contiguous_from_one(self) -> None:
+        first = record("cand_0001", rank=1)
+        third = record("cand_0002", rank=3)
+        with pytest.raises(ValidationError, match="rank"):
+            index(first, third)
+
+    def test_a_preview_reaching_past_the_source_is_refused(self) -> None:
+        beyond = record(start=100.0, end=130.0, duration=30.0, measured_duration_seconds=30.0)
+        with pytest.raises(ValidationError, match="source"):
+            index(beyond)
 
 
 class TestFingerprint:

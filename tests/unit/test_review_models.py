@@ -201,10 +201,11 @@ class TestOriginalInterval:
 
 class TestReviewedAt:
     def test_a_naive_timestamp_is_refused(self) -> None:
+        naive = datetime(2026, 3, 1, 12, 0)  # noqa: DTZ001 - the point of the test
         with pytest.raises(ValidationError, match="UTC"):
-            approved(reviewed_at=datetime(2026, 3, 1, 12, 0))
+            approved(reviewed_at=naive)
 
     def test_a_non_utc_timestamp_is_refused(self) -> None:
-        offset = timezone(timedelta(hours=2))
+        elsewhere = datetime(2026, 3, 1, 12, 0, tzinfo=timezone(timedelta(hours=2)))
         with pytest.raises(ValidationError, match="UTC"):
-            approved(reviewed_at=datetime(2026, 3, 1, 12, 0, tzinfo=offset))
+            approved(reviewed_at=elsewhere)

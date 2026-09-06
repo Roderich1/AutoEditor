@@ -38,6 +38,7 @@ from content_engine.domain.preview_rules import (
 )
 from content_engine.services import preview_service
 from content_engine.services.preview_service import (
+    ROLLBACK_DIRNAME,
     STAGING_DIRNAME,
     PreviewPlan,
     PreviewService,
@@ -108,13 +109,9 @@ def source(tmp_path: Path) -> Path:
     return path
 
 
-def two_candidates() -> CandidateCollection:
-    return collect(
-        chunk_of(speech_transcript()),
-        [raw_candidate(10.0, 39.0), raw_candidate(60.0, 89.0, hook=88)],
-    )
-
-
+#: The published set is three previews on purpose. A shrinking shortlist then
+#: still holds two, so the "fail on the second file" injections are reachable in
+#: every scenario rather than silently not firing.
 def three_candidates() -> CandidateCollection:
     return collect(
         chunk_of(speech_transcript()),
@@ -122,6 +119,18 @@ def three_candidates() -> CandidateCollection:
             raw_candidate(10.0, 39.0),
             raw_candidate(60.0, 89.0, hook=88),
             raw_candidate(95.0, 118.0, hook=80),
+        ],
+    )
+
+
+def four_candidates() -> CandidateCollection:
+    return collect(
+        chunk_of(speech_transcript()),
+        [
+            raw_candidate(10.0, 39.0),
+            raw_candidate(60.0, 89.0, hook=88),
+            raw_candidate(95.0, 118.0, hook=80),
+            raw_candidate(39.5, 60.5, hook=75),
         ],
     )
 
@@ -137,15 +146,29 @@ def plan_for(source: Path, collection: CandidateCollection) -> PreviewPlan:
     )
 
 
+def shorter(plan: PreviewPlan) -> PreviewPlan:
+    """The same plan with the last candidate dropped."""
+    return PreviewPlan(
+        candidates=plan.candidates[:-1],
+        config=plan.config,
+        analysis_fingerprint=plan.analysis_fingerprint,
+        source_path=plan.source_path,
+        source_sha256=plan.source_sha256,
+        source_duration_seconds=plan.source_duration_seconds,
+    )
+
+
 def snapshot(directory: Path) -> dict[str, bytes]:
     return {path.name: path.read_bytes() for path in sorted(directory.rglob("*")) if path.is_file()}
 
 
 @pytest.fixture
 def published(tmp_path: Path, source: Path) -> tuple[Path, PreviewPlan, str, str]:
-    """A verified set of two previews on disk, and the identity recorded for it."""
+    """A verified set of three previews on disk, and the identity recorded for it."""
     directory = tmp_path.joinpath("previews")
-    plan = plan_for(source, two_candidates())
+    collection = three_candidates()
+    assert len(collection.candidates) == 3, "the fixture must really select three"
+    plan = plan_for(source, collection)
     outcome = service().generate(plan, directory, GENERATED_AT)
     return directory, plan, outcome.fingerprint, outcome.stage_config_sha256
 
@@ -163,7 +186,7 @@ def fail_on_write(target: str) -> Callable[..., None]:
 
 
 def fail_on_replace(nth: int) -> Callable[..., Any]:
-    """Replace `Path.replace` so the nth publication move refuses."""
+    """Refuse the nth move that places a staged preview into the directory."""
     real = Path.replace
     calls = {"count": 0}
 
@@ -180,14 +203,23 @@ def fail_on_replace(nth: int) -> Callable[..., Any]:
     return guarded
 
 
-def fail_on_unlink() -> Callable[..., None]:
-    """Replace `Path.unlink` so removing a stale preview refuses."""
-    real = Path.unlink
+def fail_on_move_aside(nth: int) -> Callable[..., Any]:
+    """Refuse the nth move that takes a published file out of the directory.
 
-    def guarded(self: Path, missing_ok: bool = False) -> None:
-        if self.suffix == ".mp4" and STAGING_DIRNAME not in str(self):
-            raise OSError(f"synthetic unlink failure on {self.name}")
-        real(self, missing_ok=missing_ok)
+    This is the step that replaced the old in-place `unlink` of a stale
+    preview: nothing is deleted in place any more, the whole published set is
+    moved aside. A failure here is the most expensive moment of the operation,
+    because part of the previous set has already left the directory.
+    """
+    real = Path.replace
+    calls = {"count": 0}
+
+    def guarded(self: Path, target: Any) -> Any:
+        if ROLLBACK_DIRNAME in str(target) and STAGING_DIRNAME not in str(self):
+            calls["count"] += 1
+            if calls["count"] == nth:
+                raise OSError(f"synthetic move-aside failure on file {nth}")
+        return real(self, target)
 
     return guarded
 
@@ -199,6 +231,9 @@ def failures(monkeypatch: pytest.MonkeyPatch) -> Iterator[pytest.MonkeyPatch]:
 
 #: Each entry installs one failure at one step of publication.
 INJECTIONS: dict[str, Callable[[pytest.MonkeyPatch], None]] = {
+    "first-move-aside": lambda mp: mp.setattr(Path, "replace", fail_on_move_aside(1)),
+    "second-move-aside": lambda mp: mp.setattr(Path, "replace", fail_on_move_aside(2)),
+    "last-move-aside": lambda mp: mp.setattr(Path, "replace", fail_on_move_aside(5)),
     "first-mp4-move": lambda mp: mp.setattr(Path, "replace", fail_on_replace(1)),
     "second-mp4-move": lambda mp: mp.setattr(Path, "replace", fail_on_replace(2)),
     "stage-config-write": lambda mp: mp.setattr(
@@ -212,7 +247,7 @@ INJECTIONS: dict[str, Callable[[pytest.MonkeyPatch], None]] = {
 
 class TestPublicationIsAllOrNothing:
     @pytest.mark.parametrize("injection", sorted(INJECTIONS))
-    @pytest.mark.parametrize("shortlist", ["same", "changed"])
+    @pytest.mark.parametrize("shortlist", ["same", "grown", "shrunk"])
     def test_a_failure_leaves_the_previous_set_byte_identical(
         self,
         published: tuple[Path, PreviewPlan, str, str],
@@ -223,12 +258,18 @@ class TestPublicationIsAllOrNothing:
     ) -> None:
         directory, plan, fingerprint, digest = published
         before = snapshot(directory)
-        assert len(before) == 4, before.keys()
+        assert len(before) == 5, before.keys()
 
-        # A changed shortlist is the dangerous case: publication has to remove a
-        # preview that is no longer wanted, so the old set is at risk before a
-        # single new file has been placed.
-        regenerate = plan if shortlist == "same" else plan_for(source, three_candidates())
+        # A shrinking shortlist is the dangerous case: a preview nobody wants
+        # any more has to disappear, so under the old design the previous set
+        # was already damaged before a single new file had been placed.
+        grown = four_candidates()
+        assert len(grown.candidates) == 4, "the grown scenario must really add one"
+        regenerate = {
+            "same": plan,
+            "grown": plan_for(source, grown),
+            "shrunk": shorter(plan),
+        }[shortlist]
         INJECTIONS[injection](failures)
 
         with pytest.raises((RenderError, OSError)):
@@ -252,29 +293,42 @@ class TestPublicationIsAllOrNothing:
 
         assert verify_previews(directory, fingerprint, digest, plan).previews
 
-    def test_a_failure_removing_a_stale_preview_changes_nothing(
+    def test_a_failure_while_the_old_set_is_being_moved_aside_restores_it(
         self,
         published: tuple[Path, PreviewPlan, str, str],
         failures: pytest.MonkeyPatch,
-        source: Path,
     ) -> None:
-        """The shortlist shrank, so publication must delete one -- and cannot."""
+        """The moment at which part of the previous set has left the directory.
+
+        Nothing is deleted in place any more, so this step is what the old
+        `unlink` of a stale preview became -- and it is where a failure costs
+        most, because the directory is already incomplete when it happens.
+        """
         directory, plan, fingerprint, digest = published
         before = snapshot(directory)
-        smaller = PreviewPlan(
-            candidates=plan.candidates[:1],
-            config=plan.config,
-            analysis_fingerprint=plan.analysis_fingerprint,
-            source_path=plan.source_path,
-            source_sha256=plan.source_sha256,
-            source_duration_seconds=plan.source_duration_seconds,
-        )
-        failures.setattr(Path, "unlink", fail_on_unlink())
+        failures.setattr(Path, "replace", fail_on_move_aside(2))
 
         with pytest.raises((RenderError, OSError)):
-            service("second").generate(smaller, directory, LATER)
+            service("second").generate(shorter(plan), directory, LATER)
 
         assert snapshot(directory) == before
+        assert verify_previews(directory, fingerprint, digest, plan).previews
+
+    def test_a_shrinking_shortlist_that_fails_keeps_the_dropped_preview(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        failures: pytest.MonkeyPatch,
+    ) -> None:
+        """The preview the new set would drop must come back with the rest."""
+        directory, plan, fingerprint, digest = published
+        dropped = preview_filename(plan.candidates[-1].id)
+        assert directory.joinpath(dropped).is_file()
+        failures.setattr(preview_service, "write_json", fail_on_write(PREVIEW_INDEX_FILENAME))
+
+        with pytest.raises((RenderError, OSError)):
+            service("second").generate(shorter(plan), directory, LATER)
+
+        assert directory.joinpath(dropped).is_file()
         assert verify_previews(directory, fingerprint, digest, plan).previews
 
     @pytest.mark.parametrize("injection", sorted(INJECTIONS))
@@ -298,11 +352,11 @@ class TestPublicationIsAllOrNothing:
     ) -> None:
         """The transaction must not have made the normal path a no-op."""
         directory, plan, _, _ = published
-        grown = plan_for(source, three_candidates())
+        grown = plan_for(source, four_candidates())
         outcome = service("second").generate(grown, directory, LATER)
 
-        assert len(outcome.index.previews) == 3
-        assert len(list(directory.glob("*.mp4"))) == 3
+        assert len(outcome.index.previews) == 4
+        assert len(list(directory.glob("*.mp4"))) == 4
         assert verify_previews(
             directory, outcome.fingerprint, outcome.stage_config_sha256, grown
         ).previews
@@ -311,19 +365,12 @@ class TestPublicationIsAllOrNothing:
         self, published: tuple[Path, PreviewPlan, str, str]
     ) -> None:
         directory, plan, _, _ = published
-        gone = preview_filename(plan.candidates[1].id)
-        smaller = PreviewPlan(
-            candidates=plan.candidates[:1],
-            config=plan.config,
-            analysis_fingerprint=plan.analysis_fingerprint,
-            source_path=plan.source_path,
-            source_sha256=plan.source_sha256,
-            source_duration_seconds=plan.source_duration_seconds,
-        )
+        gone = preview_filename(plan.candidates[-1].id)
+        smaller = shorter(plan)
         outcome = service("second").generate(smaller, directory, LATER)
 
         assert not directory.joinpath(gone).exists()
-        assert len(list(directory.glob("*.mp4"))) == 1
+        assert len(list(directory.glob("*.mp4"))) == 2
         assert verify_previews(
             directory, outcome.fingerprint, outcome.stage_config_sha256, smaller
         ).previews

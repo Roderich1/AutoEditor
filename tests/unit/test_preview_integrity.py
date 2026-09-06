@@ -135,14 +135,12 @@ class TestTheEncoderIsNotTakenAtItsWord:
             "content_engine.adapters.media.preview.run_command",
             lambda arguments, **_: None,
         )
+        renderer = FFmpegPreviewRenderer()
+        config = preview_stage_config(width=540, height=960)
+        source_path = tmp_path.joinpath("in.mp4")
+        output = tmp_path.joinpath("out.mp4")
         with pytest.raises(RenderError, match="produced no preview"):
-            FFmpegPreviewRenderer().render(
-                tmp_path.joinpath("in.mp4"),
-                0.0,
-                1.0,
-                tmp_path.joinpath("out.mp4"),
-                preview_stage_config(width=540, height=960),
-            )
+            renderer.render(source_path, 0.0, 1.0, output, config)
 
     def test_an_empty_file_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -153,26 +151,27 @@ class TestTheEncoderIsNotTakenAtItsWord:
             output.write_bytes(b"")
 
         monkeypatch.setattr("content_engine.adapters.media.preview.run_command", touch)
+        renderer = FFmpegPreviewRenderer()
+        config = preview_stage_config(width=540, height=960)
+        source_path = tmp_path.joinpath("in.mp4")
         with pytest.raises(RenderError, match="produced no preview"):
-            FFmpegPreviewRenderer().render(
-                tmp_path.joinpath("in.mp4"),
-                0.0,
-                1.0,
-                output,
-                preview_stage_config(width=540, height=960),
-            )
+            renderer.render(source_path, 0.0, 1.0, output, config)
 
     def test_a_preview_in_the_wrong_codec_is_refused(self, tmp_path: Path, source: Path) -> None:
         service = PreviewService(WritingRenderer(), FakeProbe(video_codec="vp9"))
+        plan = plan_for(source)
+        directory = tmp_path.joinpath("previews")
         with pytest.raises(RenderError, match="vp9"):
-            service.generate(plan_for(source), tmp_path.joinpath("previews"), GENERATED_AT)
+            service.generate(plan, directory, GENERATED_AT)
 
     def test_a_preview_reported_without_audio_is_refused(
         self, tmp_path: Path, source: Path
     ) -> None:
         service = PreviewService(WritingRenderer(), FakeProbe(audio_codec=None))
+        plan = plan_for(source)
+        directory = tmp_path.joinpath("previews")
         with pytest.raises(RenderError, match="no audio stream"):
-            service.generate(plan_for(source), tmp_path.joinpath("previews"), GENERATED_AT)
+            service.generate(plan, directory, GENERATED_AT)
 
     @pytest.mark.parametrize("codec", ["mp3", "opus", "vorbis", "pcm_s16le"])
     def test_a_preview_in_the_wrong_audio_codec_is_refused(
@@ -186,8 +185,10 @@ class TestTheEncoderIsNotTakenAtItsWord:
         recorded in the index as if it were AAC.
         """
         service = PreviewService(WritingRenderer(), FakeProbe(audio_codec=codec))
+        plan = plan_for(source)
+        directory = tmp_path.joinpath("previews")
         with pytest.raises(RenderError, match=codec):
-            service.generate(plan_for(source), tmp_path.joinpath("previews"), GENERATED_AT)
+            service.generate(plan, directory, GENERATED_AT)
 
     def test_the_expected_audio_codec_is_accepted(self, tmp_path: Path, source: Path) -> None:
         """The check must not refuse a correct preview."""
@@ -227,12 +228,10 @@ class TestTheEncoderIsNotTakenAtItsWord:
             status=CandidateStatus.SUGGESTED,
         )
         service = PreviewService(WritingRenderer(), FakeProbe())
+        plan = plan_for(source, candidates=(unranked,))
+        directory = tmp_path.joinpath("previews")
         with pytest.raises(RenderError, match="no rank"):
-            service.generate(
-                plan_for(source, candidates=(unranked,)),
-                tmp_path.joinpath("previews"),
-                GENERATED_AT,
-            )
+            service.generate(plan, directory, GENERATED_AT)
 
     def test_an_index_the_stage_cannot_describe_is_refused(
         self, tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch
@@ -244,8 +243,10 @@ class TestTheEncoderIsNotTakenAtItsWord:
             lambda *_, **__: "a synthetic disagreement",
         )
         service = PreviewService(WritingRenderer(), FakeProbe())
+        plan = plan_for(source)
+        directory = tmp_path.joinpath("previews")
         with pytest.raises(RenderError, match="synthetic disagreement"):
-            service.generate(plan_for(source), tmp_path.joinpath("previews"), GENERATED_AT)
+            service.generate(plan, directory, GENERATED_AT)
 
     def test_an_index_that_fails_its_own_schema_is_refused_as_a_render_error(
         self, tmp_path: Path, source: Path
@@ -257,32 +258,31 @@ class TestTheEncoderIsNotTakenAtItsWord:
         )
         # Only the second-ranked candidate, so the index ranks start at 2.
         service = PreviewService(WritingRenderer(), FakeProbe())
+        plan = plan_for(source, candidates=(selection.candidates[1],))
+        directory = tmp_path.joinpath("previews")
         with pytest.raises(RenderError, match="cannot describe"):
-            service.generate(
-                plan_for(source, candidates=(selection.candidates[1],)),
-                tmp_path.joinpath("previews"),
-                GENERATED_AT,
-            )
+            service.generate(plan, directory, GENERATED_AT)
 
 
 class TestRecordInvariants:
     def test_an_inverted_interval_is_refused(self) -> None:
+        payload: dict[str, Any] = {
+            "candidate_id": "cand_0001",
+            "rank": 1,
+            "start": 39.0,
+            "end": 10.0,
+            "duration": 0.5,
+            "filename": preview_filename("cand_0001"),
+            "width": 540,
+            "height": 960,
+            "measured_duration_seconds": 0.5,
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "sha256": "d" * 64,
+            "size_bytes": 10,
+        }
         with pytest.raises(ValueError, match="before its start"):
-            PreviewRecord(
-                candidate_id="cand_0001",
-                rank=1,
-                start=39.0,
-                end=10.0,
-                duration=0.5,
-                filename=preview_filename("cand_0001"),
-                width=540,
-                height=960,
-                measured_duration_seconds=0.5,
-                video_codec="h264",
-                audio_codec="aac",
-                sha256="d" * 64,
-                size_bytes=10,
-            )
+            PreviewRecord(**payload)
 
 
 class TestCoherenceEdges:

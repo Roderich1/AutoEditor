@@ -144,8 +144,11 @@ class TestGeneration:
         self, tmp_path: Path, source: Path, media: FakeMedia
     ) -> None:
         source.unlink()
+        engine = service()
+        plan = plan_for(source)
+        directory = tmp_path.joinpath("previews")
         with pytest.raises(RenderError, match="source"):
-            service().generate(plan_for(source), tmp_path.joinpath("previews"), GENERATED_AT)
+            engine.generate(plan, directory, GENERATED_AT)
         assert media.calls == []
 
 
@@ -156,8 +159,9 @@ class TestFailuresLeaveNothingBehind:
         plan = plan_for(source)
         media.fail_for = {preview_filename(plan.candidates[1].id)}
         directory = tmp_path.joinpath("previews")
+        engine = service()
         with pytest.raises(RenderError):
-            service().generate(plan, directory, GENERATED_AT)
+            engine.generate(plan, directory, GENERATED_AT)
         survivors = sorted(path.name for path in directory.rglob("*")) if directory.exists() else []
         assert survivors == []
 
@@ -167,8 +171,9 @@ class TestFailuresLeaveNothingBehind:
         plan = plan_for(source)
         media.dimensions = {preview_filename(plan.candidates[0].id): (360, 640)}
         directory = tmp_path.joinpath("previews")
+        engine = service()
         with pytest.raises(RenderError, match="540x960"):
-            service().generate(plan, directory, GENERATED_AT)
+            engine.generate(plan, directory, GENERATED_AT)
         assert not directory.joinpath(PREVIEW_INDEX_FILENAME).exists()
 
     def test_a_preview_of_the_wrong_length_is_refused(
@@ -176,15 +181,20 @@ class TestFailuresLeaveNothingBehind:
     ) -> None:
         plan = plan_for(source)
         media.measured = {preview_filename(plan.candidates[0].id): 3.0}
+        directory = tmp_path.joinpath("previews")
+        engine = service()
         with pytest.raises(RenderError, match="duration"):
-            service().generate(plan, tmp_path.joinpath("previews"), GENERATED_AT)
+            engine.generate(plan, directory, GENERATED_AT)
 
     def test_a_preview_without_audio_is_refused(
         self, tmp_path: Path, source: Path, media: FakeMedia
     ) -> None:
         media.audio = False
+        engine = service()
+        plan = plan_for(source)
+        directory = tmp_path.joinpath("previews")
         with pytest.raises(RenderError, match="audio"):
-            service().generate(plan_for(source), tmp_path.joinpath("previews"), GENERATED_AT)
+            engine.generate(plan, directory, GENERATED_AT)
 
     def test_a_failed_regeneration_keeps_the_previous_previews(
         self, tmp_path: Path, source: Path, media: FakeMedia
@@ -195,8 +205,9 @@ class TestFailuresLeaveNothingBehind:
         before = {path.name: path.read_bytes() for path in sorted(directory.iterdir())}
 
         media.fail_for = {preview_filename(plan.candidates[1].id)}
+        engine = service()
         with pytest.raises(RenderError):
-            service().generate(plan, directory, GENERATED_AT)
+            engine.generate(plan, directory, GENERATED_AT)
         after = {path.name: path.read_bytes() for path in sorted(directory.iterdir())}
         assert after == before
 

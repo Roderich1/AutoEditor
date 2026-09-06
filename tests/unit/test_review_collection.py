@@ -96,17 +96,16 @@ class TestCollectionInvariants:
 
     def test_an_edit_beyond_the_source_is_refused(self) -> None:
         candidate = selected()[0]
+        beyond = EditedDecision(
+            candidate_id=candidate.id,
+            original_start=candidate.start,
+            original_end=candidate.end,
+            final_start=candidate.start,
+            final_end=SOURCE_DURATION + 1.0,
+            reviewed_at=NOW,
+        )
         with pytest.raises(ValidationError, match="source"):
-            collection_of(
-                EditedDecision(
-                    candidate_id=candidate.id,
-                    original_start=candidate.start,
-                    original_end=candidate.end,
-                    final_start=candidate.start,
-                    final_end=SOURCE_DURATION + 1.0,
-                    reviewed_at=NOW,
-                )
-            )
+            collection_of(beyond)
 
     def test_an_edit_ending_exactly_at_the_source_duration_is_allowed(self) -> None:
         candidate = selected()[0]
@@ -123,8 +122,9 @@ class TestCollectionInvariants:
         assert collection.decisions[0].final_interval == (candidate.start, SOURCE_DURATION)
 
     def test_an_update_before_creation_is_refused(self) -> None:
+        earlier = NOW.replace(hour=11)
         with pytest.raises(ValidationError, match="updated_at"):
-            collection_of(updated_at=NOW.replace(hour=11))
+            collection_of(updated_at=earlier)
 
     def test_unknown_fields_are_refused(self) -> None:
         with pytest.raises(ValidationError):

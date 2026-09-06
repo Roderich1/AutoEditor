@@ -61,6 +61,7 @@ from content_engine.domain.preview_rules import (
 from content_engine.domain.previews import PREVIEW_INDEX_SCHEMA_VERSION, PreviewIndex
 from content_engine.domain.review import (
     DECISIONS_SCHEMA_VERSION,
+    DETAIL_MAX_LENGTH,
     ApprovedDecision,
     EditedDecision,
     RejectedDecision,
@@ -802,7 +803,11 @@ def _reuse_or_recover_previews(
     )
 
 
-class _SessionOver(Exception):  # noqa: N818 - control flow, not a failure
+#: Named without an `Error` suffix on purpose: this is control flow, not a
+#: failure. The rationale lives here rather than after the suppression code,
+#: because a `noqa` followed by prose is not valid suppression syntax and every
+#: analyser reading it has to guess where the code list ends.
+class _SessionOver(Exception):  # noqa: N818
     """The reviewer stopped. Carries how, so the report can say which it was.
 
     Not a ``ContentEngineError``: quitting, reaching the end of input and
@@ -1000,12 +1005,7 @@ def _run_review_session(
         return _complete_review(run_service, run_path, manifest, session, total)
 
     if session.complete:
-        counts = session.collection.counts
-        return (
-            f"[green]Already reviewed:[/green] all {total} candidates have a decision "
-            f"({counts['approved']} approved, {counts['rejected']} rejected, "
-            f"{counts['edited']} edited). Use --force to review them again."
-        )
+        return _settle_finished_review(run_service, run_path, manifest, session, total)
 
     console.print(
         f"Reviewing {len(session.pending)} of {total} candidates. "
@@ -1034,13 +1034,59 @@ def _run_review_session(
     )
 
 
-def _complete_review(
+def _settle_finished_review(
     run_service: RunService,
     run_path: Path,
     manifest: RunManifest,
     session: ReviewSession,
     total: int,
 ) -> str:
+    """A session that had nothing left to ask: report it, and settle the status.
+
+    Reaching here with the run already REVIEWED is the ordinary case, and it
+    must not write a byte: the decisions and the manifest are exactly what the
+    completing session left behind.
+
+    Reaching here with the run **not** REVIEWED is the case this exists for.
+    `review --force` moves a finished run back to READY_FOR_REVIEW before
+    asking anything, and writes no decisions until the first new answer -- so a
+    reviewer who forces and then quits leaves a complete set of decisions
+    beside a status that says the review is open. Reporting "already reviewed"
+    and stopping, which is what this used to do, stranded the run there
+    permanently: every later invocation took the same branch and said the same
+    thing while the status never moved.
+
+    The decisions have already been proved coherent against this analysis and
+    this shortlist by `require_decisions`, so the review really is finished and
+    the status is the only thing that disagrees. It is corrected here, which is
+    the same recovery the analysis and preview stages perform when their
+    artifacts outlive a failure that came after them.
+    """
+    counts = session.collection.counts
+    tally = (
+        f"{counts['approved']} approved, {counts['rejected']} rejected, {counts['edited']} edited"
+    )
+    if manifest.status is RunStatus.REVIEWED:
+        return (
+            f"[green]Already reviewed:[/green] all {total} candidates have a decision "
+            f"({tally}). Use --force to review them again."
+        )
+    previous = manifest.status
+    fingerprint, _ = _record_completed_review(run_service, run_path, manifest, session)
+    return (
+        f"[green]Review recovered:[/green] all {total} candidates already have a decision "
+        f"({tally}), and they still match this analysis, so the run moves from {previous} "
+        f"to {RunStatus.REVIEWED}. Fingerprint {fingerprint[:12]}."
+    )
+
+
+def _record_completed_review(
+    run_service: RunService,
+    run_path: Path,
+    manifest: RunManifest,
+    session: ReviewSession,
+) -> tuple[str, str]:
+    """Advance to REVIEWED and record the stage. Refuses a half-finished session."""
     fingerprint, stage_config_digest = session.stage_record()
     manifest = run_service.advance(run_path, manifest, RunStatus.REVIEWED)
     run_service.record_stage(
@@ -1051,6 +1097,18 @@ def _complete_review(
         stage_config_digest,
         DECISIONS_SCHEMA_VERSION,
     )
+    return fingerprint, stage_config_digest
+
+
+def _complete_review(
+    run_service: RunService,
+    run_path: Path,
+    manifest: RunManifest,
+    session: ReviewSession,
+    total: int,
+) -> str:
+    """A session that just finished the last pending candidate."""
+    fingerprint, _ = _record_completed_review(run_service, run_path, manifest, session)
     counts = session.collection.counts
     return (
         f"[green]Review complete:[/green] {total} candidates decided — "
@@ -1161,13 +1219,26 @@ def _ask_for_rejection(candidate: ValidatedCandidate) -> RejectedDecision:
         if reason is not REASON_REQUIRING_DETAIL:
             return _rejection(candidate, reason, None)
         while True:
-            detail = _ask(f"Detail (required for {REASON_REQUIRING_DETAIL}): ")
-            if detail:
-                return _rejection(candidate, reason, detail)
-            console.print(
-                f"[yellow]{REASON_REQUIRING_DETAIL} carries no meaning on its own; "
-                "a detail is required.[/yellow]"
+            detail = _ask(
+                f"Detail (required for {REASON_REQUIRING_DETAIL}, "
+                f"up to {DETAIL_MAX_LENGTH} characters): "
             )
+            if not detail:
+                console.print(
+                    f"[yellow]{REASON_REQUIRING_DETAIL} carries no meaning on its own; "
+                    "a detail is required.[/yellow]"
+                )
+                continue
+            try:
+                return _rejection(candidate, reason, detail)
+            except ValidationError as error:
+                # The model owns the length limit; the loop only re-asks. A
+                # ValidationError escaping here reached the CLI's last-resort
+                # handler and exited 1 as an unexpected internal error, after
+                # earlier decisions had already been saved -- so a reviewer who
+                # pasted too much text saw a crash and no sign that their work
+                # had survived.
+                console.print(f"[yellow]{_first_message(error)}[/yellow]")
 
 
 def _match_reason(answer: str, reasons: list[EditorialReason]) -> EditorialReason | None:
