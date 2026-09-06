@@ -6,26 +6,27 @@
 - Default branch: `main`
 - Merged pull requests: `#1 Proyecto base`, `#2 documentacion del proyecto base`,
   `#3 Stabilize Content Engine V0.1-V0.3` (merge commit `d047479`),
-  `#4 Candidate engine foundation` (merge commit `70fb6ed`)
-- Active branch: `feat/candidate-engine-pipeline`, based on `70fb6ed`
+  `#4 Candidate engine foundation` (merge commit `70fb6ed`),
+  `#5 Candidate engine deterministic pipeline` (merge commit `1b15e0f`)
+- Active branch: `feat/gemini-candidate-provider`, based on `1b15e0f`
 - Current package version: `0.1.0`
 
 ## Verification baseline
 
-`main` at `70fb6ed` was verified before this branch started: ruff, ruff format
-(72 files), mypy strict (35 files), 836 tests at 99.16%, `uv build`, and
-GitHub Actions on Ubuntu, all green. That is the baseline this branch is
-measured against.
+`main` at `1b15e0f` was verified before this branch started: ruff, ruff format
+(84 files), mypy strict (40 files), 1086 tests at 99.38%, 13 integration tests
+and `uv build`, all green. That is the baseline this branch is measured against.
 
-Last verification, on `feat/candidate-engine-pipeline`, Windows 11,
+Last verification, on `feat/gemini-candidate-provider`, Windows 11,
 Python 3.12.10, FFmpeg 9.0.1:
 
 | Check | Result |
 |---|---|
 | `uv run ruff check .` | passed |
-| `uv run ruff format --check .` | passed, 84 files |
-| `uv run mypy src` | passed, 40 files, strict |
-| `uv run pytest` | 1086 passed, 250 more than the 836 on `main` |
+| `uv run ruff format --check .` | passed, 94 files |
+| `uv run mypy src` | passed, 43 files, strict |
+| `uv run pytest` | 1252 passed, 1 skipped, 166 more than the 1086 on `main` |
+| The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
@@ -33,13 +34,20 @@ Python 3.12.10, FFmpeg 9.0.1:
 | `uv run pytest -m integration --no-cov` | 13 passed with real FFmpeg |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
 | Transcription digests unchanged by the canonical extraction | pinned to `main` at `d047479` and asserted |
-| Provider SDK, network client or yt-dlp imported anywhere in `src/` | none; asserted by an AST sweep |
-| Provider SDK in the installed dependency closure | none; the wheel installs 17 packages, none of them a provider |
+| Provider SDK, network client or yt-dlp imported anywhere in `src/` | only `adapters/analysis/gemini_analyzer.py`; asserted by two AST sweeps, plus a test that the one exempted file still exists so a rename cannot silently widen the hole |
+| Installed dependency closure | 38 packages; `google-genai` 2.22.0 and its `google-auth` are present by ADR-026, and no other provider SDK, no yt-dlp and no faster-whisper |
 | `analyze` end to end from the installed wheel, outside the repository | run reaches ANALYZED, reuse byte-identical, refusal exits 3, `--force` regenerates, analyzer failure exits 5, recovery from FAILED_ANALYSIS |
 | Each of the four artifacts edited or deleted in turn | every case refused with exit 3, and every other file plus the manifest left byte-identical |
 | Candidate collection identical under 24 permutations of the proposals | asserted |
 | Stage configuration coherent with the manifest | fingerprint rebuilt from the artifact matches the recorded one |
-| `uv build` | wheel and sdist built; the wheel ships `content_engine/resources/default.toml` |
+| `uv build` | wheel and sdist built; both ship `content_engine/resources/prompts/clip_candidates/v1.txt` beside `default.toml` |
+| Prompt identity from the installed wheel | `clip_candidates/v1`, 6656 chars, LF endings, SHA-256 identical to the checkout's |
+| `analyze` without a credential, from the wheel | exit 2, no traceback, the message names `GEMINI_API_KEY` and `--fixture`, and the manifest and analysis directory are untouched |
+| `analyze --fixture` without a credential, from the wheel | exit 0, recorded as `fixture` with prompt `fake-fixture/v1`, never as Gemini |
+| Fixture artifacts offered to the provider, and the reverse | exit 3 both ways, nothing written; no special case, the stage configuration digest decides |
+| Credential or credential name anywhere under a run directory | none; searched recursively as bytes |
+| Provider reuse with the credential removed | exit 0, reuse reported, no client built, the variable never read, all four artifacts and the manifest byte-identical. Asserted in the unit suite against a stand-in analyzer, **not** from the wheel: producing the provider artifacts to reuse would itself need a real call |
+| An unknown `analysis.prompt_version`, from the wheel | exit 2 before the run is touched, in both fixture and provider mode, with no silent reuse of the artifacts the known prompt produced |
 | Wheel in a clean venv, arbitrary working directory with spaces and non-ASCII characters | `doctor`, `inspect`, `run`, `transcribe` all work |
 | Real faster-whisper transcription | passed, model `small` on cpu/int8, 34 s of Spanish technical speech |
 | Artifacts UTF-8 without BOM, LF endings | verified byte by byte |
@@ -70,7 +78,7 @@ Coverage:
 
 | Scope | Coverage |
 |---|---|
-| Total | 99.38% (2107 statements, 13 missed) |
+| Total | 99.45% (2384 statements, 13 missed) |
 | Domain | 100% |
 | Services | 100% |
 | Adapters | 100% except the faster-whisper decode loop |
@@ -91,11 +99,13 @@ Files with meaningful uncovered lines:
   decode loop. Covering it needs a real model, so it is verified manually
   instead. Hardware resolution and segment translation around it are covered.
 
-Every module added by CE-030 to CE-033 is at 100%: `domain/candidate_rules.py`,
-`domain/analysis_rules.py`, `services/analysis_service.py` and
-`adapters/analysis/fixture_analyzer.py`. The 13 uncovered lines are all
-pre-existing: the faster-whisper decode loop, `main()` and `__main__`, one
-transcription warning branch and two configuration lines.
+Every module added by CE-026, CE-028 and CE-029 is at 100%:
+`adapters/analysis/prompt.py`, `adapters/analysis/structured_output.py` and
+`adapters/analysis/gemini_analyzer.py`, as are the CE-030 to CE-033 modules
+beside them. The 13 uncovered lines are the same pre-existing ones as before:
+the faster-whisper decode loop, `main()` and `__main__`, one transcription
+warning branch and two configuration lines. Coverage rose from 99.38% to 99.45%
+across the branch.
 
 This baseline must be updated after every milestone or PR.
 
@@ -215,7 +225,7 @@ Implemented in PR #4, pending merge:
 
 CE-023, CE-024, CE-025 and CE-027 are merged into `main` as part of `70fb6ed`.
 
-### V0.4 deterministic pipeline — in PR B, pending merge
+### V0.4 deterministic pipeline — merged in `1b15e0f` (PR #5)
 
 CE-030 to CE-033 and the `analyze` command, in `domain/candidate_rules.py`,
 `domain/analysis_rules.py`, `services/analysis_service.py` and
@@ -245,10 +255,9 @@ ADR-023 the fixture executor.
   digest, the chunk, the ordinal within its batch, the proposal and the prompt
   identity, so two identical proposals from two overlapping chunks stay two
   records.
-- **The `analyze` command**: `analyze RUN_ID --fixture PATH [--config PATH]
-  [--force]`. No network, no SDK, no credential. A fixture that answers a chunk
-  the run does not have, or fails to answer one it does, is refused before the
-  first call.
+- **The `analyze` command**: with `--fixture`, no network, no SDK and no
+  credential. A fixture that answers a chunk the run does not have, or fails to
+  answer one it does, is refused before the first call.
 - **Four artifacts**: `analysis/chunks.json`, `analysis/candidates.raw.json`,
   `analysis/config.effective.json` and `analysis/candidates.json`, all computed
   and validated in memory first, then written atomically as UTF-8 with LF
@@ -302,8 +311,94 @@ ADR-023 the fixture executor.
   carry both a recorded failure and candidates; it may keep the response beside
   an error, which is the most useful thing about a failure.
 
-Not implemented yet: CE-026 prompt `clip_candidates/v1`, CE-028 Gemini adapter,
-CE-029 structured output parsing. Those are PR C.
+### V0.4 provider — in PR C, pending merge
+
+CE-026, CE-028 and CE-029, in `resources/prompts/clip_candidates/v1.txt`,
+`adapters/analysis/prompt.py`, `adapters/analysis/structured_output.py` and
+`adapters/analysis/gemini_analyzer.py`. ADR-025 records the prompt's packaging,
+ADR-026 the dependency decision, ADR-027 retries and exit codes.
+
+- **CE-026, the prompt.** `clip_candidates/v1`, a packaged resource read through
+  `importlib.resources`, so it is found from a checkout, an installed wheel and
+  any working directory. Its SHA-256 is taken over the text with line endings
+  normalised, so the same prompt has the same identity on Windows and on Linux.
+  `analysis.prompt_version` **selects** it: the short name a profile writes
+  (`v1`) resolves to the resource, the text sent, the identity recorded
+  (`clip_candidates/v1`), the digest, the stage configuration, the fingerprint
+  and therefore reuse. An unknown version exits 2 before the run is touched, in
+  fixture mode as well as provider mode, and is never resolved to the only one
+  that happens to exist.
+  It states the safety half explicitly: the transcript is data, instructions
+  inside it are never followed, nothing is executed, nothing is invented, no
+  total score is returned, virality is never promised, and
+  `run_target_candidates` is not a per-chunk quota.
+- **CE-029, structured output.** Two related pieces, deliberately not one
+  object.
+
+  `provider_response_schema()` builds the **transport schema**: the compatible
+  subset that is actually sent to `generateContent`. It carries types, the
+  category enum, required fields and their ordering, and nothing else. It exists
+  because handing the Pydantic models to the SDK produced a request the API
+  rejects outright — `extra="forbid"` serialises to `additionalProperties`,
+  which is not in the accepted subset — and swept this project's own docstrings
+  into `description` fields, shipping internal commentary to the model inside
+  every request.
+
+  `ProviderResponse`, `ProviderCandidate` and `ProviderScores` are the **parser**,
+  and they validate strictly whatever comes back: an object, a known category,
+  integer scores within 0–100, string lengths, no missing field, no extra field,
+  no `total_score`, no `NaN` or infinity.
+
+  The two are kept in step by derivation and by tests rather than by being the
+  same object. The transport schema takes its field names from
+  `ProviderScores.model_fields` and its categories from `ClipCategory`, and a
+  test asserts it lists exactly the fields the parser expects. **The constraints
+  are therefore not stated once.** Bounds, string lengths, the rejection of extra
+  fields and the rejection of non-finite numbers are enforced *only* locally, on
+  the answer, because the wire format cannot express them or rejects them. A
+  provider that ignores the schema is caught by the parser, which is the layer
+  that has to be trusted regardless.
+
+  Timestamps are owned by neither — a negative or inverted interval must reach
+  CE-030 to be measured and recorded as invalid, because refusing it here would
+  replace a measurement with a parse error. `NaN` and the infinities are the
+  exception: not a timestamp at all.
+- **CE-028, the adapter.** `GeminiContentAnalyzer` behind the port, the one file
+  in the package permitted to import a provider SDK or a network client. The
+  hashed prompt travels as `system_instruction`; the operator's parameters as a
+  JSON block; the speech after them inside a delimited block. Tools, tool
+  configuration and automatic function calling are switched off explicitly.
+- **Two modes that never share artifacts.** `analyze RUN_ID [--fixture PATH]`.
+  Nothing special-cases the separation: the stage configuration names whatever
+  actually ran and its digest decides reuse, so switching either way is refused
+  with exit 3 and nothing written.
+- **Failure classification.** A missing credential, a missing SDK or a
+  placeholder model is exit 2 and leaves the run untouched — nothing was called,
+  so nothing is recorded. A provider failure is exit 5 and `FAILED_ANALYSIS`.
+  Retries cover transport errors, 408, 429 and 5xx only, three attempts with a
+  2s/8s backoff; a 400, 401, 403 or schema violation is never retried.
+- **Identity before construction.** What a run *would* record — analyzer,
+  version, model, selected prompt — is computed with no SDK import, no
+  environment read, no client and no socket. That identity builds the plan and
+  decides reuse, so verifying four finished artifacts never needs a credential:
+  a machine that has lost its key can still be asked what a completed run
+  contains, and recovery from `FAILED_ANALYSIS` works the same way. Only once
+  candidates must actually be produced are the SDK, the model and the credential
+  validated and a client built.
+- **The manifest names the prompt that was sent.**
+  `manifest.versions.prompt_version` and `prompt_sha256` hold the selected
+  prompt for a provider run and `null` for a fixture run, and are rewritten in
+  both directions by `--force` so they never describe the previous executor.
+  That is a narrower question than the stage configuration's field of the same
+  name, which records the prompt identity of whatever ran and for which the
+  fixture's `fake-fixture/v1` is truthful.
+- **Credentials.** `GEMINI_API_KEY` is read only when the real analyzer is
+  constructed — which is now the produce path only. A fixture run never consults
+  it, a reuse never consults it, and tests assert the variable is not merely
+  unused but never looked at. Error messages are rebuilt from the
+  status code rather than copied, because the SDK's own `str()` embeds the whole
+  decoded response body; the environment is read on the failure path only, to
+  redact a key the provider echoed back.
 
 ### Configuration levels for the analysis stage
 
@@ -313,6 +408,86 @@ prompt and fixture identity, the chunking and candidate settings, and every rule
 and schema version. `manifest.stages["analysis"]` records the fingerprint, the
 digest of that file, the schema version and the completion time, exactly as the
 transcription stage does.
+
+## The real video: the first real Gemini run
+
+A 35-minute Spanish Linux tutorial held locally under `samples-local/` (ignored
+by Git, never committed, never sent anywhere — Gemini receives transcript
+chunks, never media).
+
+| Step | Result |
+|---|---|
+| `ffprobe` | 2101.61 s (35.0 min), 640x360, h264 at 23.976 fps, AAC stereo 44.1 kHz, 55.1 MB |
+| `content-engine run` | reached `AUDIO_READY`; normalised WAV extracted |
+| `content-engine transcribe --config configs/fast.toml` | 1346 segments, 6398 words, `es`, 618.95 s on cpu/int8, RTF 0.2945, model `small` |
+| Chunking, 360 s window and 30 s overlap | **7 chunks**, 125–392 segments each, 78 074 characters in total |
+| `content-engine analyze RUN_ID --config configs/fast.toml` | **exit 0 in 202 s**, one call per chunk, no retries, no `--force` |
+| Second `analyze`, credential present | exit 0 in 0.5 s, "Candidates reused", all four artifacts and the manifest byte-identical |
+| Second `analyze`, credential removed from the process | exit 0 in 0.48 s, same reuse, byte-identical — a call is impossible without a key, so this is the proof of zero calls |
+
+Recorded by the run: status `ANALYZED`, provider `gemini`, model
+`gemini-3.5-flash-lite`, `prompt_version` `clip_candidates/v1`, `prompt_sha256`
+`557e5539…`, `fixture_sha256` null, fingerprint `b6f2c48acd57`. All four
+artifacts UTF-8 without BOM and LF. All seven raw responses parse as JSON. Every
+selected candidate lies inside the source **and** inside its own chunk. Neither
+the credential nor the string `GEMINI_API_KEY` appears in any of the 13 files
+under the run, and `workspace/runs/` is ignored, so nothing reached Git.
+
+### Consumption
+
+| | |
+|---|---|
+| Calls | 8 — 7 for the production, 1 for the opt-in live test |
+| Retries | 0 |
+| Wall time | 202 s for the seven, ~29 s per chunk |
+| Tokens, measured | only for the opt-in call: 1771 in, 5 out. **The command does not report tokens**, so the seven production calls are unmeasured |
+| Cost | **not calculable here**. The API returns token counts, not prices, and the command does not surface them |
+| `modelVersion` reported | `gemini-3.5-flash-lite` on every call — the alias, with no revision suffix |
+
+### The funnel
+
+```text
+proposed          23      across 7 chunks (1 to 5 per chunk)
+invalid            2      1 too_long (106.4 s), 1 too_short (12.2 s)
+below min score    0
+deduplicated       0
+beyond the cap     6
+selected          15      max_candidates = 15, so the cap bound
+```
+
+Boundary snapping had almost nothing to do: 5 of 15 boundaries moved at all,
+mean absolute adjustment 0.06 s, and every start snapped to a segment start.
+That is a fact about the prompt format rather than a quality result — the chunk
+text presents one timestamped line per segment, so the model returns segment
+boundaries because those are the numbers in front of it.
+
+### Preliminary quality, on one video
+
+Eleven intervals were written down from the transcript **before** the call, kept
+outside Git. Comparing them to what was selected, by temporal IoU:
+
+- **8 of 11** overlap a selected candidate at IoU > 0.15;
+- **2 of 11** reach the IoU 0.50 the specification names for evaluation
+  (distributions 0.68, `cp -r` 0.67);
+- the hidden-files interval was refused as `too_short` (12.2 s), which was
+  predicted in the manual notes and is the rule working;
+- the `pwd` and relative-path intervals were proposed and fell out at the cap,
+  not for being wrong.
+
+Candidates that look genuinely useful: `cp` refusing a directory without `-r`
+(problem → cause → fix), removing a non-empty directory, case sensitivity, and
+what a distribution is. Weak ones: several are screen narration ("vamos a venir
+acá a este icono") that reads as context-dependent however complete the idea is,
+and the `small` transcription garbles technical vocabulary, so a topic or hook
+can be wrong where the interval is right.
+
+**What this does and does not establish.** The integration is real: a live
+provider, a versioned prompt, structured output, seven calls, four artifacts,
+proved reuse. The preliminary signal on this one video is encouraging. General
+candidate quality remains **undemonstrated** — one video, eleven intervals I
+chose from text without watching it, and a loose threshold on most of the
+matches. The specification asks for at least five representative videos, and
+that work has not been done.
 
 ## Known limitations
 
@@ -326,16 +501,34 @@ transcription stage does.
   non-ASCII characters in a source path are replaced with U+FFFD inside
   `manifest.failure.message`. `manifest.input.path` is unaffected and remains
   exact.
-- `analysis.model` is set to `gemini-3.5-flash-lite`, the model ADR-019 plans to
-  use. It has not been exercised against a live API, because this change adds no
-  adapter and makes no call.
+- **`model` is the identifier requested. It is also what the provider reported
+  back**, on every one of the eight calls made so far: `modelVersion` came back
+  as the bare alias `gemini-3.5-flash-lite`, never a suffixed build. A separate
+  `model_resolved` field would therefore duplicate `model`, and none was added.
+  One provider, one day; `reported_models` is where a suffixed build would first
+  appear.
+- **The command reports no token usage.** The provider returns counts and the
+  adapter accumulates them, but nothing surfaces them from `analyze`, so the
+  seven production calls are unmeasured and their cost is not calculable from
+  this repository. Only the opt-in live test prints them.
 - `configs/quality.toml` restates the packaged defaults verbatim, so it is a
   no-op overlay. The profiles are not shipped inside the wheel either, so a
   wheel-only installation has no `--config` profile to point at.
-- The candidate engine has never seen real model output. Every proposal it has
-  processed was written by hand into a fixture, so the pipeline is verified and
-  the *quality* of what it ranks is entirely unmeasured. That measurement needs
-  CE-026 and CE-028.
+- The candidate engine has now seen real model output exactly once, on one
+  video. That is enough to show the integration works end to end and to give a
+  first signal; it is not a measurement of candidate quality. The specification
+  asks for at least five representative videos, and the transcript used here came
+  from the `small` model, which garbles technical vocabulary.
+- An unparseable provider response is not persisted. `raw_response` is only
+  carried on a successful batch and nothing is written until all four artifacts
+  are valid, so the malformed reply — the single most useful artifact for
+  debugging a prompt — survives only as a bounded excerpt in the error message.
+  Keeping it would mean writing a partial artifact, which would break the
+  guarantee that a failed stage leaves nothing behind. ADR-027 records the
+  trade-off.
+- Retry counts and backoff are module constants, not configuration. They change
+  how long a failure takes, never what the artifacts contain, so they are
+  outside the stage configuration and the fingerprint by design.
 - Grounding is coarse by design. A timestamp anywhere inside a long monologue is
   grounded, because it falls inside a segment. The rule refuses timestamps the
   transcript cannot support at all; it does not judge whether the moment is good.
@@ -355,13 +548,15 @@ transcription stage does.
 ## Current priority
 
 V0.4, the Candidate Intelligence Engine (CE-023–CE-033). The foundation
-(CE-023, CE-024, CE-025, CE-027) is merged as `70fb6ed`. The deterministic
-pipeline (CE-030–CE-033) and the `analyze` command are on
-`feat/candidate-engine-pipeline`, pending review.
+(CE-023, CE-024, CE-025, CE-027) is merged as `70fb6ed`; the deterministic
+pipeline (CE-030–CE-033) and the `analyze` command as `1b15e0f`. CE-026, CE-028
+and CE-029 are on `feat/gemini-candidate-provider`, pending review.
 
-Next is PR C: CE-026 `clip_candidates/v1`, CE-028 the Gemini adapter and CE-029
-structured-output parsing, which is the first change that will make a real call
-and the first that can say anything about candidate quality.
+That completes CE-023–CE-033, and the first real run has now happened: seven
+live calls over a 35-minute video, 15 candidates selected from 23 proposals,
+reuse proved without a credential. What is still missing is the reason the
+subsystem exists — candidate quality measured over a representative set. One
+video is a signal, not a measurement.
 
 ## Deferred to V0.7 (CE-047 to CE-052)
 

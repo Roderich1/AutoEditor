@@ -154,6 +154,16 @@ Autoscaling/GPU pools/distributed queue/cloud orchestration/Kubernetes only when
 - **CE-057** CAR/edit/rejection metrics.
 - **CE-058** `report.json`.
 - **CE-059** `report.md`.
+- **CE-068** per-analysis usage record: calls, retries, prompt tokens,
+  response and thinking tokens where the provider reports them, wall duration,
+  the model version reported back, and a cost computed from a versioned price
+  table. Today the adapter accumulates counts that nothing surfaces, so the
+  first real run's seven calls are unmeasured and their cost is not calculable
+  from the repository; only the opt-in live test prints anything. A versioned
+  price table is part of the task rather than a footnote: a cost figure whose
+  prices are not recorded cannot be compared between two experiments.
+  Deliberately out of scope for PR C, which added no reporting surface it had
+  no observation to justify.
 
 **Exit:** multiple experiments can be compared quantitatively.
 

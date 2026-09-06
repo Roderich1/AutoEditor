@@ -29,3 +29,7 @@
 *.mov   binary
 *.wav   binary
 *.docx  binary
+
+# The clip candidate prompt is hashed; a CRLF checkout must not change its
+# identity. The loader normalises line endings too, so this is belt and braces.
+*.txt   text eol=lf

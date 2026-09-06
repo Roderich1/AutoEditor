@@ -82,6 +82,17 @@ class AnalyzerIdentity:
     #: The fixture these answers were replayed from. Null for a real provider,
     #: which is the only truthful value once one exists.
     fixture_sha256: str | None = None
+    #: Whether ``prompt`` names a packaged, versioned prompt resource that was
+    #: really sent to a provider, or a stand-in an executor invented for itself.
+    #:
+    #: Both go into the stage configuration, where the field means "the prompt
+    #: identity of whatever ran" and a fixture's ``fake-fixture/v1`` is a
+    #: truthful answer. The manifest's ``prompt_version``/``prompt_sha256`` mean
+    #: something narrower -- which versioned prompt this run sent -- and a
+    #: fixture sent none. This flag is what keeps the two from being conflated,
+    #: rather than inferring it from ``fixture_sha256`` being null, which would
+    #: quietly become wrong the day a second non-provider executor exists.
+    uses_packaged_prompt: bool = False
 
 
 def analysis_stage_config(

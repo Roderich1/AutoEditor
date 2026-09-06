@@ -18,7 +18,7 @@ Decisions recorded: ADR-019 (Gemini as the initial provider), ADR-020 (candidate
 records describe the phase they reached), ADR-021 (`target_candidates` is a run
 objective).
 
-## PR B — deterministic pipeline (`feat/candidate-engine-pipeline`)
+## PR B — deterministic pipeline (merged, `1b15e0f`, PR #5)
 
 | CE | What landed | Where | Verified by |
 |---|---|---|---|
@@ -52,20 +52,42 @@ candidates.json         the validated funnel: selected, rejected, invalid, event
 per-chunk `raw/chunk_*.json` files are not written, and `candidates.raw.json` is
 the canonical aggregate.
 
-## PR C — provider (not started)
+## PR C — provider (`feat/gemini-candidate-provider`)
 
-| CE | What it is |
-|---|---|
-| CE-026 | The `clip_candidates/v1` prompt and its identity |
-| CE-028 | The Gemini adapter behind `ContentAnalyzerPort` (ADR-019) |
-| CE-029 | Structured-output parsing and provider-side validation |
+| CE | What landed | Where | Verified by |
+|---|---|---|---|
+| CE-026 | The `clip_candidates/v1` prompt: packaged resource, versioned, hashed over line-ending-normalised text | `resources/prompts/clip_candidates/v1.txt`, `adapters/analysis/prompt.py` | `tests/unit/test_clip_candidates_prompt.py` |
+| CE-028 | `GeminiContentAnalyzer` behind the port; system instruction separate from speech, no tools, bounded retries, sanitised errors | `adapters/analysis/gemini_analyzer.py` | `tests/unit/test_gemini_analyzer.py` |
+| CE-029 | Structured output: `provider_response_schema()` builds the compatible subset sent to `generateContent`; `ProviderResponse`/`ProviderCandidate`/`ProviderScores` strictly parse what returns. Related by derivation and tests, not the same object | `adapters/analysis/structured_output.py` | `tests/unit/test_gemini_structured_output.py` |
+| — | `analyze RUN_ID [--fixture PATH] [--config PATH] [--force]`, two modes that never share artifacts | `cli.py` | `tests/unit/test_cli_analyze_provider.py` |
+| — | Exactly one file in the package may import a provider SDK or a network client | `ports/analyzer.py`, `adapters/` | AST sweeps in `test_analyzer_port.py`, `test_fixture_analyzer.py` |
+| — | One opt-in test that really calls Gemini, off unless explicitly enabled | `tests/ai/test_gemini_live.py` | skipped unless `CONTENT_ENGINE_RUN_AI_TESTS=1` |
 
-Until then `manifest.versions.prompt_version` and `prompt_sha256` stay null: the
-fields belong to CE-026, and the fixture's own identity is recorded in the stage
-configuration instead, where it is true.
+Decisions recorded: ADR-025 (the prompt is a packaged resource, not a repository
+file), ADR-026 (`google-genai` is a runtime dependency rather than an optional
+extra), ADR-027 (retries, exit codes, and the fact that an unparseable response
+is not persisted).
+
+`manifest.versions.prompt_version` and `prompt_sha256` remain null for a fixture
+run and are set from the selected prompt for a provider run. Switching executor
+with `--force` rewrites them in both directions, so they never describe the
+previous run. The stage configuration separately records what ran and what the
+configuration asked for, so the two are distinguishable rather than inferred.
+
+`analysis.prompt_version` selects the prompt. It names a short version (`v1`)
+which resolves to a packaged resource and to the qualified identity
+(`clip_candidates/v1`) recorded in artifacts. An unknown version is refused with
+exit 2 before the run is touched, in both fixture and provider mode.
 
 ## What is still unmeasured
 
-The pipeline has never seen real model output. Every proposal it has processed
-was written by hand into a fixture, so the deterministic half is verified and
-the quality of what it ranks is not. That measurement is the point of PR C.
+The integration has now been exercised for real: seven live Gemini calls over a
+35-minute video, 23 proposals, 15 selected, reuse proved with the credential
+removed. See `docs/CURRENT_STATE.md` for the numbers.
+
+That is one video. Eight of eleven intervals written down beforehand overlap a
+selected candidate, but only two reach the IoU 0.50 the specification names, and
+the intervals were chosen from a transcript by someone who had not watched the
+video. The evaluation the specification asks for needs at least five
+representative sources. A single video demonstrates that the integration works
+and gives a first signal; it cannot show that the engine picks good clips.

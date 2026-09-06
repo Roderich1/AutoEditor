@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from content_engine.domain.analysis_rules import AnalyzerIdentity
 from content_engine.domain.candidates import RawCandidate, TranscriptChunk
 
 
@@ -72,6 +73,19 @@ class ContentAnalyzerPort(Protocol):
     transcript says, and may not expose provider types to its caller. It returns
     proposals; whether any of them survives is decided elsewhere.
     """
+
+    @property
+    def identity(self) -> AnalyzerIdentity:
+        """Who this analyzer is, resolved at run time.
+
+        Part of the contract rather than something a caller happens to know,
+        because every artifact and the manifest record it and the reuse
+        decision is made from it. An analyzer that could not say what it is
+        would leave a run unable to state what produced its candidates -- and
+        the one mistake this boundary exists to prevent is a replayed run that
+        reads as though a provider had been called.
+        """
+        ...
 
     def find_candidates(
         self,
