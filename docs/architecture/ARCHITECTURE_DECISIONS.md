@@ -542,3 +542,77 @@ Not an ADR, but binding on every artifact the engine writes under `workspace/`:
 The point is that a run produced on Windows and the same run produced on Ubuntu
 are byte-comparable. This contract governs generated artifacts only — repository
 text files are normalized by Git.
+
+---
+
+## ADR-019 — Gemini as the initial analysis provider
+
+**Status:** Accepted for V0 experimentation, not permanent lock-in
+
+### Context
+
+ADR-003 and ADR-008 fix what the LLM is allowed to do: interpret semantics and
+rate six dimensions. They say nothing about whose model does it. The earlier
+documents named OpenAI as the first adapter, chosen before any candidate had
+been generated, and `analysis.provider` had exactly one member.
+
+V0.4 needs a provider that is available now, returns structured output against a
+declared schema rather than free text a parser has to guess at, and can absorb
+the volume of a candidate-quality experiment without the cost of the experiment
+becoming the reason not to run it. Candidate quality is the project's main risk;
+anything that discourages iterating on prompts works against measuring it.
+
+### Decision
+
+Gemini is the initial analysis provider for V0.
+
+```text
+provider     gemini
+model        gemini-3.5-flash-lite
+SDK          google-genai
+adapter      GeminiContentAnalyzer
+credential   GEMINI_API_KEY
+```
+
+The OpenAI compatibility layer Gemini offers is **not** used. It would put a
+translation shim between the domain and the provider whose failure modes belong
+to neither, and it would make the adapter pretend to be something it is not. The
+native SDK is used directly, behind the port.
+
+`ContentAnalyzerPort` stays provider-neutral. It is a Protocol over domain types
+only, and nothing above the adapter boundary may import `google.genai` or name
+Gemini. Adding OpenAI later is a second adapter and a configuration value, not a
+change to the domain.
+
+faster-whisper remains the transcription system. This decision concerns the
+analysis stage alone.
+
+### Consequences
+
+- The domain does not depend on Google. `ContentAnalyzerPort` is written against
+  `TranscriptChunk` and `RawCandidate`, and the SDK types stay inside
+  `adapters/analysis/`, the same boundary ADR-006 draws around faster-whisper.
+- Changing provider changes **nothing** about scoring, timestamp validation,
+  boundary snapping, deduplication or ranking. Those are deterministic code by
+  ADR-003 and ADR-008, they consume `CandidateScores` and intervals, and they
+  cannot tell which model produced them. That is the property that makes a
+  provider swap an experiment rather than a rewrite.
+- Reproducibility is not a promise that a given call returns identical bytes. No
+  generation parameters are pinned in V0: default sampling is kept, so two calls
+  with the same prompt may differ. What is reproducible is everything around the
+  call — the exact model, the prompt version and hash, the effective
+  configuration, the input transcript hash, the raw responses stored per chunk,
+  and every deterministic rule applied afterwards. An experiment is comparable
+  because its inputs and its rules are recorded, not because the model is
+  assumed to be a pure function.
+- `GEMINI_API_KEY` is read from the environment and nowhere else. It never
+  reaches `manifest.json`, `config.effective.json`, any stage configuration, any
+  artifact, any log line or the repository. `doctor` reports only whether it is
+  present, never its value, and `.env` stays ignored while `.env.example` carries
+  the name with an empty value.
+- The free tier is a shared-quota service. Do not send confidential or sensitive
+  recordings through it. This is a policy about which material may be analysed,
+  not a claim about the provider.
+- Nothing here is implemented yet. This ADR records the decision so the port,
+  the configuration and the schemas can be built against it; the adapter, the
+  SDK dependency and the prompt arrive in a later pull request.

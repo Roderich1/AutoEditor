@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 from content_engine import cli
 from content_engine.config import WORKSPACE_ENV_VAR
 from content_engine.domain.exceptions import EXIT_CONFIGURATION, EXIT_INVALID_INPUT
+from content_engine.services.doctor_service import ANALYSIS_CREDENTIAL_ENV_VAR
 from tests.conftest import cli_output, fake_process
 
 runner = CliRunner()
@@ -105,7 +106,7 @@ def test_doctor_require_ai_fails_without_credentials(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _healthy_doctor(monkeypatch)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv(ANALYSIS_CREDENTIAL_ENV_VAR, raising=False)
 
     assert runner.invoke(cli.app, ["doctor"]).exit_code == 0
     assert runner.invoke(cli.app, ["doctor", "--require-ai"]).exit_code == EXIT_CONFIGURATION

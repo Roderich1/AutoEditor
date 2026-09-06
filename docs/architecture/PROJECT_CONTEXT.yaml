@@ -75,7 +75,7 @@ v0:
     must_support_vad: true
   analysis:
     architecture: "provider abstraction"
-    initial_adapter: "OpenAI"
+    initial_adapter: "Gemini"  # ADR-019; OpenAI may follow as a second adapter
     output: "strict structured schema validated with Pydantic"
   human_in_the_loop: true
   database: false
@@ -194,7 +194,7 @@ architecture:
     - FFprobeAdapter
     - FFmpegAdapter
     - FasterWhisperTranscriber
-    - OpenAIContentAnalyzer
+    - GeminiContentAnalyzer
     - FilesystemRunRepository
   principle: "domain must not import concrete AI/media providers"
 

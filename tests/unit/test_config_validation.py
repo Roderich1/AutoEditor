@@ -66,7 +66,7 @@ def test_cross_field_invariants_name_the_broken_relation(
         '[transcription]\nprovider = "not-a-provider"\n',
         '[transcription]\ndevice = "banana"\n',
         '[transcription]\ncompute_type = "nonsense"\n',
-        '[analysis]\nprovider = "not-openai"\n',
+        '[analysis]\nprovider = "not-a-provider"\n',
         '[render]\npreset = "totally_invalid"\n',
     ],
 )

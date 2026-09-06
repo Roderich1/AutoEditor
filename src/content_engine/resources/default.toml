@@ -20,8 +20,10 @@ word_timestamps = true
 vad_filter = true
 
 [analysis]
-provider = "openai"
-model = "SET_MODEL_HERE"
+# ADR-019. The adapter arrives in a later change; the model is named here so the
+# experiment configuration and its hash are settled before any call is made.
+provider = "gemini"
+model = "gemini-3.5-flash-lite"
 prompt_version = "v1"
 
 [analysis.chunking]

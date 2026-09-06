@@ -49,7 +49,10 @@ class ComputeType(StrEnum):
 
 
 class AnalysisProvider(StrEnum):
-    OPENAI = "openai"
+    """ADR-019. One member on purpose: a configuration may only name a provider
+    this build has an adapter for, or is committed to building."""
+
+    GEMINI = "gemini"
 
 
 class RenderPreset(StrEnum):
