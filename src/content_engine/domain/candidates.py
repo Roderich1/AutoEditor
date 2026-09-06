@@ -1,13 +1,24 @@
 """Domain models for the Candidate Intelligence Engine (CE-023 to CE-033).
 
 Kept apart from ``models.py``, which describes a run and its transcript. These
-describe what an analyzer proposed and what the deterministic rules made of it,
-and they are the types every rule in this subsystem consumes and returns.
+describe what an analyzer proposed and what the deterministic rules made of it.
 
-The division that matters here is between what a model may assert and what only
-code may decide. ``RawCandidate`` is untrusted output: the timestamps may be
-invented and the duration may ignore the policy. ``ValidatedCandidate`` is what
-survived the rules, carrying the reasons when it did not.
+Two ideas shape everything here.
+
+**A record must not be able to lie about what happened to it.** A proposal
+refused before it was ever measured has no interval, no boundary and no score,
+because it never earned them. Rather than filling those fields with invented
+values, such a proposal is a different type: ``InvalidCandidate`` keeps the
+provider's numbers verbatim and says why they were refused.
+``ValidatedCandidate`` is the record of something that got far enough to be
+scored, and every one of its fields is therefore real.
+
+**Untrusted output is preserved, not repaired.** ``RawCandidate`` accepts any
+finite pair of timestamps, including negative, zero-length and inverted ones. A
+model that invents impossible timestamps is exhibiting a measurable failure mode
+of the prompt, and refusing the value at parse time would turn that measurement
+into an exception with nothing recorded. What is refused is ``NaN`` and the
+infinities, which are not timestamps at all.
 """
 
 from __future__ import annotations
@@ -30,6 +41,16 @@ CHUNKS_SCHEMA_VERSION = 1
 RAW_CANDIDATES_SCHEMA_VERSION = 1
 #: Bumped whenever analysis/candidates.json changes incompatibly.
 CANDIDATES_SCHEMA_VERSION = 1
+
+#: Timestamps are seconds held as binary floats, so equality between a value and
+#: the arithmetic that produced it is only ever equality to within representation
+#: error. A microsecond is far below anything that matters in a transcript and
+#: far above the error these sums accumulate.
+TIME_EPSILON = 1e-6
+
+
+def _close(left: float, right: float) -> bool:
+    return abs(left - right) <= TIME_EPSILON
 
 
 class _Artifact(_Model):
@@ -84,6 +105,31 @@ class TranscriptChunk(_Artifact):
                 f"chunk {self.index} lists {len(self.segment_indices)} indices for "
                 f"{len(self.segments)} segments"
             )
+
+        # The indices are the addresses of these exact segments in the transcript.
+        # A mismatch would send anything tracing a candidate back to its source
+        # to the wrong sentence, silently.
+        for position, (index, segment) in enumerate(
+            zip(self.segment_indices, self.segments, strict=True)
+        ):
+            if index != segment.index:
+                raise ValueError(
+                    f"chunk {self.index} position {position} lists index {index} but holds "
+                    f"segment {segment.index}; the index does not match the segment"
+                )
+        for earlier, later in zip(self.segment_indices, self.segment_indices[1:], strict=False):
+            if later <= earlier:
+                raise ValueError(
+                    f"chunk {self.index} indices are not strictly increasing: "
+                    f"{earlier} is followed by {later}"
+                )
+        for first, second in zip(self.segments, self.segments[1:], strict=False):
+            if second.start < first.start:
+                raise ValueError(
+                    f"chunk {self.index} segments are not in temporal order: "
+                    f"{first.start} is followed by {second.start}"
+                )
+
         if self.start != min(segment.start for segment in self.segments):
             raise ValueError(f"chunk {self.index} start is not the earliest segment start")
         if self.end != max(segment.end for segment in self.segments):
@@ -129,13 +175,18 @@ class CandidateScores(_Artifact):
 class RawCandidate(_Artifact):
     """One candidate exactly as proposed, before any rule has run.
 
-    Untrusted by construction: the timestamps may be invented, the duration may
-    ignore the policy, and the text is model output. Validating it is CE-030's
-    job, not this model's.
+    The timestamps carry no ordering or sign constraint on purpose. A negative
+    start, a zero-length interval and an inverted one are all things a model
+    really produces, and CE-030 exists to refuse them *with a recorded reason*.
+    Refusing them here instead would replace a measurement with a parse error.
+
+    ``NaN`` and the infinities stay refused through ``allow_inf_nan=False``: an
+    impossible timestamp is data about the prompt, a non-number is not a
+    timestamp at all.
     """
 
-    start: float = Field(ge=0)
-    end: float = Field(gt=0)
+    start: float
+    end: float
     category: ClipCategory
     topic: str = Field(min_length=1, max_length=200)
     hook: str = Field(min_length=1, max_length=500)
@@ -145,12 +196,32 @@ class RawCandidate(_Artifact):
     warnings: list[str] = Field(default_factory=list, max_length=20)
 
 
+class InvalidCandidate(_Artifact):
+    """A proposal refused by CE-030, before it could be snapped or scored.
+
+    It holds the provider's proposal verbatim and the reasons it was refused,
+    and nothing else. There is no ``start``, no ``duration`` and no ``boundary``,
+    because it never reached the phase that would have produced them. Optional
+    versions of those fields would let a caller ask a question that has no
+    answer; filling them with plausible values would make the diagnosis record
+    fiction.
+    """
+
+    id: str = Field(min_length=1)
+    chunk_id: str = Field(min_length=1)
+    #: Exactly what the analyzer returned, unmodified.
+    proposed: RawCandidate
+    rejection_reasons: list[RejectionReason] = Field(min_length=1)
+
+
 class BoundaryAdjustment(_Artifact):
     """What boundary snapping proposed, what it did, and whether it stuck.
 
-    Keeping the proposed interval beside the adjusted one is what lets "correct
-    idea, bad boundary" be measured separately from "wrong idea" once human
-    review data exists.
+    Only intervals that already passed CE-030 are snapped, so the proposed
+    interval here is always well formed. Keeping it beside the adjusted one is
+    what lets "correct idea, bad boundary" be measured separately from "wrong
+    idea" once human review data exists, and the deltas are checked against the
+    movement they claim to describe so the record cannot drift from the numbers.
     """
 
     proposed_start: float = Field(ge=0)
@@ -166,9 +237,63 @@ class BoundaryAdjustment(_Artifact):
     #: duration policy. A good moment is not discarded over an editorial rule.
     reverted: bool = False
 
+    @model_validator(mode="after")
+    def validate_movement(self) -> BoundaryAdjustment:
+        if self.proposed_end <= self.proposed_start:
+            raise ValueError(
+                f"proposed interval [{self.proposed_start}, {self.proposed_end}] is not "
+                "ordered; only a validated interval reaches snapping"
+            )
+        if self.adjusted_end <= self.adjusted_start:
+            raise ValueError(
+                f"adjusted interval [{self.adjusted_start}, {self.adjusted_end}] is not ordered"
+            )
+
+        if self.reverted:
+            if not _close(self.adjusted_start, self.proposed_start) or not _close(
+                self.adjusted_end, self.proposed_end
+            ):
+                raise ValueError(
+                    "reverted adjustment must restore the proposed interval, but "
+                    f"[{self.adjusted_start}, {self.adjusted_end}] is not "
+                    f"[{self.proposed_start}, {self.proposed_end}]"
+                )
+            if not _close(self.start_delta, 0.0) or not _close(self.end_delta, 0.0):
+                raise ValueError(
+                    f"reverted adjustment must record zero deltas, got "
+                    f"{self.start_delta} and {self.end_delta}"
+                )
+            if (
+                self.start_anchor is not BoundaryAnchor.UNCHANGED
+                or self.end_anchor is not BoundaryAnchor.UNCHANGED
+            ):
+                raise ValueError(
+                    "reverted adjustment must report unchanged anchors, got "
+                    f"{self.start_anchor} and {self.end_anchor}"
+                )
+            return self
+
+        if not _close(self.start_delta, self.adjusted_start - self.proposed_start):
+            raise ValueError(
+                f"start_delta {self.start_delta} does not describe the move from "
+                f"{self.proposed_start} to {self.adjusted_start}"
+            )
+        if not _close(self.end_delta, self.adjusted_end - self.proposed_end):
+            raise ValueError(
+                f"end_delta {self.end_delta} does not describe the move from "
+                f"{self.proposed_end} to {self.adjusted_end}"
+            )
+        return self
+
 
 class ValidatedCandidate(_Artifact):
-    """A candidate after the deterministic rules have run over it."""
+    """A candidate that reached scoring, whatever became of it afterwards.
+
+    Every field is real by the time this exists: the interval passed CE-030, the
+    boundary was computed by CE-031 and the total by CE-025. A candidate that
+    died before any of that is an ``InvalidCandidate`` instead, which is why
+    nothing here is optional except the rank.
+    """
 
     id: str = Field(min_length=1)
     chunk_id: str = Field(min_length=1)
@@ -194,17 +319,33 @@ class ValidatedCandidate(_Artifact):
     def validate_consistency(self) -> ValidatedCandidate:
         if self.end <= self.start:
             raise ValueError(f"candidate {self.id} ends at {self.end}, at or before its start")
-        if abs(self.duration - (self.end - self.start)) > 1e-6:
+        if not _close(self.duration, self.end - self.start):
             raise ValueError(
                 f"candidate {self.id} declares duration {self.duration} for the interval "
                 f"[{self.start}, {self.end}]"
             )
-        if self.status is CandidateStatus.SUGGESTED and self.rejection_reasons:
-            raise ValueError(f"candidate {self.id} is suggested but carries rejection reasons")
-        if self.status is CandidateStatus.REJECTED and not self.rejection_reasons:
-            raise ValueError(f"candidate {self.id} is rejected without a reason")
-        if self.status is not CandidateStatus.SUGGESTED and self.rank is not None:
-            raise ValueError(f"candidate {self.id} is ranked but was not selected")
+
+        # The interval is the boundary's output. Letting them disagree would mean
+        # the clip that gets rendered is not the one the adjustment describes.
+        if not _close(self.start, self.boundary.adjusted_start):
+            raise ValueError(
+                f"candidate {self.id} starts at {self.start} but its boundary "
+                f"adjusted_start is {self.boundary.adjusted_start}"
+            )
+        if not _close(self.end, self.boundary.adjusted_end):
+            raise ValueError(
+                f"candidate {self.id} ends at {self.end} but its boundary "
+                f"adjusted_end is {self.boundary.adjusted_end}"
+            )
+
+        if self.status is CandidateStatus.SUGGESTED:
+            if self.rejection_reasons:
+                raise ValueError(f"candidate {self.id} is suggested but carries rejection reasons")
+        else:
+            if not self.rejection_reasons:
+                raise ValueError(f"candidate {self.id} is {self.status} without a reason")
+            if self.rank is not None:
+                raise ValueError(f"candidate {self.id} is ranked but was not selected")
         return self
 
 
@@ -219,21 +360,41 @@ class DeduplicationEvent(_Artifact):
 
 
 class CandidateCounts(_Artifact):
-    """Where the proposals went, so the funnel reads without being re-derived."""
+    """Where every proposal ended up.
+
+    These are **terminal outcomes, mutually exclusive by construction**. Every
+    proposal the analyzer returned reaches exactly one of them, so the five
+    outcome counters sum to ``proposed`` and that identity is enforced. They are
+    not overlapping tallies of things that happened along the way.
+
+    ``proposed``         every RawCandidate returned, across all chunks.
+    ``invalid``          refused by CE-030 before scoring. One per InvalidCandidate.
+    ``below_min_score``  scored, then dropped for falling under ``min_score``.
+    ``deduplicated``     scored, above the threshold, dropped as a duplicate.
+    ``not_in_top_n``     survived everything and was still cut by ``max_candidates``.
+    ``selected``         ranked and emitted. One per entry in ``candidates``.
+
+    The pipeline order is what makes them exclusive: the minimum-score filter
+    runs before deduplication, so a candidate below the threshold is never also
+    counted as a duplicate, and the top-N cut runs last over what is left.
+    """
 
     proposed: int = Field(ge=0)
     invalid: int = Field(ge=0)
     below_min_score: int = Field(ge=0)
     deduplicated: int = Field(ge=0)
+    not_in_top_n: int = Field(ge=0)
     selected: int = Field(ge=0)
 
 
 class CandidateCollection(_Artifact):
     """``analysis/candidates.json``.
 
-    ``candidates`` holds only what survived, ranked. ``rejected`` holds
-    everything else with its reason, because the ratio between them is the
-    measurement that says whether the prompt is improving.
+    Three lists, split by how far a proposal got rather than by how good it was.
+    ``candidates`` holds what was selected, ranked. ``rejected`` holds what was
+    scored and then dropped. ``invalid`` holds what never reached scoring at all.
+    Nothing is discarded, because the ratio between them is the measurement that
+    says whether a prompt is improving.
     """
 
     schema_version: int = CANDIDATES_SCHEMA_VERSION
@@ -241,10 +402,11 @@ class CandidateCollection(_Artifact):
     score_formula_version: int
     generated_at: datetime
     source_duration_seconds: float = Field(gt=0)
-    #: The experimental objective. CE-033 caps output at ``max_candidates``; this
-    #: is what the run aimed for, and what the prompt and the review UX use.
+    #: The objective for the **whole run**, never a quota per chunk. CE-033 caps
+    #: output at ``max_candidates``; this is what the run was aiming for, and
+    #: what the review UX and the experiment record use.
     target_candidates: int = Field(gt=0)
-    #: The hard ceiling. Never exceeded, whatever the target says.
+    #: The hard ceiling for the whole run. Never exceeded, whatever the target says.
     max_candidates: int = Field(gt=0)
     min_score: float = Field(ge=0, le=100)
     dedupe_iou: float = Field(ge=0, le=1)
@@ -252,18 +414,68 @@ class CandidateCollection(_Artifact):
     counts: CandidateCounts
     candidates: list[ValidatedCandidate]
     rejected: list[ValidatedCandidate]
+    invalid: list[InvalidCandidate]
     deduplication_events: list[DeduplicationEvent]
 
     @model_validator(mode="after")
-    def validate_selection(self) -> CandidateCollection:
+    def validate_funnel(self) -> CandidateCollection:
+        # Every entry in `candidates` carries a rank, and ValidatedCandidate
+        # already refuses a rank on anything not selected, so "ranked implies
+        # suggested" needs no check of its own here: it would be unreachable.
+        ranks = [candidate.rank for candidate in self.candidates]
+        if ranks != list(range(1, len(ranks) + 1)):
+            raise ValueError(f"ranks are not contiguous from 1: {ranks}")
         if len(self.candidates) > self.max_candidates:
             raise ValueError(
                 f"{len(self.candidates)} candidates exceed the hard cap of {self.max_candidates}"
             )
-        # Every entry here carries a rank, and ValidatedCandidate already refuses
-        # a rank on anything that was not selected, so "ranked implies suggested"
-        # needs no second check: it would be unreachable.
-        ranks = [candidate.rank for candidate in self.candidates]
-        if ranks != list(range(1, len(ranks) + 1)):
-            raise ValueError(f"ranks are not contiguous from 1: {ranks}")
+
+        for candidate in self.rejected:
+            if candidate.status is CandidateStatus.SUGGESTED:
+                raise ValueError(f"candidate {candidate.id} is suggested but appears in rejected")
+
+        scored_ids = [candidate.id for candidate in (*self.candidates, *self.rejected)]
+        all_ids = [*scored_ids, *(candidate.id for candidate in self.invalid)]
+        duplicates = sorted({name for name in all_ids if all_ids.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"identifier appears more than once: {', '.join(duplicates)}")
+
+        known = set(scored_ids)
+        for event in self.deduplication_events:
+            unknown = {event.kept_id, event.dropped_id} - known
+            if unknown:
+                raise ValueError(
+                    f"deduplication event references unknown candidates: "
+                    f"{', '.join(sorted(unknown))}"
+                )
+
+        if self.counts.selected != len(self.candidates):
+            raise ValueError(
+                f"counts.selected is {self.counts.selected} for "
+                f"{len(self.candidates)} selected candidates"
+            )
+        if self.counts.invalid != len(self.invalid):
+            raise ValueError(
+                f"counts.invalid is {self.counts.invalid} for "
+                f"{len(self.invalid)} invalid candidates"
+            )
+        if self.counts.deduplicated != len(self.deduplication_events):
+            raise ValueError(
+                f"counts.deduplicated is {self.counts.deduplicated} for "
+                f"{len(self.deduplication_events)} deduplication events"
+            )
+        dropped_after_scoring = (
+            self.counts.below_min_score + self.counts.deduplicated + self.counts.not_in_top_n
+        )
+        if dropped_after_scoring != len(self.rejected):
+            raise ValueError(
+                f"{dropped_after_scoring} counted as dropped after scoring for "
+                f"{len(self.rejected)} rejected candidates"
+            )
+        total = self.counts.invalid + dropped_after_scoring + self.counts.selected
+        if self.counts.proposed != total:
+            raise ValueError(
+                f"counts.proposed is {self.counts.proposed} but the terminal outcomes "
+                f"sum to {total}"
+            )
         return self

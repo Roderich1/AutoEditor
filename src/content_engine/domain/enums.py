@@ -95,7 +95,13 @@ class CandidateStatus(StrEnum):
 
 
 class RejectionReason(StrEnum):
-    """Why a proposed candidate did not survive deterministic validation."""
+    """Why a proposal did not end up in the final list.
+
+    The first group is CE-030: refused before scoring, so the record is an
+    InvalidCandidate with no interval of its own. The second group is everything
+    that was scored first and dropped afterwards, so those records are complete
+    ValidatedCandidates.
+    """
 
     INVALID_INTERVAL = "invalid_interval"
     OUTSIDE_CHUNK = "outside_chunk"
@@ -103,7 +109,11 @@ class RejectionReason(StrEnum):
     UNGROUNDED = "ungrounded"
     TOO_SHORT = "too_short"
     TOO_LONG = "too_long"
+
     BELOW_MIN_SCORE = "below_min_score"
+    DUPLICATE = "duplicate"
+    #: Survived every rule and was still cut by the max_candidates ceiling.
+    NOT_IN_TOP_N = "not_in_top_n"
 
 
 class BoundaryAnchor(StrEnum):

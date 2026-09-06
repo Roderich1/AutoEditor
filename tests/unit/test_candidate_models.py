@@ -165,15 +165,15 @@ def test_a_raw_candidate_accepts_a_well_formed_proposal() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("start", -1.0),
-        ("end", 0.0),
         ("topic", ""),
         ("hook", ""),
         ("summary", ""),
         ("reason", ""),
     ],
 )
-def test_a_raw_candidate_refuses_impossible_fields(field: str, value: Any) -> None:
+def test_a_raw_candidate_refuses_empty_text(field: str, value: Any) -> None:
+    """Text the model must supply is required; the timestamps are not policed
+    here, because CE-030 has to be able to record why they were refused."""
     with pytest.raises(ValidationError):
         RawCandidate(**_raw(**{field: value}))
 
@@ -221,8 +221,15 @@ def test_a_candidate_that_was_not_selected_cannot_be_ranked() -> None:
     with pytest.raises(ValidationError, match="ranked but was not selected"):
         _validated(
             status=CandidateStatus.DEDUPLICATED,
+            rejection_reasons=[RejectionReason.DUPLICATE],
             rank=1,
         )
+
+
+def test_a_deduplicated_candidate_must_also_say_why() -> None:
+    """Anything not suggested carries a reason, not only an explicit rejection."""
+    with pytest.raises(ValidationError, match="without a reason"):
+        _validated(status=CandidateStatus.DEDUPLICATED)
 
 
 def test_a_rejected_candidate_is_kept_with_its_reasons() -> None:
@@ -279,13 +286,19 @@ def _collection(**overrides: Any) -> CandidateCollection:
         "dedupe_iou": 0.6,
         "boundary_snap_seconds": 2.5,
         "counts": CandidateCounts(
-            proposed=3, invalid=1, below_min_score=0, deduplicated=0, selected=2
+            proposed=2,
+            invalid=0,
+            below_min_score=0,
+            deduplicated=0,
+            not_in_top_n=0,
+            selected=2,
         ),
         "candidates": [
             _validated(id="cand_a", rank=1),
             _validated(id="cand_b", rank=2),
         ],
         "rejected": [],
+        "invalid": [],
         "deduplication_events": [],
     }
     payload.update(overrides)
@@ -298,7 +311,17 @@ def test_the_collection_declares_its_schema_version() -> None:
 
 def test_ranks_must_be_contiguous_from_one() -> None:
     with pytest.raises(ValidationError, match="not contiguous"):
-        _collection(candidates=[_validated(id="cand_a", rank=2)])
+        _collection(
+            candidates=[_validated(id="cand_a", rank=2)],
+            counts=CandidateCounts(
+                proposed=1,
+                invalid=0,
+                below_min_score=0,
+                deduplicated=0,
+                not_in_top_n=0,
+                selected=1,
+            ),
+        )
 
 
 def test_the_hard_cap_is_enforced_by_the_model_itself() -> None:
@@ -306,7 +329,18 @@ def test_the_hard_cap_is_enforced_by_the_model_itself() -> None:
     too_many = [_validated(id=f"cand_{i}", rank=i + 1) for i in range(4)]
 
     with pytest.raises(ValidationError, match="exceed the hard cap"):
-        _collection(max_candidates=3, candidates=too_many)
+        _collection(
+            max_candidates=3,
+            candidates=too_many,
+            counts=CandidateCounts(
+                proposed=4,
+                invalid=0,
+                below_min_score=0,
+                deduplicated=0,
+                not_in_top_n=0,
+                selected=4,
+            ),
+        )
 
 
 def test_the_target_may_differ_from_the_cap() -> None:
