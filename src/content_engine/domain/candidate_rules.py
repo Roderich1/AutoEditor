@@ -243,7 +243,13 @@ def is_grounded(instant: float, chunk: TranscriptChunk, snap_seconds: float) -> 
 
     A chunk with no word timestamps is still groundable through its segment
     edges, so ``word_timestamps = false`` degrades the precision of this rule
-    rather than rejecting every candidate.
+    rather than rejecting every candidate. The reverse is worth stating too:
+    because ``TranscriptSegment`` enforces that a word lies inside its segment,
+    the nearest segment edge is always at least as close as the nearest word
+    edge, so word edges cannot ground an instant that segments do not. They are
+    consulted because the rule is defined over both and because a model that
+    stopped enforcing containment would need them, not because they decide
+    anything today.
     """
     for start, end in _spoken_intervals(chunk):
         if start - TIME_EPSILON <= instant <= end + TIME_EPSILON:

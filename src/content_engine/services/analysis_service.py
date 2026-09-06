@@ -104,10 +104,6 @@ class AnalysisPlan:
     policy: CandidatePolicy
     stage_config: AnalysisStageConfig
 
-    @property
-    def stage_config_sha256(self) -> str:
-        return stage_config_sha256(self.stage_config)
-
 
 @dataclass(frozen=True)
 class AnalysisOutcome:
