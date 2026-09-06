@@ -177,6 +177,33 @@ class TestReject:
         assert "not_funny" in cli_output(result)
         assert decisions_of(previewed)[0]["reason"] == EditorialReason.DUPLICATE.value
 
+    def test_an_over_long_detail_is_asked_again_rather_than_crashing(
+        self, previewed: Analysed
+    ) -> None:
+        """The model caps a detail at 2000 characters; the loop must handle that.
+
+        A ValidationError escaping the prompt reached the CLI's last-resort
+        handler and exited 1 as an unexpected internal error, after the session
+        had already saved an earlier decision -- so the reviewer saw a crash and
+        no indication of whether their work had survived.
+        """
+        keys = "\n".join(["a", "r", "other", "x" * 2001, "se corta el audio"]) + "\n"
+        result = review(previewed.run_id, keys)
+        assert result.exit_code == EXIT_SUCCESS, cli_output(result)
+        output = cli_output(result).lower()
+        assert "unexpected error" not in output
+        assert "2000" in output
+        decisions = decisions_of(previewed)
+        assert len(decisions) == 2, "the approval taken before the bad input must survive"
+        assert decisions[0]["decision"] == "approved"
+        assert decisions[1]["detail"] == "se corta el audio"
+
+    def test_a_detail_of_exactly_the_limit_is_accepted(self, previewed: Analysed) -> None:
+        limit = "y" * 2000
+        result = review(previewed.run_id, "\n".join(["r", "other", limit, "q"]) + "\n")
+        assert result.exit_code == EXIT_SUCCESS, cli_output(result)
+        assert decisions_of(previewed)[0]["detail"] == limit
+
     def test_other_asks_for_a_detail(self, previewed: Analysed) -> None:
         review(previewed.run_id, "r\nother\nthe audio clips\nq\n")
         decision = decisions_of(previewed)[0]
@@ -450,6 +477,75 @@ class TestForce:
         review(previewed.run_id, "a\na\n")
         assert previewed.manifest()["status"] == RunStatus.REVIEWED
         review(previewed.run_id, "q\n", "--force")
+        assert previewed.manifest()["status"] == RunStatus.READY_FOR_REVIEW
+
+    def test_abandoning_a_forced_session_does_not_strand_the_run(self, previewed: Analysed) -> None:
+        """--force reopens the review; quitting before deciding must not trap it.
+
+        The decisions on disk are still the complete set, because --force writes
+        nothing until the first new decision. The run is READY_FOR_REVIEW
+        because it was reopened. A later ordinary session therefore finds a
+        finished review over a run whose status does not say so, and has to
+        settle it rather than reporting "already reviewed" while the run stays
+        open forever.
+        """
+        review(previewed.run_id, "a\na\n")
+        assert previewed.manifest()["status"] == RunStatus.REVIEWED
+        finished = previewed.decisions()
+        stage = previewed.manifest()["stages"][RunStage.REVIEW.value]
+
+        review(previewed.run_id, "q\n", "--force")
+        assert previewed.manifest()["status"] == RunStatus.READY_FOR_REVIEW
+        assert previewed.decisions() == finished, "an abandoned --force must keep the decisions"
+
+        result = review(previewed.run_id, "")
+        assert result.exit_code == EXIT_SUCCESS, cli_output(result)
+        assert previewed.manifest()["status"] == RunStatus.REVIEWED
+        assert previewed.decisions() == finished
+        recovered = previewed.manifest()["stages"][RunStage.REVIEW.value]
+        assert recovered["fingerprint"] == stage["fingerprint"]
+        assert recovered["stage_config_sha256"] == stage["stage_config_sha256"]
+        assert recovered["schema_version"] == stage["schema_version"]
+
+    def test_the_recovery_says_what_it_settled(self, previewed: Analysed) -> None:
+        review(previewed.run_id, "a\na\n")
+        review(previewed.run_id, "q\n", "--force")
+        output = cli_output(review(previewed.run_id, "")).lower()
+        assert "recovered" in output
+        assert str(RunStatus.READY_FOR_REVIEW).lower() in output
+        assert str(RunStatus.REVIEWED).lower() in output
+
+    def test_a_reopened_run_whose_decisions_were_removed_stays_open(
+        self, previewed: Analysed
+    ) -> None:
+        """Recovery settles a complete set. An absent one is a session to run."""
+        review(previewed.run_id, "a\na\n")
+        review(previewed.run_id, "q\n", "--force")
+        previewed.review.joinpath(DECISIONS_FILENAME).unlink()
+        result = review(previewed.run_id, "q\n")
+        assert result.exit_code == EXIT_SUCCESS, cli_output(result)
+        assert previewed.manifest()["status"] == RunStatus.READY_FOR_REVIEW
+
+    def test_a_reopened_run_with_incoherent_decisions_is_refused_not_recovered(
+        self, previewed: Analysed
+    ) -> None:
+        review(previewed.run_id, "a\na\n")
+        review(previewed.run_id, "q\n", "--force")
+        path = previewed.review.joinpath(DECISIONS_FILENAME)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["analysis_fingerprint"] = "z" * 64
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        result = review(previewed.run_id, "")
+        assert result.exit_code == EXIT_INVALID_INPUT
+        assert previewed.manifest()["status"] == RunStatus.READY_FOR_REVIEW
+
+    def test_a_partly_decided_reopened_run_is_not_recovered(self, previewed: Analysed) -> None:
+        """Only a complete set settles the run; one pending candidate does not."""
+        review(previewed.run_id, "a\na\n")
+        review(previewed.run_id, "r\n\nq\n", "--force")
+        assert len(decisions_of(previewed)) == 1
+        result = review(previewed.run_id, "q\n")
+        assert result.exit_code == EXIT_SUCCESS, cli_output(result)
         assert previewed.manifest()["status"] == RunStatus.READY_FOR_REVIEW
 
     def test_it_recovers_from_corrupt_decisions(self, previewed: Analysed) -> None:

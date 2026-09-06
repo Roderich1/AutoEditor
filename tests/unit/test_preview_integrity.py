@@ -174,6 +174,27 @@ class TestTheEncoderIsNotTakenAtItsWord:
         with pytest.raises(RenderError, match="no audio stream"):
             service.generate(plan_for(source), tmp_path.joinpath("previews"), GENERATED_AT)
 
+    @pytest.mark.parametrize("codec", ["mp3", "opus", "vorbis", "pcm_s16le"])
+    def test_a_preview_in_the_wrong_audio_codec_is_refused(
+        self, tmp_path: Path, source: Path, codec: str
+    ) -> None:
+        """A track that exists is not the same as the track that was asked for.
+
+        The video codec was already checked and the audio one was not, so an
+        encoder that silently produced another format -- or a source whose audio
+        was stream-copied instead of transcoded -- passed verification and was
+        recorded in the index as if it were AAC.
+        """
+        service = PreviewService(WritingRenderer(), FakeProbe(audio_codec=codec))
+        with pytest.raises(RenderError, match=codec):
+            service.generate(plan_for(source), tmp_path.joinpath("previews"), GENERATED_AT)
+
+    def test_the_expected_audio_codec_is_accepted(self, tmp_path: Path, source: Path) -> None:
+        """The check must not refuse a correct preview."""
+        service = PreviewService(WritingRenderer(), FakeProbe(audio_codec="aac"))
+        outcome = service.generate(plan_for(source), tmp_path.joinpath("previews"), GENERATED_AT)
+        assert outcome.index.previews[0].audio_codec == "aac"
+
     def test_an_unselected_candidate_is_refused(self, tmp_path: Path, source: Path) -> None:
         """A candidate with no rank was never selected, so nobody will be shown it."""
         unranked = ValidatedCandidate(
