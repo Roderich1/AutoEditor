@@ -4,14 +4,15 @@
 
 - Repository: `Roderich1/AutoEditor`
 - Default branch: `main`
-- Merged pull requests: `#1 Proyecto base`, `#2 documentacion del proyecto base`
-- Active branch: `chore/stabilize-v0-1-v0-3` (not yet pushed)
+- Merged pull requests: `#1 Proyecto base`, `#2 documentacion del proyecto base`,
+  `#3 Stabilize Content Engine V0.1-V0.3` (merge commit `d047479`)
+- Active branch: `feat/candidate-engine-foundation`
 - Current package version: `0.1.0`
 
 ## Verification baseline
 
-Last verification, on `chore/stabilize-v0-1-v0-3`, Windows 11, Python 3.12.10,
-FFmpeg 9.0.1:
+Last verification, on `feat/candidate-engine-foundation`, Windows 11,
+Python 3.12.10, FFmpeg 9.0.1:
 
 | Check | Result |
 |---|---|
@@ -161,8 +162,9 @@ Status: not started. Scope: CE-023 through CE-033.
 
 ## Current priority
 
-Review and merge the stabilization PR. Then begin CE-023–CE-033 in a separate
-branch and PR.
+V0.4, the Candidate Intelligence Engine (CE-023–CE-033), on `main` at `d047479`.
+It is split into three pull requests; the first covers the deterministic
+foundation and adds no external provider call.
 
 ## Deferred to V0.7 (CE-047 to CE-052)
 

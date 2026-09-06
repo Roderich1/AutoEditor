@@ -5,8 +5,7 @@
 - Repository name: AutoEditor.
 - Product and Python package name: Content Engine.
 - Current stage: V0 technical core.
-- Current objective: merge the V0.1–V0.3 stabilization, then implement
-  CE-023–CE-033.
+- Current objective: implement CE-023–CE-033, the Candidate Intelligence Engine.
 - Interface: local CLI.
 - Language: Python 3.12.
 - Package manager: uv.
@@ -35,27 +34,29 @@ Do not silently choose one version.
 
 ## Current implementation status
 
-- V0.1 Foundation: stabilized on `chore/stabilize-v0-1-v0-3`, pending merge.
-- V0.2 Media: stabilized, with integration tests against real FFmpeg.
-- V0.3 Transcription: stabilized, validated against a real model and real
-  Spanish technical speech.
-- V0.4 CE-023–CE-033: not implemented, and not started until the stabilization
-  is merged.
+- V0.1 Foundation: stabilized and merged into `main`.
+- V0.2 Media: stabilized and merged, with integration tests against real FFmpeg.
+- V0.3 Transcription: stabilized and merged, validated against a real model and
+  real Spanish technical speech.
+- V0.4 CE-023–CE-033: in progress. The Candidate Intelligence Engine is being
+  built in stages; see `docs/CURRENT_STATE.md` for which CE requirements have
+  landed.
 - V0.5 and later: not implemented.
 
-Stabilization is implemented but not yet merged. Until PR #3 lands, `main` still
-carries the unstabilized code, so read `docs/CURRENT_STATE.md` for what is true
-on the branch rather than assuming either state.
+`main` carries the stabilized code as of merge commit `d047479` (PR #3). It is
+the correct base for V0.4 work.
 
 ## Current execution order
 
-1. Stabilization of V0.1–V0.3: **implemented**, on `chore/stabilize-v0-1-v0-3`,
-   open as PR #3.
-2. Verify the stabilization PR. All required checks must pass.
-3. Merge it. Do not merge without explicit authorization.
-4. Only after the merge, start CE-023–CE-033 in a separate branch and pull
-   request. Do not begin that work on this branch.
-5. Keep yt-dlp outside the Content Engine core until the Candidate Intelligence
+1. V0.1–V0.3 stabilization: **merged** (`d047479`).
+2. CE-023–CE-033 in three pull requests against `main`:
+   - foundation — chunker, candidate schemas, deterministic score, the analyzer
+     port as a Protocol only;
+   - deterministic pipeline — validation, boundary snapping, IoU and
+     deduplication, ranking, the `analyze` command driven by a fake analyzer;
+   - provider — the `clip_candidates/v1` prompt and the Gemini adapter.
+3. Do not merge a pull request without explicit authorization.
+4. Keep yt-dlp outside the Content Engine core until the Candidate Intelligence
    Engine has demonstrated useful candidate quality.
 
 ## Non-negotiable architecture rules
