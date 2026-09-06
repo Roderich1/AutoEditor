@@ -362,6 +362,43 @@ and schema version. `manifest.stages["analysis"]` records the fingerprint, the
 digest of that file, the schema version and the completion time, exactly as the
 transcription stage does.
 
+## The real video, and where it stopped
+
+A 35-minute Spanish Linux tutorial held locally under `samples-local/`
+(ignored by Git, never committed, never sent anywhere) was taken as far as this
+machine can take it.
+
+| Step | Result |
+|---|---|
+| `ffprobe` | 2101.61 s (35.0 min), 640x360, h264 at 23.976 fps, AAC stereo 44.1 kHz, 55.1 MB |
+| `content-engine run` | reached `AUDIO_READY`; normalised WAV extracted |
+| `content-engine transcribe --config configs/fast.toml` | 1346 segments, 6398 words, language `es`, 618.95 s on cpu/int8, RTF 0.2945, model `small` |
+| Chunking, at the packaged 360 s window and 30 s overlap | **7 chunks**, 125 to 392 segments each, 6323 to 16139 characters, 78074 characters in total |
+| `content-engine analyze` (provider mode) | **exit 2**: `GEMINI_API_KEY` is not set |
+
+The refusal was checked rather than assumed: after it, `manifest.json` was
+byte-identical to the copy taken beforehand, the run was still `TRANSCRIBED`
+with no `failure`, and `analysis/` contained zero files. `doctor --require-ai`
+reports the same block as `Analysis credentials FAIL`.
+
+So a real Gemini run on this video would be **7 calls** over roughly 78 000
+characters of transcript plus the prompt — an order of magnitude, not a
+measurement, because no call was made.
+
+**Nothing about candidate quality is known.** The profile used was `fast`
+(`small` model), chosen explicitly and recorded here; it is not the profile a
+quality evaluation should use. To finish the experiment:
+
+```bash
+setx GEMINI_API_KEY "..."        # or export, in the shell that will run it
+uv run content-engine doctor --require-ai
+uv run content-engine analyze RUN_ID
+```
+
+A second invocation without `--force` must then reuse all four artifacts and
+make no call at all, which is the cheap way to confirm the run really happened
+once.
+
 ## Known limitations
 
 - `metrics.processing_seconds`, and therefore the RTF, measure the whole
