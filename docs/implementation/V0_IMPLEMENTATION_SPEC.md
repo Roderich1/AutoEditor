@@ -9,7 +9,7 @@
 **Project tooling:** `uv`, `pyproject.toml`.  
 **Media:** ffprobe + FFmpeg.  
 **Transcription:** faster-whisper behind an abstraction.  
-**AI:** provider abstraction; initial Gemini adapter (ADR-019).  
+**AI:** provider abstraction; initial Gemini adapter (ADR-019).\
 **Validation:** Pydantic + domain rules.  
 **Frontend/DB/Redis/n8n/social publishing/Kubernetes:** explicitly excluded.
 
