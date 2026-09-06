@@ -616,3 +616,117 @@ analysis stage alone.
 - Nothing here is implemented yet. This ADR records the decision so the port,
   the configuration and the schemas can be built against it; the adapter, the
   SDK dependency and the prompt arrive in a later pull request.
+
+---
+
+## ADR-020 — Candidate records describe the phase they reached
+
+**Status:** Accepted
+
+### Context
+
+The first shape of the candidate models had a single `ValidatedCandidate` with a
+required interval, a required `BoundaryAdjustment` and a required total score,
+and a `RawCandidate` whose Pydantic constraints refused a negative start or a
+non-positive end.
+
+Both were wrong in the same direction. A proposal refused by CE-030 for having
+an inverted interval never gets a boundary or a score, so the only way to record
+it in that model is to invent values for fields it never earned. And the raw
+model refused exactly the timestamps CE-030 exists to reject, so an impossible
+proposal became a parse error with nothing written down — replacing a
+measurement of how often the prompt fails with an exception.
+
+The pipeline has phases, and a record has to be able to say which one it reached.
+
+### Decision
+
+**Untrusted output is preserved, not policed.** `RawCandidate.start` and `.end`
+carry no ordering or sign constraint. Negative, zero-length and inverted
+intervals are accepted and kept verbatim. `NaN` and the infinities remain
+refused: an impossible timestamp is data about the prompt, a non-number is not a
+timestamp at all.
+
+**Two record types, split by phase reached**, rather than one type with optional
+fields:
+
+```text
+InvalidCandidate     refused by CE-030, before snapping or scoring.
+                     Holds the verbatim proposal and the reasons. No interval,
+                     no boundary, no score - it never earned them.
+
+ValidatedCandidate   reached scoring. Interval, boundary and total are all real.
+                     Status is SUGGESTED, REJECTED or DEDUPLICATED.
+```
+
+Optional fields were the alternative and were rejected: they would let a caller
+ask a question that has no answer, and every consumer in CE-030–CE-033 would
+carry a `if x is not None` that the type system could not check. Two types make
+the phase a fact the compiler knows.
+
+`CandidateCollection` therefore holds three lists — `candidates`, `rejected`,
+`invalid` — split by how far a proposal got rather than by how good it was.
+
+**`BoundaryAdjustment` may be absent, but only by being on the other type.** It
+exists exactly when snapping ran, which is exactly when the record is a
+`ValidatedCandidate`. It is never optional within a type.
+
+**`CandidateCounts` are terminal outcomes, mutually exclusive by construction.**
+Every proposal reaches exactly one of `invalid`, `below_min_score`,
+`deduplicated`, `not_in_top_n` or `selected`, so they sum to `proposed` and the
+model enforces it. `not_in_top_n` was added because a candidate that survived
+every rule and was still cut by `max_candidates` is a real outcome that
+previously had nowhere to go, which would have made the identity false. The
+exclusivity comes from the pipeline order: the minimum-score filter runs before
+deduplication, and the top-N cut runs last.
+
+Float comparisons in all of this use an explicit microsecond tolerance.
+Timestamps are binary floats, so equality between a value and the arithmetic
+that produced it is only ever equality to within representation error.
+
+### Consequences
+
+- CE-030–CE-033 can be written against invariants the models enforce rather than
+  against convention: the interval matches the boundary, the deltas describe the
+  movement, the counts match the lists, identifiers are unique, and a
+  deduplication event cannot name a candidate that does not exist.
+- A refused proposal is still fully diagnosable, which is what makes the failure
+  modes in the candidate engine specification measurable rather than anecdotal.
+- Adding a sixth terminal outcome later means adding a counter and updating the
+  identity, which will fail loudly rather than silently unbalancing the funnel.
+
+---
+
+## ADR-021 — `target_candidates` is a run objective, never a per-chunk quota
+
+**Status:** Accepted
+
+### Context
+
+`CandidateCollection.target_candidates` documented the objective for the whole
+run, while `AnalysisContext.target_candidates` — passed into a call about a
+single chunk — documented it as the objective per chunk. Same name, two
+meanings, on both sides of the port. A ten-chunk recording would have produced
+either ten candidates or a hundred depending on which reading an adapter
+believed.
+
+### Decision
+
+There is one semantics. `target_candidates` is the objective for the whole run.
+It is not a number of candidates requested from each chunk, and `max_candidates`
+remains the hard ceiling CE-033 applies once, over every chunk's output together.
+
+The field on `AnalysisContext` is renamed `run_target_candidates`, because the
+ambiguity was created by the name: a field called `target_candidates` on a
+per-chunk call reads as "return this many for this chunk" no matter what the
+docstring says.
+
+If an adapter ever needs a per-chunk budget, it is a separate field with its own
+name, computed explicitly from the run objective and the chunk count. It is never
+this field reinterpreted.
+
+### Consequences
+
+- An adapter cannot silently multiply the run objective by the chunk count.
+- The two sides of the port can be read independently without the reader having
+  to hold the distinction in their head.

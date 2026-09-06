@@ -19,9 +19,9 @@ Python 3.12.10, FFmpeg 9.0.1:
 | `uv run ruff check .` | passed |
 | `uv run ruff format --check .` | passed, 66 files |
 | `uv run mypy src` | passed, 30 files, strict |
-| `uv run pytest` | 762 passed |
-| `uv run pytest` from a working directory outside the repository | 762 passed, no stray files |
-| `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | 762 passed at both; no assertion depends on the console width |
+| `uv run pytest` | 804 passed |
+| `uv run pytest` from a working directory outside the repository | 804 passed, no stray files |
+| `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | 804 passed at both; no assertion depends on the console width |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
 | SonarCloud quality gate | passes; Reliability and Security both A |
 | `uv run pytest -m integration --no-cov` | 13 passed with real FFmpeg |
@@ -60,7 +60,7 @@ Coverage:
 
 | Scope | Coverage |
 |---|---|
-| Total | 99% (1415 statements, 13 missed) |
+| Total | 99% (1485 statements, 13 missed) |
 | Domain | 100% |
 | Services | 100% |
 | CLI | 98% |
@@ -147,7 +147,7 @@ This baseline must be updated after every milestone or PR.
 Scope: CE-023 through CE-033, in three pull requests. The first is the
 deterministic foundation and adds no provider call.
 
-Landed:
+Implemented in PR #4, pending merge:
 
 - CE-023 transcript chunker. 360 s windows, 30 s overlap, 330 s stride. Segments
   are atomic and are included whole in every window they overlap, so the segments
@@ -157,11 +157,28 @@ Landed:
   emitted. `analysis/chunks.json` carries `schema_version`, the rules version,
   the window settings and the digest of the transcript it was cut from.
 - CE-024 candidate schemas in `domain/candidates.py`. `CandidateScores` has no
-  total and forbids extra keys. `RawCandidate` is untrusted by construction.
-  Rejected and deduplicated candidates are kept with their reasons.
-  `CandidateCollection` refuses to exceed `max_candidates`.
+  total and forbids extra keys. `RawCandidate` accepts any finite pair of
+  timestamps, including negative, zero-length and inverted ones, so CE-030 can
+  refuse them with a recorded reason instead of a parse error; `NaN` and the
+  infinities stay refused.
+- A proposal refused before scoring is an `InvalidCandidate`: the verbatim
+  proposal plus its reasons, with no interval, no boundary and no score, because
+  it never earned them. Anything that reached scoring is a `ValidatedCandidate`
+  where every field is real. `CandidateCollection` therefore keeps three lists —
+  `candidates`, `rejected`, `invalid` — split by how far a proposal got.
+- `BoundaryAdjustment` checks that its deltas describe the movement they claim,
+  and that a reverted adjustment really restored the proposal with zero deltas
+  and unchanged anchors. `ValidatedCandidate` must agree with its own boundary.
+- `CandidateCounts` are terminal outcomes, mutually exclusive by construction:
+  `invalid`, `below_min_score`, `deduplicated`, `not_in_top_n` and `selected`
+  sum to `proposed`, and the model enforces that identity along with the
+  agreement between each counter and the list it describes.
 - CE-025 deterministic score, ADR-008 weights, `Decimal` with `ROUND_HALF_UP`.
 - CE-027 `ContentAnalyzerPort` as a Protocol only. No implementation, no SDK.
+  `AnalysisContext.run_target_candidates` is named for its scope: the objective
+  belongs to the whole run and is never a per-call quota. A per-chunk budget, if
+  one is ever needed, is a separate computed field rather than a reinterpretation
+  of this one.
 - `utils/canonical.py`, the single serialization behind every digest.
 - ADR-019: Gemini is the initial analysis provider.
 
