@@ -235,11 +235,19 @@ def coherence_problem(
             f"the candidates describe {collection.source_duration_seconds} seconds of "
             f"source and the chunks {chunks.source_duration_seconds}"
         )
-    if collection.rules_version != chunks.rules_version:
-        return (
-            f"the candidates were built under chunking rules {collection.rules_version} "
-            f"and the chunks under {chunks.rules_version}"
-        )
+    # Every one of the four records the chunking rules version, so every one of
+    # them has to agree. Comparing a pair left the other two free to claim the
+    # windows were cut by rules that produced something else, and the version is
+    # what says whether the analyzer was shown the same material at all.
+    declared = (
+        ("the chunks", chunks.rules_version),
+        ("the raw candidates", raw.rules_version),
+        ("the candidates", collection.rules_version),
+        ("the stage configuration", config.chunking_rules_version),
+    )
+    if len({version for _, version in declared}) > 1:
+        described = ", ".join(f"{name} {version}" for name, version in declared)
+        return f"the artifacts name different chunking rules: {described}"
 
     policy: tuple[tuple[str, object, object], ...] = (
         ("score_formula_version", collection.score_formula_version, config.score_formula_version),
