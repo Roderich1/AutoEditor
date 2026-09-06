@@ -1018,3 +1018,164 @@ regenerated is a file nobody checked.
   than left as an inconsistency for a later reader to discover.
 - When CE-047–CE-052 generalise stages, this is the shape a multi-artifact stage
   needs; transcription can keep the simpler one because it writes one artifact.
+
+---
+
+## ADR-025 — The prompt is a packaged resource, not a repository file
+
+**Status:** Accepted
+
+### Context
+
+`V0_IMPLEMENTATION_SPEC.md` places the candidate prompt at
+`prompts/clip_candidates/v1.txt`, at the repository root. That reads naturally
+in a source tree and does not survive installation: `pyproject.toml` builds
+`src/content_engine` into the wheel and nothing else, so an installed
+`content-engine analyze` would look for a prompt that is not there.
+
+The prompt is also hashed. Its SHA-256 is recorded in `manifest.json` and in
+`analysis/config.effective.json` for every run that used it, and ADR-015 makes
+that hash part of the identity of an experiment.
+
+### Decision
+
+The prompt ships inside the package:
+
+```text
+src/content_engine/resources/prompts/clip_candidates/v1.txt
+```
+
+It is read through `importlib.resources`, traversed from the
+`content_engine.resources` package rather than addressed as a package of its
+own — `prompts/clip_candidates/` contains no Python, and asking `files()` for a
+namespace package is the kind of thing that works in a checkout and fails in a
+zipped wheel. Both the wheel and the sdist were checked for the file.
+
+The digest is taken over the text with line endings normalised to LF, and
+`.gitattributes` pins `*.txt` to LF as well.
+
+`prompts/README.md` stays at the root and now explains where prompts actually
+live, so the path in the specification resolves to an explanation rather than to
+nothing.
+
+### Consequences
+
+- The prompt is found from a checkout, an installed wheel, any working
+  directory, and paths containing spaces and non-ASCII characters.
+- The same prompt has the same identity on Windows and on Linux. Hashing raw
+  bytes would have given a CRLF checkout a different digest, and every manifest
+  written on a developer machine would have looked like a different experiment
+  from the identical run in CI. The normalisation makes that hold even where a
+  checkout is configured differently; the `.gitattributes` rule means it does
+  not have to.
+- Editing a prompt in place changes the identity of the experiment. New prompt
+  versions are new files, not edits.
+- The specification's illustrative path is now wrong, and this ADR is the
+  record of why.
+
+---
+
+## ADR-026 — `google-genai` is a runtime dependency, not an optional extra
+
+**Status:** Accepted
+
+### Context
+
+`faster-whisper` is an optional extra (`uv sync --extra transcription`), and the
+adapter imports it lazily with a clear message when it is absent. That is the
+established pattern in this repository, and the obvious thing to copy.
+
+`V0_IMPLEMENTATION_SPEC.md` lists `google-genai` among runtime dependencies.
+
+The two point in opposite directions, so the choice has to be made rather than
+inherited.
+
+### Decision
+
+`google-genai` is a required runtime dependency, pinned as `>=2.22,<3` and
+locked in `uv.lock`.
+
+The lazy import stays. `load_sdk()` still catches `ImportError` and raises a
+`ConfigurationError` naming the package, because a required dependency can still
+be missing from a broken or partial installation, and that should exit 2 with a
+sentence rather than a traceback.
+
+### Consequences
+
+- The divergence from the `faster-whisper` precedent is about weight, not about
+  consistency for its own sake. `faster-whisper` pulls CTranslate2, whose wheels
+  are large, platform-specific and bound up with a CPU-or-GPU decision the user
+  has to make; making that optional spares everyone who does not transcribe
+  locally. `google-genai` is a thin HTTP client over `httpx`, `google-auth` and
+  `pydantic`, and the last of those is already a hard dependency.
+- `analysis.provider` defaults to `gemini`, so the default configuration can be
+  executed by a default installation. An extra would have made the
+  out-of-the-box `analyze` fail on a missing package rather than on a missing
+  key, which is a worse first experience and a less accurate diagnosis.
+- CI installs the SDK, so the adapter's request construction is exercised
+  against the real SDK types rather than against a stand-in for them. A
+  misspelled parameter fails in CI instead of on the first paid call.
+- The SDK being installed is never the same thing as the provider being
+  reachable. No test in the normal suite opens a socket, and the credential is
+  read only when a real analyzer is constructed.
+
+---
+
+## ADR-027 — Retries, and what a Gemini failure means
+
+**Status:** Accepted
+
+### Context
+
+Two things had to be decided together: which failures are worth another call,
+and which exit code each failure produces. Getting the second wrong is worse
+than getting the first wrong — a run marked `FAILED_ANALYSIS` because a laptop
+has no API key records a provider failure that never happened.
+
+### Decision
+
+**Exit 2, configuration, and the run is not touched:** `GEMINI_API_KEY` absent
+or blank; the SDK not importable; `analysis.model` empty or the placeholder; a
+provider named in the configuration that this build has no adapter for. Nothing
+was called, so nothing is recorded.
+
+**Exit 3, incompatible artifact:** the existing candidates do not match what is
+being asked for now — including a switch between fixture and provider, which
+falls out of the stage configuration digest without a special case.
+
+**Exit 5, analysis, and the run becomes `FAILED_ANALYSIS`:** a timeout, an
+exhausted rate limit, a 5xx, a refusal, an empty response, a truncated or
+schema-invalid answer, and a reply verifiably produced by a different model. The
+stage started and could not finish.
+
+**Retried:** transport errors and timeouts, 408, 429, 500, 502, 503, 504. Three
+attempts, fixed backoff of 2s then 8s. The worst case per chunk is ten seconds
+of waiting, which is a number rather than a property of an unbounded exponential.
+
+**Not retried:** 400, 401, 403, 404, and any schema violation. These fail
+identically every time; a retry spends quota to obtain the same answer.
+
+An answer is refused when the reported `model_version` is neither the model
+requested nor a dated build of it (`gemini-3.5-flash-lite-001` is the same
+model). When nothing is reported there is nothing to verify, and an unverifiable
+claim is not evidence of a mismatch.
+
+### Consequences
+
+- Error messages are rebuilt from the status code and a bounded, redacted
+  excerpt of the provider's message. The SDK's own `str()` embeds the entire
+  decoded response body: unbounded, provider-controlled, and exactly where an
+  echoed key would appear. The environment is read on the failure path only, in
+  order to delete the credential from the text — the one use of the variable
+  that cannot leak it.
+- **A response that fails to parse is not persisted.** `raw_response` is only
+  carried on a `CandidateBatch`, batches only exist on the success path, and
+  nothing is written until all four artifacts are valid. So the single most
+  useful artifact for debugging a bad prompt — the malformed reply — is lost,
+  and only a bounded excerpt survives in the error message. This is a real
+  limitation of the current contract, recorded rather than worked around:
+  writing a partial artifact to keep it would break the guarantee that a failed
+  stage leaves nothing behind, which is worth more.
+- Retry counts and backoff are module constants, not configuration. They change
+  how long a failure takes, never what the artifacts contain, so they are
+  deliberately outside the stage configuration and the fingerprint.

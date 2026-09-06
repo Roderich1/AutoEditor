@@ -19,19 +19,35 @@ uv run content-engine doctor
 uv run content-engine inspect sample.mp4
 uv run content-engine run sample.mp4 --config configs/fast.toml
 uv run content-engine transcribe RUN_ID --config configs/fast.toml
-uv run content-engine analyze RUN_ID --fixture fixture.json
+uv run content-engine analyze RUN_ID                      # llama a Gemini
+uv run content-engine analyze RUN_ID --fixture fixture.json   # reproduce un archivo
 ```
 
 `doctor --require-ai` convierte las credenciales y el modelo de análisis en
-requisitos obligatorios; por defecto son advertencias, porque todavía no hay
-adaptador de proveedor.
+requisitos obligatorios; por defecto son advertencias.
 
-`analyze` exige `--fixture` en esta versión. La mitad determinista del motor de
-candidatos —validación, ajuste de límites, puntuación, deduplicación y
-ranking— está terminada; el adaptador de Gemini no. El analizador de fixture
-reproduce respuestas grabadas en un archivo, sin red, sin SDK y sin credencial,
-y se identifica como `fixture` en el manifiesto para que ninguna ejecución
-afirme una llamada que nunca ocurrió.
+`analyze` tiene dos modos y el manifiesto siempre registra cuál se usó.
+
+Con `--fixture` se reproducen respuestas grabadas en un archivo: sin red, sin
+credencial y sin consultar `GEMINI_API_KEY`. El analizador se identifica como
+`fixture`, de modo que ninguna ejecución puede afirmar una llamada que nunca
+ocurrió.
+
+Sin `--fixture` decide `analysis.provider`. Para `gemini` eso significa una
+llamada real por chunk contra `GEMINI_API_KEY`, con el prompt versionado
+`clip_candidates/v1` y salida estructurada. La clave se lee del entorno
+únicamente cuando se construye el proveedor real, nunca llega a un artefacto ni
+a un mensaje, y su ausencia es un error de configuración (código 2) que deja el
+run intacto.
+
+Los artefactos producidos por un modo nunca se reutilizan en el otro: la
+configuración efectiva de la etapa nombra al analizador que realmente corrió y
+su digest es lo que decide la reutilización.
+
+Un fallo real del proveedor deja el run en `FAILED_ANALYSIS` (código 5) y no
+escribe ningún artefacto. Los reintentos se limitan a fallos transitorios
+—timeout, 429, 5xx— con tres intentos y espera acotada; un 400, 401 o 403 no se
+reintenta (ADR-027).
 
 ## Configuración
 
@@ -67,7 +83,8 @@ Variables de entorno:
 |---|---|
 | `CONTENT_ENGINE_WORKSPACE` | Raíz del workspace; tiene prioridad sobre el TOML |
 | `CONTENT_ENGINE_ANALYSIS_MODEL` | Modelo de análisis |
-| `GEMINI_API_KEY` | Credencial de análisis (ADR-019; todavía sin uso: el adaptador no existe) |
+| `GEMINI_API_KEY` | Credencial de análisis (ADR-019). Se lee solo al construir el proveedor real; nunca se escribe en artefactos, manifiesto ni mensajes |
+| `CONTENT_ENGINE_RUN_AI_TESTS` | `1` habilita la única prueba que gasta cuota real (`tests/ai/`); por defecto se omite |
 
 Un `workspace.root` relativo se resuelve contra el directorio actual, nunca
 contra el directorio de instalación. `doctor` y `run` imprimen siempre la ruta

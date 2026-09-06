@@ -38,14 +38,16 @@ Do not silently choose one version.
 - V0.2 Media: stabilized and merged, with integration tests against real FFmpeg.
 - V0.3 Transcription: stabilized and merged, validated against a real model and
   real Spanish technical speech.
-- V0.4 CE-023–CE-033: in progress. CE-023, CE-024, CE-025 and CE-027 are merged
-  into `main` (PR #4, merge commit `70fb6ed`). CE-030–CE-033 and the `analyze`
-  command are implemented on `feat/candidate-engine-pipeline`, pending review.
+- V0.4 CE-023–CE-033: in progress. CE-023, CE-024, CE-025, CE-027 and
+  CE-030–CE-033 are merged into `main` (PR #4 `70fb6ed`, PR #5 `1b15e0f`).
+  CE-026, CE-028 and CE-029 — the real prompt, the Gemini adapter and structured
+  output — are implemented on `feat/gemini-candidate-provider`, pending review.
   See `docs/CURRENT_STATE.md` for detail.
 - V0.5 and later: not implemented.
 
-`main` carries the candidate-engine foundation as of merge commit `70fb6ed`
-(PR #4). It is the correct base for the remaining V0.4 work.
+`main` carries the candidate engine through its deterministic pipeline as of
+merge commit `1b15e0f` (PR #5). It is the correct base for the remaining V0.4
+work.
 
 ## Current execution order
 
@@ -55,9 +57,10 @@ Do not silently choose one version.
      port as a Protocol only: **merged** (`70fb6ed`, PR #4);
    - deterministic pipeline — validation, boundary snapping, IoU and
      deduplication, ranking, the `analyze` command driven by a fixture analyzer:
-     **implemented on `feat/candidate-engine-pipeline`**, pending review;
+     **merged** (`1b15e0f`, PR #5);
    - provider — CE-026 `clip_candidates/v1`, CE-028 the Gemini adapter and
-     CE-029 structured-output parsing: **next**.
+     CE-029 structured-output parsing: **implemented on
+     `feat/gemini-candidate-provider`**, pending review.
 3. Do not merge a pull request without explicit authorization.
 4. Keep yt-dlp outside the Content Engine core until the Candidate Intelligence
    Engine has demonstrated useful candidate quality.
@@ -124,12 +127,18 @@ Run integration tests with real FFmpeg when media behaviour changes:
 uv run pytest -m integration --no-cov
 ```
 
-The analysis stage is exercised with a fixture analyzer and never calls a
-provider:
+The analysis stage has two modes. With `--fixture` it replays recorded answers
+and never calls a provider, reads no credential and opens no socket; without it,
+`analysis.provider` decides and Gemini is really called:
 
 ```bash
-content-engine analyze RUN_ID --fixture PATH [--config PATH] [--force]
+content-engine analyze RUN_ID [--fixture PATH] [--config PATH] [--force]
 ```
+
+The normal test suite never calls a provider. The single test that does lives in
+`tests/ai/`, is marked `ai`, and skips unless both `GEMINI_API_KEY` and
+`CONTENT_ENGINE_RUN_AI_TESTS=1` are set. Never enable it in CI, and never gate a
+paid call on the presence of a key alone.
 
 `--no-cov` is required for the focused run. `--cov-fail-under=80` measures
 whatever selection pytest was given, and the 13 integration tests cover about

@@ -18,7 +18,7 @@ Decisions recorded: ADR-019 (Gemini as the initial provider), ADR-020 (candidate
 records describe the phase they reached), ADR-021 (`target_candidates` is a run
 objective).
 
-## PR B — deterministic pipeline (`feat/candidate-engine-pipeline`)
+## PR B — deterministic pipeline (merged, `1b15e0f`, PR #5)
 
 | CE | What landed | Where | Verified by |
 |---|---|---|---|
@@ -52,20 +52,32 @@ candidates.json         the validated funnel: selected, rejected, invalid, event
 per-chunk `raw/chunk_*.json` files are not written, and `candidates.raw.json` is
 the canonical aggregate.
 
-## PR C — provider (not started)
+## PR C — provider (`feat/gemini-candidate-provider`)
 
-| CE | What it is |
-|---|---|
-| CE-026 | The `clip_candidates/v1` prompt and its identity |
-| CE-028 | The Gemini adapter behind `ContentAnalyzerPort` (ADR-019) |
-| CE-029 | Structured-output parsing and provider-side validation |
+| CE | What landed | Where | Verified by |
+|---|---|---|---|
+| CE-026 | The `clip_candidates/v1` prompt: packaged resource, versioned, hashed over line-ending-normalised text | `resources/prompts/clip_candidates/v1.txt`, `adapters/analysis/prompt.py` | `tests/unit/test_clip_candidates_prompt.py` |
+| CE-028 | `GeminiContentAnalyzer` behind the port; system instruction separate from speech, no tools, bounded retries, sanitised errors | `adapters/analysis/gemini_analyzer.py` | `tests/unit/test_gemini_analyzer.py` |
+| CE-029 | Structured output: the schema sent to the provider and the strict parse of what returns | `adapters/analysis/structured_output.py` | `tests/unit/test_gemini_structured_output.py` |
+| — | `analyze RUN_ID [--fixture PATH] [--config PATH] [--force]`, two modes that never share artifacts | `cli.py` | `tests/unit/test_cli_analyze_provider.py` |
+| — | Exactly one file in the package may import a provider SDK or a network client | `ports/analyzer.py`, `adapters/` | AST sweeps in `test_analyzer_port.py`, `test_fixture_analyzer.py` |
+| — | One opt-in test that really calls Gemini, off unless explicitly enabled | `tests/ai/test_gemini_live.py` | skipped unless `CONTENT_ENGINE_RUN_AI_TESTS=1` |
 
-Until then `manifest.versions.prompt_version` and `prompt_sha256` stay null: the
-fields belong to CE-026, and the fixture's own identity is recorded in the stage
-configuration instead, where it is true.
+Decisions recorded: ADR-025 (the prompt is a packaged resource, not a repository
+file), ADR-026 (`google-genai` is a runtime dependency rather than an optional
+extra), ADR-027 (retries, exit codes, and the fact that an unparseable response
+is not persisted).
+
+`manifest.versions.prompt_version` and `prompt_sha256` remain null for a fixture
+run and are set from `clip_candidates/v1` for a provider run. The stage
+configuration records both what ran and what the configuration asked for, so the
+two are distinguishable rather than inferred.
 
 ## What is still unmeasured
 
-The pipeline has never seen real model output. Every proposal it has processed
-was written by hand into a fixture, so the deterministic half is verified and
-the quality of what it ranks is not. That measurement is the point of PR C.
+The deterministic half is verified against hand-written proposals, and the
+adapter is verified against doubles. Neither is a measurement of candidate
+quality: that requires real model output over real videos, and the evaluation
+the specification asks for needs at least five representative sources. A single
+video can demonstrate that the integration works and give a first signal. It
+cannot show that the engine picks good clips.
