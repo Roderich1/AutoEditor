@@ -35,7 +35,7 @@ FFmpeg 9.0.1:
 | Re-run with every cache disabled | `ruff --no-cache`, `mypy --no-incremental`, `pytest -p no:cacheprovider`: all green |
 | Every test import available in the CI environment | asserted against the `uv.lock` closure of the main dependencies and the dev group, per test module |
 | Publication failure injected at each step, shortlist same, grown and shrunk | 39 cases; the previous set stays byte-identical and still passes `verify_previews` |
-| Diff against `main` | 26 files, +6861/−46 |
+| Diff against `main` | 26 files, +6863/−46 |
 | SonarCloud quality gate | passes; Reliability and Security both A |
 | `uv run pytest -m integration --no-cov` | 22 passed with real FFmpeg; 9 of them are the new preview pipeline |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
