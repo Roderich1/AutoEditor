@@ -1209,3 +1209,212 @@ claim is not evidence of a mismatch.
   schema bump with evidence behind it. Until then a run records the model it
   asked for, and this says so plainly rather than letting "the exact model" be
   assumed.
+
+---
+
+## ADR-028 — Preview encoding is a stage constant, not an experiment variable
+
+**Status:** Accepted
+
+### Context
+
+CE-034 needs a preview to be described precisely enough that a later run can
+decide whether to re-encode: dimensions, codecs, encoder preset, CRF, sample
+rate, channels, and how the source frame is fitted into the vertical one. Every
+other stage puts its settings in the configuration file, and `[render]` already
+holds exactly this list of keys for the final output.
+
+The obvious move was to do the same for `[preview]`. It has a cost that is easy
+to miss: `config_sha256` is computed over the whole configuration and is the
+logical identity of an experiment. Adding six encoder keys to `[preview]`
+changes that digest for every run, past and future — so the identity of an
+experiment about prompts and candidate quality would move because a throwaway
+proxy's CRF is now written down.
+
+### Decision
+
+`[preview]` keeps the three keys it already had: `enabled`, `width`, `height`.
+They are the ones an operator plausibly changes and the only ones that alter
+what a reviewer sees.
+
+Everything else — `libx264`, `veryfast`, CRF 30, `yuv420p`, AAC at 96k, 44.1 kHz
+stereo, `fit_pad` with black padding — is a constant of the preview stage in
+`domain.preview_rules`, versioned by `PREVIEW_RULES_VERSION` and
+`PREVIEW_ARGUMENT_VERSION`, and written out in full to
+`previews/config.effective.json`.
+
+The two versions are separate deliberately. The policy can stay the same while
+the argument list that expresses it changes, and it is the argument list that
+decides the bytes. Either one moving changes the stage configuration digest and
+therefore requires an explicit `--force`.
+
+### Consequences
+
+- A preview stage still explains itself completely: the effective configuration
+  artifact names every parameter that produced the file beside it, so nobody has
+  to read the source to find out what CRF a preview was encoded at.
+- Changing an encoder parameter is a code change with a version bump, not a
+  profile edit. That is the right friction for a proxy: it is not something to
+  sweep across an experiment matrix.
+- `config_sha256` for the "Aprende Linux" run analysed before this branch is
+  unchanged, so V0.5 did not invalidate the identity of a real experiment in
+  order to describe files that are deleted at the end of it.
+- If preview encoding ever becomes worth experimenting with, the keys move into
+  `[preview]` with a `config_sha256` bump and this ADR is superseded. Nothing
+  here makes that harder — the parameters already flow through one readable
+  model.
+- The verification target is stated separately from the encoder name. `libx264`
+  produces a stream ffprobe calls `h264`, so `video_codec` and
+  `expected_video_codec` are two fields; collapsing them would make the
+  post-encode check compare a name against a different name and fail on every
+  correct preview.
+
+---
+
+## ADR-029 — Human decisions are three types, and a rejection has no interval
+
+**Status:** Accepted
+
+### Context
+
+`V0_IMPLEMENTATION_SPEC.md` section 27 sketches one model for a review
+decision: `candidate_id`, a `decision` literal, the original bounds, then
+`final_start`, `final_end` and `reason` all optional.
+
+Four optional fields and a literal tag. Written that way, the type permits a
+rejection carrying an approved interval, an approval carrying a rejection
+reason, an "edit" whose final bounds equal the original ones, and an approval
+with no final bounds at all. Each of those is a record that says something
+different from what the person did, and this file is the only evidence in the
+whole engine of what a person decided.
+
+The PR brief also lists `final_start` and `final_end` among the fields *every*
+decision must keep. For a rejection there is nothing to keep: no interval was
+approved. That is a real contradiction in the specification, and it is resolved
+here rather than silently.
+
+### Decision
+
+Three models, discriminated on `decision`, in `domain/review.py`.
+
+`ApprovedDecision` carries `final_start` and `final_end`, validated to equal the
+original interval. They are stored rather than derived so a renderer can read
+`final_interval` without knowing which kind of decision it holds, and checked
+rather than trusted so a file claiming an approval with moved bounds is refused
+instead of being read as an edit.
+
+`RejectedDecision` carries an optional `EditorialReason` and an optional
+`detail`, **and no final bounds at all** — absent, not null. Storing the
+original values there would produce a row that reads as an approved clip, which
+is exactly the confusion CE-057's rejection metrics exist to measure. Anything
+that needs "the interval to render" asks `final_interval`, which answers `None`.
+
+`EditedDecision` carries final bounds that must be finite, ordered, inside the
+source, and actually different from the original ones. An edit that moved
+nothing is an approval, and is refused as an edit.
+
+Beyond that:
+
+- **`EditorialReason` is a separate enum from `RejectionReason`.** The latter
+  records why the deterministic rules discarded a proposal —
+  `invalid_interval`, `below_min_score`, `duplicate` — decisions made before any
+  person saw anything. The former records an editorial judgement about material
+  that passed every rule. Three of the names collide (`too_long`, `too_short`,
+  `duplicate`), and sharing one enum would make a single value mean "under
+  `min_duration_seconds`" in one row and "not worth posting" in the next.
+  CE-057 could then no longer separate the prompt's failures from the operator's
+  taste, which is the measurement this project exists to make.
+- **A reason is optional; `other` requires a detail.** Making a reason mandatory
+  would push a reviewer working through thirty candidates towards whichever
+  label was least effort, and a guessed label is worse than a missing one for
+  the metrics reading it. `other` is the exception because it names nothing: the
+  free text is its whole content.
+- **A detail without a reason is refused.** The detail explains a reason rather
+  than replacing it; allowing a bare detail would create a second, unstructured
+  reason channel that no metric can group by.
+- **A human edit is not constrained by `min_duration_seconds` or
+  `max_duration_seconds`.** Those shape what the model may propose, and CE-030
+  enforces them on proposals. A person watching the preview is the authority on
+  where their clip ends, and silently widening their interval back to the AI
+  minimum would render something they did not choose. The only bounds an edit
+  respects are finite, ordered and inside the source.
+- **`reviewed_at` must be timezone-aware UTC.** A naive timestamp is unorderable
+  against an aware one, and a local one reorders the session when the file is
+  read on another machine.
+
+### Consequences
+
+- Reading a decision means knowing which kind it is. That is the point: a
+  consumer cannot accidentally treat a rejection as a clip to render, because
+  the fields it would need are not there to read.
+- `review/decisions.json` is not a flat table. A consumer that wants one can
+  project it; the stored form does not pretend the three kinds are one thing.
+- The collection checks each decision's copied original bounds against the
+  candidate. Without that, an edited original would turn "the reviewer moved the
+  boundary by four seconds" into a measurement of nothing, and that difference
+  is precisely what CE-057 reads.
+- Adding a fourth kind of decision means adding a model, not adding another
+  optional field to a growing one.
+
+---
+
+## ADR-030 — Re-opening a review is the only backwards transition
+
+**Status:** Accepted, extends ADR-018
+
+### Context
+
+ADR-018 makes the run state machine strictly forward: a run advances one stage
+at a time or stops at the failure state of the stage that broke, and backwards
+moves are refused so a manifest can never claim a state it did not earn.
+
+`review --force` breaks that assumption for one specific reason. It discards
+human decisions and asks about every candidate again. A run in `REVIEWED` whose
+`decisions.json` has just been replaced with an empty collection would be
+claiming a finished editorial pass while the reviewer is still working through
+the list, and every later stage reads the status rather than the file.
+
+Every other stage's `--force` needs no backwards edge: it recomputes the same
+kind of artifact and ends in the state it was already in. Review is different
+because what it holds is not derived from anything.
+
+### Decision
+
+`RE_ENTRY_TRANSITIONS` holds exactly one pair:
+
+```text
+REVIEWED -> READY_FOR_REVIEW
+```
+
+Written as an explicit pair rather than as a general "one step back" rule. A
+general rule would also have permitted `READY_FOR_REVIEW -> ANALYZED` and
+`RENDERED -> REVIEWED`, for reasons nobody decided on.
+
+`RunStage` gains `PREVIEW` and `REVIEW`, with `FAILED_PREVIEW` and
+`FAILED_REVIEW` beside them, so `READY_FOR_REVIEW` and `REVIEWED` are produced
+by stages that own them instead of appearing on the success path with no stage
+behind them.
+
+`test_run_state.py` asserts the exhaustive property — that this is the only
+transition anywhere in the table that moves backwards along `SUCCESS_PATH` — so
+a second backwards edge added anywhere fails the suite rather than passing
+quietly.
+
+### Consequences
+
+- A failing encoder produces `FAILED_PREVIEW`. It is no longer possible to
+  record a preview failure as `FAILED_ANALYSIS`, which would have described an
+  external call that never happened, or to leave a manifest asserting
+  `READY_FOR_REVIEW` after previews that were not produced.
+- Quitting a review, reaching end of input and pressing Ctrl+C are not failures
+  and touch neither the status nor the failure record. `FAILED_REVIEW` exists
+  for a technical failure of the stage, not for a person stopping.
+- **A run that has been previewed can no longer be re-analysed.**
+  `READY_FOR_REVIEW -> ANALYZED` is not an allowed transition, so
+  `analyze --force` on such a run is refused with a state-machine error rather
+  than silently stranding the previews and decisions built on the old shortlist.
+  This is a real usability cost and it is deliberate for now: cascading
+  invalidation is CE-052's job, and until it exists refusing is safer than
+  orphaning. The workaround is a new run.
+- The re-entry edge is taken only by `review --force`, and only after a warning
+  that names how many decisions will be discarded.

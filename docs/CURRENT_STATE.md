@@ -7,31 +7,33 @@
 - Merged pull requests: `#1 Proyecto base`, `#2 documentacion del proyecto base`,
   `#3 Stabilize Content Engine V0.1-V0.3` (merge commit `d047479`),
   `#4 Candidate engine foundation` (merge commit `70fb6ed`),
-  `#5 Candidate engine deterministic pipeline` (merge commit `1b15e0f`)
-- Active branch: `feat/gemini-candidate-provider`, based on `1b15e0f`
+  `#5 Candidate engine deterministic pipeline` (merge commit `1b15e0f`),
+  `#6 Candidate engine provider` (merge commit `5570531`)
+- Active branch: `feat/human-evaluation`, based on `5570531`
 - Current package version: `0.1.0`
 
 ## Verification baseline
 
-`main` at `1b15e0f` was verified before this branch started: ruff, ruff format
-(84 files), mypy strict (40 files), 1086 tests at 99.38%, 13 integration tests
-and `uv build`, all green. That is the baseline this branch is measured against.
+`main` at `5570531` was reproduced before this branch started: ruff, ruff
+format (94 files), mypy strict (43 files), 1252 tests at 99.45% over 2384
+statements with 13 missed, 13 integration tests and `uv build`, all green. That
+is the baseline this branch is measured against.
 
-Last verification, on `feat/gemini-candidate-provider`, Windows 11,
-Python 3.12.10, FFmpeg 9.0.1:
+Last verification, on `feat/human-evaluation`, Windows 11, Python 3.12.10,
+FFmpeg 9.0.1:
 
 | Check | Result |
 |---|---|
 | `uv run ruff check .` | passed |
-| `uv run ruff format --check .` | passed, 94 files |
-| `uv run mypy src` | passed, 43 files, strict |
-| `uv run pytest` | 1252 passed, 1 skipped, 166 more than the 1086 on `main` |
+| `uv run ruff format --check .` | passed, 109 files |
+| `uv run mypy src` | passed, 50 files, strict |
+| `uv run pytest` | 1620 passed, 1 skipped, 368 more than the 1252 on `main`; 99.59% over 3209 statements, 13 missed — the same 13 `main` already had |
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
 | SonarCloud quality gate | passes; Reliability and Security both A |
-| `uv run pytest -m integration --no-cov` | 13 passed with real FFmpeg |
+| `uv run pytest -m integration --no-cov` | 22 passed with real FFmpeg; 9 of them are the new preview pipeline |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
 | Transcription digests unchanged by the canonical extraction | pinned to `main` at `d047479` and asserted |
 | Provider SDK, network client or yt-dlp imported anywhere in `src/` | only `adapters/analysis/gemini_analyzer.py`; asserted by two AST sweeps, plus a test that the one exempted file still exists so a rename cannot silently widen the hole |
@@ -51,7 +53,10 @@ Python 3.12.10, FFmpeg 9.0.1:
 | Wheel in a clean venv, arbitrary working directory with spaces and non-ASCII characters | `doctor`, `inspect`, `run`, `transcribe` all work |
 | Real faster-whisper transcription | passed, model `small` on cpu/int8, 34 s of Spanish technical speech |
 | Artifacts UTF-8 without BOM, LF endings | verified byte by byte |
-| Secrets or media tracked in Git | none; tracked tree is 710 KB |
+| Secrets or media tracked in Git | none |
+| `preview` on the real analysed run | 15 previews in 26 s, every one verified independently with ffprobe |
+| Second `preview` on the same run | reuse in 0.49 s, no encode, all 16 files and the manifest byte-identical |
+| The four analysis artifacts after previewing | SHA-256 unchanged; analysis fingerprint still `b6f2c48acd57` |
 
 ### Real-speech smoke test
 
@@ -311,7 +316,7 @@ ADR-023 the fixture executor.
   carry both a recorded failure and candidates; it may keep the response beside
   an error, which is the most useful thing about a failure.
 
-### V0.4 provider — in PR C, pending merge
+### V0.4 provider — merged in `5570531` (PR #6)
 
 CE-026, CE-028 and CE-029, in `resources/prompts/clip_candidates/v1.txt`,
 `adapters/analysis/prompt.py`, `adapters/analysis/structured_output.py` and
@@ -408,6 +413,64 @@ prompt and fixture identity, the chunking and candidate settings, and every rule
 and schema version. `manifest.stages["analysis"]` records the fingerprint, the
 digest of that file, the schema version and the completion time, exactly as the
 transcription stage does.
+
+### V0.5 Human Evaluation — CE-034 to CE-039, on `feat/human-evaluation`
+
+Previews and human review, in `domain/previews.py`, `domain/preview_rules.py`,
+`domain/review.py`, `ports/preview.py`, `adapters/media/preview.py`,
+`services/preview_service.py`, `services/review_service.py` and two new CLI
+commands. ADR-028 records why preview encoding is a stage constant, ADR-029 why
+a decision is three types rather than one with optional fields, and ADR-030 the
+single backwards transition in the state machine.
+
+- **CE-034, previews.** `content-engine preview RUN_ID` cuts one 540x960 proxy
+  per selected candidate: H.264 and AAC, `veryfast` at CRF 30, the whole source
+  frame fitted inside the vertical frame and padded with `setsar=1` so nothing
+  is stretched or cropped. No subtitles and no final styling — those are
+  CE-040 to CE-045. The FFmpeg argument list is built by a pure function and
+  asserted element by element; `-ss` precedes `-i` so the encoder seeks instead
+  of decoding up to the interval, and `-t` follows it so the limit applies to
+  what is written.
+
+  Every encode happens in `previews/.staging/` and is read back with ffprobe
+  there — dimensions, codecs and duration against a documented 1.0 s tolerance.
+  Nothing is moved into `previews/` until the whole set has passed, so a
+  failure leaves the previous previews intact and a failed `--force` destroys
+  nothing. The index and the stage configuration are written last, and the
+  index the reuse check looks for first is written after everything else.
+
+- **CE-035 to CE-039, review.** `content-engine review RUN_ID` shows one
+  candidate at a time with its rank, identifier, topic, category, interval,
+  duration, total, the six component scores, hook, summary, reason and preview
+  path, then five keys: `[A]` approve, `[R]` reject, `[E]` edit range, `[S]`
+  skip, `[Q]` quit and save. Each explicit decision is written atomically
+  before the next candidate is shown.
+
+  Skipping records nothing, which is what makes "not decided yet" and "decided
+  to do nothing" different states: a skipped candidate is pending again next
+  session. `Q`, end of input and Ctrl+C all end the session without touching
+  the status or the failure record. The run reaches REVIEWED only when every
+  selected candidate has an explicit decision.
+
+- **The artifacts.** `previews/index.json` (candidate id, rank, interval,
+  expected and measured duration, filename, dimensions, codecs, SHA-256, size,
+  plus the analysis fingerprint and source digest they were cut from),
+  `previews/config.effective.json`, `review/decisions.json` and
+  `review/config.effective.json`. The manifest records a `preview` and a
+  `review` stage exactly as transcription and analysis do: a fingerprint, the
+  digest of the stage configuration beside the output, a schema version and a
+  completion time.
+
+- **Reuse.** The preview fingerprint covers the index and the configuration,
+  and the index holds a digest of every file, so it covers the output. A
+  deleted, truncated, replaced or renamed preview cannot be reused; nor can a
+  set produced under other dimensions, other preview rules, another analysis or
+  another source. Verification writes nothing, and a refusal names `--force`.
+
+- **What is deliberately not here.** No SRT or ASS, no final render, no
+  `vertical_blur` or `vertical_crop`, no CE-040 and beyond, no second Gemini
+  call, no prompt change and no scoring change. `preview` and `review` never
+  read `GEMINI_API_KEY` and open no socket.
 
 ## The real video: the first real Gemini run
 
@@ -544,19 +607,57 @@ that work has not been done.
 - A candidate identifier is a 64-bit prefix of a SHA-256. Collisions are refused
   by the collection rather than resolved, so an astronomically unlikely one would
   be a loud failure rather than a lost record.
+- **A run that has been previewed can no longer be re-analysed.**
+  `READY_FOR_REVIEW -> ANALYZED` is not an allowed transition, so
+  `analyze --force` on such a run is refused by the state machine rather than
+  stranding previews and decisions built on the old shortlist. Cascading
+  invalidation is CE-052; until then the workaround is a new run. ADR-030
+  records the trade-off.
+- **A preview is not byte-reproducible across machines.** x264 embeds its own
+  build identity and the encode is not deterministic across versions, so the
+  reuse guarantee is "an unchanged run rewrites nothing", not "two machines
+  produce identical previews". Every other artifact in the engine remains
+  byte-comparable; these are the first that are not, and they are the only ones
+  that are disposable.
+- **The duration tolerance is 1.0 s and is a stage constant.** The 15 real
+  previews drifted at most 0.040 s, so the tolerance has a wide margin over
+  what a correct encode actually costs. It is wide enough that a badly wrong
+  short clip would still have to be more than a second off to be caught, which
+  is the intended trade: the check exists to catch a truncated or empty encode,
+  not to measure frame accuracy.
+- **`review` is a line-oriented prompt loop, not a player.** It prints the path
+  to each preview; opening it is the reviewer's job. There is no key that
+  launches a video player, because that would mean shelling out to whatever the
+  platform associates with `.mp4`.
+- **Piping `review` through a legacy Windows codepage mangles accents.** The
+  artifacts are UTF-8 and an interactive console renders Spanish correctly;
+  redirecting stdout on a machine whose Python defaults to cp1252 replaces
+  unmappable characters. `PYTHONIOENCODING=utf-8` fixes it. The data is never
+  affected.
+- **No human decision has been recorded on the real run.** The 15 previews
+  exist and the run is READY_FOR_REVIEW; the decisions are the operator's to
+  make, and inventing them would fabricate exactly the measurement CE-053 to
+  CE-059 are built to read. Full sessions are exercised only against fixtures.
 
 ## Current priority
 
-V0.4, the Candidate Intelligence Engine (CE-023–CE-033). The foundation
-(CE-023, CE-024, CE-025, CE-027) is merged as `70fb6ed`; the deterministic
-pipeline (CE-030–CE-033) and the `analyze` command as `1b15e0f`. CE-026, CE-028
-and CE-029 are on `feat/gemini-candidate-provider`, pending review.
+V0.5, Human Evaluation (CE-034–CE-039), on `feat/human-evaluation` and pending
+review. V0.4 is complete and merged: the foundation as `70fb6ed`, the
+deterministic pipeline and `analyze` as `1b15e0f`, the prompt, the Gemini
+adapter and structured output as `5570531`.
 
-That completes CE-023–CE-033, and the first real run has now happened: seven
-live calls over a 35-minute video, 15 candidates selected from 23 proposals,
-reuse proved without a credential. What is still missing is the reason the
-subsystem exists — candidate quality measured over a representative set. One
-video is a signal, not a measurement.
+The immediate next step is not code. The real run is READY_FOR_REVIEW with 15
+verified previews, and the measurement the whole subsystem exists for needs a
+person to watch them and decide:
+
+```bash
+content-engine review 20260906T134657-aprende-linux-ahora-curso-desde--881437
+```
+
+That produces the first real editorial data — approval rate, edit rate and
+rejection reasons — which is what CE-053 to CE-059 will read and what will say
+whether the prompt is any good. One video is still a signal rather than a
+measurement; the specification asks for at least five.
 
 ## Deferred to V0.7 (CE-047 to CE-052)
 
