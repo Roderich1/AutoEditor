@@ -238,5 +238,7 @@ def test_the_error_names_what_was_allowed_instead() -> None:
         validate_transition(S.CREATED, S.COMPLETED)
 
     message = str(raised.value)
-    assert "CREATED" in message and "COMPLETED" in message
-    assert "INSPECTED" in message and "FAILED_INSPECT" in message
+    assert "CREATED" in message
+    assert "COMPLETED" in message
+    assert "INSPECTED" in message
+    assert "FAILED_INSPECT" in message

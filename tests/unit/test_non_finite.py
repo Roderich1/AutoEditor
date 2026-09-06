@@ -67,8 +67,10 @@ def _media(**overrides: Any) -> dict[str, Any]:
 @NON_FINITE
 @pytest.mark.parametrize("field", ["duration_seconds", "fps"])
 def test_media_info_refuses_non_finite_numbers(value: float, field: str) -> None:
+    payload = _media(**{field: value})
+
     with pytest.raises(ValidationError):
-        MediaInfo(**_media(**{field: value}))
+        MediaInfo(**payload)
 
 
 @NON_FINITE
@@ -111,6 +113,8 @@ def test_a_transcript_refuses_a_non_finite_duration(value: float, field: str) ->
 
 @NON_FINITE
 def test_a_transcript_refuses_a_non_finite_language_probability(value: float) -> None:
+    created_at = datetime.now(UTC)
+
     with pytest.raises(ValidationError):
         Transcript(
             language="es",
@@ -119,7 +123,7 @@ def test_a_transcript_refuses_a_non_finite_language_probability(value: float) ->
             declared_duration_seconds=None,
             segments=[],
             model="tiny",
-            created_at=datetime.now(UTC),
+            created_at=created_at,
         )
 
 
@@ -156,8 +160,10 @@ def _metrics(**overrides: Any) -> dict[str, Any]:
     ],
 )
 def test_metrics_refuse_non_finite_numbers(value: float, field: str) -> None:
+    payload = _metrics(**{field: value})
+
     with pytest.raises(ValidationError):
-        TranscriptionMetrics(**_metrics(**{field: value}))
+        TranscriptionMetrics(**payload)
 
 
 @NON_FINITE
@@ -168,12 +174,11 @@ def test_the_normalization_tolerance_must_be_a_real_number(value: float) -> None
 
 @NON_FINITE
 def test_a_non_finite_audio_duration_is_refused(value: float) -> None:
+    raw = raw_transcription((raw_segment(0.0, 1.0, "hola"),), None)
+    created_at = datetime.now(UTC)
+
     with pytest.raises(TranscriptionError, match="not a finite number"):
-        normalize_transcription(
-            raw_transcription((raw_segment(0.0, 1.0, "hola"),), None),
-            value,
-            datetime.now(UTC),
-        )
+        normalize_transcription(raw, value, created_at)
 
 
 @NON_FINITE
@@ -183,12 +188,11 @@ def test_a_non_finite_segment_bound_is_refused_not_clamped(value: float, bound: 
     bounds = {"start": 0.0, "end": 1.0}
     bounds[bound] = value
 
+    raw = raw_transcription((raw_segment(bounds["start"], bounds["end"], "hola"),), 10.0)
+    created_at = datetime.now(UTC)
+
     with pytest.raises(TranscriptionError, match="not a finite number"):
-        normalize_transcription(
-            raw_transcription((raw_segment(bounds["start"], bounds["end"], "hola"),), 10.0),
-            10.0,
-            datetime.now(UTC),
-        )
+        normalize_transcription(raw, 10.0, created_at)
 
 
 @NON_FINITE
@@ -197,22 +201,20 @@ def test_a_non_finite_word_value_is_refused(value: float, field: str) -> None:
     fields: dict[str, Any] = {"word": "hola", "start": 0.1, "end": 0.5, "probability": 0.9}
     fields[field] = value
 
+    raw = raw_transcription((raw_segment(0.0, 1.0, "hola", (RawWord(**fields),)),), 10.0)
+    created_at = datetime.now(UTC)
+
     with pytest.raises(TranscriptionError, match="not a finite number"):
-        normalize_transcription(
-            raw_transcription((raw_segment(0.0, 1.0, "hola", (RawWord(**fields),)),), 10.0),
-            10.0,
-            datetime.now(UTC),
-        )
+        normalize_transcription(raw, 10.0, created_at)
 
 
 @NON_FINITE
 def test_a_non_finite_declared_duration_is_refused(value: float) -> None:
+    raw = raw_transcription((raw_segment(0.0, 1.0, "hola"),), value)
+    created_at = datetime.now(UTC)
+
     with pytest.raises(TranscriptionError, match="not a finite number"):
-        normalize_transcription(
-            raw_transcription((raw_segment(0.0, 1.0, "hola"),), value),
-            10.0,
-            datetime.now(UTC),
-        )
+        normalize_transcription(raw, 10.0, created_at)
 
 
 @NON_FINITE
@@ -225,14 +227,18 @@ def test_a_non_finite_language_probability_is_refused(value: float) -> None:
         model="tiny",
     )
 
+    created_at = datetime.now(UTC)
+
     with pytest.raises(TranscriptionError, match="not a finite number"):
-        normalize_transcription(raw, 10.0, datetime.now(UTC))
+        normalize_transcription(raw, 10.0, created_at)
 
 
 @pytest.mark.parametrize("text", ["nan", "inf", "-inf", "Infinity", "-Infinity", "NaN"])
 def test_ffprobe_refuses_a_non_finite_declared_duration(text: str) -> None:
+    path = Path("sample.mp4")
+
     with pytest.raises(InvalidMediaError):
-        _positive_duration(Path("sample.mp4"), text)
+        _positive_duration(path, text)
 
 
 @pytest.mark.parametrize("text", ["nan/1", "inf/1", "1/nan"])

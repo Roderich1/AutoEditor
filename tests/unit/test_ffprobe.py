@@ -89,8 +89,10 @@ def test_probe_rejects_media_without_audio(
 ) -> None:
     _stub(monkeypatch, _probe_payload(include_audio=False))
 
+    adapter = FFprobeAdapter()
+
     with pytest.raises(NoAudioStreamError, match="no audio stream"):
-        FFprobeAdapter().probe(media_file)
+        adapter.probe(media_file)
 
 
 def test_probe_rejects_media_without_video(
@@ -98,8 +100,10 @@ def test_probe_rejects_media_without_video(
 ) -> None:
     _stub(monkeypatch, _probe_payload(include_video=False))
 
+    adapter = FFprobeAdapter()
+
     with pytest.raises(InvalidMediaError, match="no video stream"):
-        FFprobeAdapter().probe(media_file)
+        adapter.probe(media_file)
 
 
 def test_probe_rejects_non_positive_duration(
@@ -107,15 +111,19 @@ def test_probe_rejects_non_positive_duration(
 ) -> None:
     _stub(monkeypatch, _probe_payload(duration="0"))
 
+    adapter = FFprobeAdapter()
+
     with pytest.raises(InvalidMediaError, match="duration is not positive"):
-        FFprobeAdapter().probe(media_file)
+        adapter.probe(media_file)
 
 
 def test_probe_rejects_missing_duration(media_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _stub(monkeypatch, _probe_payload(duration=None))
 
+    adapter = FFprobeAdapter()
+
     with pytest.raises(InvalidMediaError, match="does not declare a duration"):
-        FFprobeAdapter().probe(media_file)
+        adapter.probe(media_file)
 
 
 def test_unreadable_media_is_invalid_media_not_a_provider_failure(
@@ -124,8 +132,10 @@ def test_unreadable_media_is_invalid_media_not_a_provider_failure(
     """A corrupt file is a problem with the input, not with the tool."""
     _raise(monkeypatch, ExternalToolError("ffprobe failed: moov atom not found"))
 
+    adapter = FFprobeAdapter()
+
     with pytest.raises(InvalidMediaError, match="ffprobe could not read"):
-        FFprobeAdapter().probe(media_file)
+        adapter.probe(media_file)
 
 
 def test_missing_ffprobe_stays_a_configuration_problem(
@@ -133,8 +143,10 @@ def test_missing_ffprobe_stays_a_configuration_problem(
 ) -> None:
     _raise(monkeypatch, ExternalToolNotFoundError("ffprobe was not found"))
 
+    adapter = FFprobeAdapter()
+
     with pytest.raises(ExternalToolNotFoundError):
-        FFprobeAdapter().probe(media_file)
+        adapter.probe(media_file)
 
 
 def test_invalid_json_response_is_rejected(
@@ -145,13 +157,18 @@ def test_invalid_json_response_is_rejected(
 
     monkeypatch.setattr("content_engine.adapters.media.ffprobe.run_command", fake_run)
 
+    adapter = FFprobeAdapter()
+
     with pytest.raises(InvalidMediaError, match="Invalid ffprobe response"):
-        FFprobeAdapter().probe(media_file)
+        adapter.probe(media_file)
 
 
 def test_missing_file_is_rejected_before_running_ffprobe(tmp_path: Path) -> None:
+    adapter = FFprobeAdapter()
+    absent = tmp_path.joinpath("absent.mp4")
+
     with pytest.raises(InvalidMediaError, match="does not exist"):
-        FFprobeAdapter().probe(tmp_path.joinpath("absent.mp4"))
+        adapter.probe(absent)
 
 
 def test_unknown_frame_rate_falls_back_then_degrades_to_zero(
@@ -170,8 +187,10 @@ def test_probe_audio_duration_requires_an_audio_stream(
 ) -> None:
     _stub(monkeypatch, _probe_payload(include_audio=False))
 
+    adapter = FFprobeAdapter()
+
     with pytest.raises(NoAudioStreamError):
-        FFprobeAdapter().probe_audio_duration(media_file)
+        adapter.probe_audio_duration(media_file)
 
 
 def test_probe_audio_duration_returns_seconds(
@@ -189,8 +208,10 @@ def test_incomplete_stream_metadata_is_rejected(
     del payload["streams"][0]["width"]
     _stub(monkeypatch, payload)
 
+    adapter = FFprobeAdapter()
+
     with pytest.raises(InvalidMediaError, match="Incomplete media metadata"):
-        FFprobeAdapter().probe(media_file)
+        adapter.probe(media_file)
 
 
 def test_an_unparseable_frame_rate_degrades_to_zero(

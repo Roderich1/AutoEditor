@@ -115,12 +115,13 @@ def test_a_missing_package_is_reported_as_a_transcription_error(
         fake_import,
     )
 
+    transcriber = FasterWhisperTranscriber()
+    audio = tmp_path.joinpath("source.wav")
+    options = _options()
+    hardware = ResolvedHardware(device="cpu", compute_type="int8")
+
     with pytest.raises(TranscriptionError, match="uv sync --extra transcription"):
-        FasterWhisperTranscriber().transcribe(
-            tmp_path.joinpath("source.wav"),
-            _options(),
-            ResolvedHardware(device="cpu", compute_type="int8"),
-        )
+        transcriber.transcribe(audio, options, hardware)
 
 
 class _Word:

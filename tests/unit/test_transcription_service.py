@@ -76,7 +76,8 @@ def test_srt_numbering_stays_contiguous_when_segments_are_dropped(
     srt = output.joinpath("transcript.srt").read_text(encoding="utf-8")
 
     assert [line for line in srt.splitlines() if line.isdigit()] == ["1", "2"]
-    assert "uno" in srt and "tres" in srt
+    assert "uno" in srt
+    assert "tres" in srt
 
 
 def test_empty_transcript_produces_empty_files_not_stray_newlines(

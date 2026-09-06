@@ -10,7 +10,7 @@ from content_engine import __version__
 from content_engine.adapters.persistence.filesystem import RunWorkspace
 from content_engine.config import Settings, config_sha256
 from content_engine.domain.enums import RunStage, RunStatus
-from content_engine.domain.exceptions import ContentEngineError, ExternalToolError
+from content_engine.domain.exceptions import ContentEngineError
 from content_engine.domain.models import (
     InputManifest,
     RunFailure,
@@ -75,9 +75,14 @@ class RunService:
 
     @staticmethod
     def _ffmpeg_version() -> str:
+        """A missing FFmpeg is recorded, not raised: `run` fails later and says why.
+
+        ExternalToolError is not listed separately; it already derives from
+        ContentEngineError, so naming both only suggested they were unrelated.
+        """
         try:
             return run_command(["ffmpeg", "-version"]).stdout.splitlines()[0]
-        except (ContentEngineError, ExternalToolError, IndexError):
+        except (ContentEngineError, IndexError):
             return "unavailable"
 
     def advance(self, run_path: Path, manifest: RunManifest, status: RunStatus) -> RunManifest:

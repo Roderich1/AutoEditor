@@ -116,8 +116,10 @@ class TestAudioExtraction:
     ) -> None:
         from content_engine.domain.exceptions import AudioExtractionError
 
+        output = tmp_path.joinpath("out.wav")
+
         with pytest.raises(AudioExtractionError):
-            media_service.extract_audio(video_without_audio, tmp_path.joinpath("out.wav"))
+            media_service.extract_audio(video_without_audio, output)
 
 
 class TestRunLifecycle:
@@ -146,8 +148,10 @@ class TestRunLifecycle:
         run_service = RunService(settings, workspace)
         run_path, manifest = run_service.create(video_without_audio)
 
+        probe_output = run_path.joinpath("media", "probe.json")
+
         with pytest.raises(NoAudioStreamError) as error:
-            media_service.inspect(video_without_audio, run_path.joinpath("media", "probe.json"))
+            media_service.inspect(video_without_audio, probe_output)
         run_service.fail(run_path, manifest, RunStage.INSPECT, error.value)
 
         stored = workspace.read_manifest(run_path)

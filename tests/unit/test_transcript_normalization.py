@@ -107,30 +107,42 @@ class TestRejections:
     def test_word_clearly_outside_its_segment_is_refused(self) -> None:
         words = (raw_word("fuera", 100.0, 200.0),)
 
+        segments = (raw_segment(1.0, 2.0, "fuera", words),)
+
         with pytest.raises(TranscriptionError, match="is beyond"):
-            _normalize((raw_segment(1.0, 2.0, "fuera", words),))
+            _normalize(segments)
 
     def test_negative_interval_is_refused(self) -> None:
+        segments = (raw_segment(5.0, 1.0, "invertido"),)
+
         with pytest.raises(TranscriptionError, match="is before"):
-            _normalize((raw_segment(5.0, 1.0, "invertido"),))
+            _normalize(segments)
 
     def test_timestamps_beyond_the_real_duration_are_refused(self) -> None:
+        segments = (raw_segment(0.0, 45.0, "demasiado largo"),)
+
         with pytest.raises(TranscriptionError, match="is beyond"):
-            _normalize((raw_segment(0.0, 45.0, "demasiado largo"),))
+            _normalize(segments)
 
     def test_words_out_of_order_inside_a_segment_are_refused(self) -> None:
         words = (raw_word("dos", 1.5, 1.8), raw_word("uno", 1.0, 1.2))
 
+        segments = (raw_segment(1.0, 2.0, "dos uno", words),)
+
         with pytest.raises(TranscriptionError, match="is before"):
-            _normalize((raw_segment(1.0, 2.0, "dos uno", words),))
+            _normalize(segments)
 
     def test_a_declared_duration_that_disagrees_with_the_audio_is_refused(self) -> None:
+        segments = (raw_segment(0.0, 1.0, "hola"),)
+
         with pytest.raises(TranscriptionError, match="not trusted"):
-            _normalize((raw_segment(0.0, 1.0, "hola"),), duration=10.0, declared=40.0)
+            _normalize(segments, duration=10.0, declared=40.0)
 
     def test_non_positive_audio_duration_is_refused(self) -> None:
+        segments = (raw_segment(0.0, 1.0, "hola"),)
+
         with pytest.raises(TranscriptionError, match="must be positive"):
-            _normalize((raw_segment(0.0, 1.0, "hola"),), duration=0.0, declared=0.0)
+            _normalize(segments, duration=0.0, declared=0.0)
 
 
 class TestToleranceBoundaries:
@@ -141,8 +153,10 @@ class TestToleranceBoundaries:
         assert report.clamped_segment_bounds == 1
 
     def test_just_past_the_timestamp_tolerance_is_refused(self) -> None:
+        segments = (raw_segment(0.0, 10.0 + TOLERANCE * 2, "pasado"),)
+
         with pytest.raises(TranscriptionError):
-            _normalize((raw_segment(0.0, 10.0 + TOLERANCE * 2, "pasado"),))
+            _normalize(segments)
 
     def test_exactly_at_the_duration_tolerance_is_accepted(self) -> None:
         transcript, _ = _normalize(
@@ -153,12 +167,11 @@ class TestToleranceBoundaries:
         assert transcript.declared_duration_seconds == 10.0 + DURATION_TOLERANCE_SECONDS
 
     def test_just_past_the_duration_tolerance_is_refused(self) -> None:
+        segments = (raw_segment(0.0, 1.0, "hola"),)
+        declared = 10.0 + DURATION_TOLERANCE_SECONDS * 2
+
         with pytest.raises(TranscriptionError, match="not trusted"):
-            _normalize(
-                (raw_segment(0.0, 1.0, "hola"),),
-                duration=10.0,
-                declared=10.0 + DURATION_TOLERANCE_SECONDS * 2,
-            )
+            _normalize(segments, duration=10.0, declared=declared)
 
 
 def test_declared_duration_is_kept_separate_from_the_measured_one() -> None:

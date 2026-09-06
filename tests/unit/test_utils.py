@@ -77,8 +77,11 @@ def test_text_is_written_with_lf(tmp_path: Path) -> None:
 
 def test_unserializable_values_fail_loudly(tmp_path: Path) -> None:
     """A silent str() coercion would hide a modelling mistake in an artifact."""
+    target = tmp_path.joinpath("bad.json")
+    unserializable = {"path": object()}
+
     with pytest.raises(TypeError):
-        write_json(tmp_path.joinpath("bad.json"), {"path": object()})
+        write_json(target, unserializable)
 
 
 def test_reading_invalid_json_reports_a_corrupt_artifact(tmp_path: Path) -> None:
@@ -90,8 +93,10 @@ def test_reading_invalid_json_reports_a_corrupt_artifact(tmp_path: Path) -> None
 
 
 def test_reading_a_missing_file_reports_a_corrupt_artifact(tmp_path: Path) -> None:
+    absent = tmp_path.joinpath("absent.json")
+
     with pytest.raises(CorruptArtifactError, match="Cannot read"):
-        read_json(tmp_path.joinpath("absent.json"))
+        read_json(absent)
 
 
 def test_a_failed_write_leaves_neither_a_partial_file_nor_a_temporary(

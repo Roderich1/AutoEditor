@@ -57,8 +57,10 @@ def test_a_segment_cannot_end_before_it_starts() -> None:
 
 
 def test_a_segment_refuses_a_word_outside_its_bounds() -> None:
+    words = [_word(start=3.0, end=4.0)]
+
     with pytest.raises(ValidationError, match="falls outside"):
-        _segment(start=1.0, end=2.0, words=[_word(start=3.0, end=4.0)])
+        _segment(start=1.0, end=2.0, words=words)
 
 
 def test_a_segment_refuses_words_in_the_wrong_order() -> None:
@@ -80,8 +82,10 @@ def test_a_transcript_refuses_segments_out_of_order() -> None:
 
 
 def test_a_transcript_refuses_timestamps_past_the_audio_duration() -> None:
+    segments = [_segment(end=50.0)]
+
     with pytest.raises(ValidationError, match="beyond the audio duration"):
-        _transcript([_segment(end=50.0)], duration=10.0)
+        _transcript(segments, duration=10.0)
 
 
 def test_a_transcript_requires_a_positive_duration() -> None:

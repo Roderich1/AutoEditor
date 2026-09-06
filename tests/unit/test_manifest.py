@@ -56,7 +56,8 @@ def test_prompt_metadata_is_null_until_ce_026(run_service: RunService, video: Pa
 
     assert versions["prompt_version"] is None
     assert versions["prompt_sha256"] is None
-    assert versions["transcription_model"] and versions["analysis_provider"]
+    assert versions["transcription_model"]
+    assert versions["analysis_provider"]
 
 
 def test_run_id_is_unique_per_execution(run_service: RunService, video: Path) -> None:

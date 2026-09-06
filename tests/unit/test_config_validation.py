@@ -52,8 +52,10 @@ def test_unknown_section_is_rejected(tmp_path: Path) -> None:
 def test_cross_field_invariants_name_the_broken_relation(
     tmp_path: Path, body: str, expected: str
 ) -> None:
+    profile = _profile(tmp_path, body)
+
     with pytest.raises(ConfigurationError) as error:
-        load_settings(_profile(tmp_path, body))
+        load_settings(profile)
 
     assert expected in str(error.value)
 
@@ -69,8 +71,10 @@ def test_cross_field_invariants_name_the_broken_relation(
     ],
 )
 def test_closed_value_sets_are_enforced(tmp_path: Path, body: str) -> None:
+    profile = _profile(tmp_path, body)
+
     with pytest.raises(ConfigurationError):
-        load_settings(_profile(tmp_path, body))
+        load_settings(profile)
 
 
 @pytest.mark.parametrize(
@@ -84,8 +88,10 @@ def test_closed_value_sets_are_enforced(tmp_path: Path, body: str) -> None:
     ],
 )
 def test_field_ranges_are_enforced(tmp_path: Path, body: str) -> None:
+    profile = _profile(tmp_path, body)
+
     with pytest.raises(ConfigurationError):
-        load_settings(_profile(tmp_path, body))
+        load_settings(profile)
 
 
 def test_boundary_snap_seconds_is_configurable(tmp_path: Path) -> None:

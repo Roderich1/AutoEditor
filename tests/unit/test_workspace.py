@@ -24,14 +24,18 @@ def test_workspace_creates_expected_tree(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("run_id", ["", "..", ".", str(Path("nested", "run")), "a/b"])
 def test_workspace_rejects_unsafe_run_ids(tmp_path: Path, run_id: str) -> None:
+    workspace = RunWorkspace(tmp_path)
+
     with pytest.raises(InvalidRunIdError):
-        RunWorkspace(tmp_path).run_path(run_id)
+        workspace.run_path(run_id)
 
 
 def test_requiring_a_missing_run_is_not_a_media_error(tmp_path: Path) -> None:
     """A missing run is a missing run, not invalid media."""
+    workspace = RunWorkspace(tmp_path)
+
     with pytest.raises(RunNotFoundError, match="Run does not exist"):
-        RunWorkspace(tmp_path).require("20260101T000000-absent-abc123")
+        workspace.require("20260101T000000-absent-abc123")
 
 
 def test_reading_a_manifest_that_does_not_exist(tmp_path: Path) -> None:

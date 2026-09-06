@@ -109,8 +109,10 @@ def test_relative_workspace_resolves_against_cwd(
 
 
 def test_missing_profile_reports_configuration_error(tmp_path: Path) -> None:
+    absent = tmp_path.joinpath("absent.toml")
+
     with pytest.raises(ConfigurationError, match="Cannot load configuration"):
-        load_settings(tmp_path.joinpath("absent.toml"))
+        load_settings(absent)
 
 
 def test_logical_hash_ignores_workspace_root(
