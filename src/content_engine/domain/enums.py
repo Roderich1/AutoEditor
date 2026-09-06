@@ -58,3 +58,59 @@ class AnalysisProvider(StrEnum):
 class RenderPreset(StrEnum):
     VERTICAL_BLUR = "vertical_blur"
     VERTICAL_CROP = "vertical_crop"
+
+
+class ClipCategory(StrEnum):
+    """The kinds of moment worth clipping from a technical recording.
+
+    A closed set on purpose: an open category field would let the model invent
+    labels that no downstream metric could group by, and category performance is
+    one of the evaluation signals the project is built to measure.
+    """
+
+    PROBLEM_SOLUTION = "problem_solution"
+    ERROR_LEARNING = "error_learning"
+    QUICK_TUTORIAL = "quick_tutorial"
+    EXPLANATION = "explanation"
+    DISCOVERY = "discovery"
+    OPINION = "opinion"
+    RESULT = "result"
+    BEFORE_AFTER = "before_after"
+    TIP = "tip"
+    STORY = "story"
+    DEMONSTRATION = "demonstration"
+
+
+class CandidateStatus(StrEnum):
+    """What became of a candidate the analyzer proposed.
+
+    Nothing is deleted. A candidate that failed validation or lost a duplicate
+    comparison is kept with the reason, because the rate at which the model
+    produces each is the measurement that tells us whether the prompt is working.
+    """
+
+    SUGGESTED = "suggested"
+    REJECTED = "rejected"
+    DEDUPLICATED = "deduplicated"
+
+
+class RejectionReason(StrEnum):
+    """Why a proposed candidate did not survive deterministic validation."""
+
+    INVALID_INTERVAL = "invalid_interval"
+    OUTSIDE_CHUNK = "outside_chunk"
+    END_BEYOND_SOURCE = "end_beyond_source"
+    UNGROUNDED = "ungrounded"
+    TOO_SHORT = "too_short"
+    TOO_LONG = "too_long"
+    BELOW_MIN_SCORE = "below_min_score"
+
+
+class BoundaryAnchor(StrEnum):
+    """What a snapped boundary was moved onto, or that it was left alone."""
+
+    SEGMENT_START = "segment_start"
+    SEGMENT_END = "segment_end"
+    WORD_START = "word_start"
+    WORD_END = "word_end"
+    UNCHANGED = "unchanged"
