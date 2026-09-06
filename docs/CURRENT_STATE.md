@@ -57,6 +57,11 @@ FFmpeg 9.0.1:
 | `preview` on the real analysed run | 15 previews in 26 s, every one verified independently with ffprobe |
 | Second `preview` on the same run | reuse in 0.49 s, no encode, all 16 files and the manifest byte-identical |
 | The four analysis artifacts after previewing | SHA-256 unchanged; analysis fingerprint still `b6f2c48acd57` |
+| Wheel in a clean Python 3.12 venv, working directory with a space and `ñ` | `preview --force` produced all 15, a second call reused them, a full `review` session reached REVIEWED |
+| A deleted preview on a run whose manifest records the stage | exit 3, nothing rewritten, message names `--force` |
+| Credential or credential name under a reviewed run directory | none; searched recursively as bytes |
+| `.tmp` or `.staging` left anywhere after a completed run | none |
+| Third-party imports in the seven new modules | `pydantic` only; no network client, no provider SDK, no yt-dlp, and no module reads the environment |
 
 ### Real-speech smoke test
 
@@ -634,6 +639,15 @@ that work has not been done.
   redirecting stdout on a machine whose Python defaults to cp1252 replaces
   unmappable characters. `PYTHONIOENCODING=utf-8` fixes it. The data is never
   affected.
+- **On Windows, a preview path longer than 260 characters fails.** FFmpeg uses
+  the ANSI file APIs and is bound by `MAX_PATH`; past it, it exits 0 and writes
+  nothing. Observed at 268 characters while testing the wheel from a deeply
+  nested temporary directory. It is caught rather than inherited -- the adapter
+  refuses with "FFmpeg reported success but produced no preview at ...", the
+  run becomes FAILED_PREVIEW and no partial artifact is left -- but the fix is
+  a shorter workspace path, not a code change. Python itself is unaffected, so
+  every other artifact in the same run is written normally, which is why this
+  surfaces only at the encode.
 - **No human decision has been recorded on the real run.** The 15 previews
   exist and the run is READY_FOR_REVIEW; the decisions are the operator's to
   make, and inventing them would fabricate exactly the measurement CE-053 to
