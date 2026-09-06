@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from content_engine.config import Settings
+from content_engine.domain.exceptions import IncompatibleArtifactError
 from content_engine.domain.models import (
     METRICS_SCHEMA_VERSION,
     TRANSCRIPT_SCHEMA_VERSION,
@@ -14,7 +15,9 @@ from content_engine.domain.models import (
 from content_engine.services.transcription_service import (
     TranscriptionService,
     options_from_settings,
+    read_transcript,
 )
+from content_engine.utils.json import write_json
 from tests.conftest import FakeClock, FakeTranscriber, raw_segment, raw_transcription, raw_word
 
 HARDWARE = ResolvedHardware(device="cpu", compute_type="int8")
@@ -148,3 +151,57 @@ def test_metrics_schema_is_declared(tmp_path: Path, settings: Settings) -> None:
 
     assert payload["schema_version"] == METRICS_SCHEMA_VERSION
     assert outcome.metrics.schema_version == METRICS_SCHEMA_VERSION
+
+
+# --- reading a transcript back (the first artifact analysis consumes) --------
+
+
+def test_a_transcript_round_trips_through_the_reader(tmp_path: Path) -> None:
+    from tests.conftest import speech_transcript
+
+    transcript = speech_transcript()
+    write_json(tmp_path.joinpath("transcript.json"), transcript.model_dump(mode="json"))
+
+    assert read_transcript(tmp_path) == transcript
+
+
+def test_a_missing_transcript_is_one_refusal(tmp_path: Path) -> None:
+    with pytest.raises(IncompatibleArtifactError, match="no transcript"):
+        read_transcript(tmp_path)
+
+
+def test_a_transcript_that_is_not_json_is_one_refusal(tmp_path: Path) -> None:
+    tmp_path.joinpath("transcript.json").write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(IncompatibleArtifactError, match="cannot be read as a transcript"):
+        read_transcript(tmp_path)
+
+
+def test_a_transcript_that_is_not_an_object_is_one_refusal(tmp_path: Path) -> None:
+    tmp_path.joinpath("transcript.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(IncompatibleArtifactError, match="does not contain a transcript object"):
+        read_transcript(tmp_path)
+
+
+def test_a_transcript_from_another_schema_is_not_interpreted(tmp_path: Path) -> None:
+    from tests.conftest import speech_transcript
+
+    payload = speech_transcript().model_dump(mode="json")
+    payload["schema_version"] = 99
+    write_json(tmp_path.joinpath("transcript.json"), payload)
+
+    with pytest.raises(IncompatibleArtifactError, match="declares transcript schema"):
+        read_transcript(tmp_path)
+
+
+def test_a_transcript_whose_content_is_impossible_is_refused(tmp_path: Path) -> None:
+    """Right schema, wrong content: a segment reaching past the audio it came from."""
+    from tests.conftest import speech_transcript
+
+    payload = speech_transcript().model_dump(mode="json")
+    payload["segments"][0]["end"] = 9_999.0
+    write_json(tmp_path.joinpath("transcript.json"), payload)
+
+    with pytest.raises(IncompatibleArtifactError, match="not a valid transcript"):
+        read_transcript(tmp_path)
