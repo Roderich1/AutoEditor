@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from content_engine.config import ChunkingSettings
 from content_engine.domain.candidates import (
+    CHUNKING_RULES_VERSION,
     CHUNKS_SCHEMA_VERSION,
     ChunkCollection,
     TranscriptChunk,
@@ -27,9 +28,13 @@ from content_engine.utils.canonical import canonical_sha256
 
 CHUNKS_FILENAME = "chunks.json"
 
-#: Bumped whenever the windowing rule or the rendered text format changes.
-#: Both change what the analyzer sees, so both change what it returns.
-CHUNKING_RULES_VERSION = 1
+__all__ = [
+    "CHUNKING_RULES_VERSION",
+    "CHUNKS_FILENAME",
+    "build_chunk_collection",
+    "build_chunks",
+    "transcript_sha256",
+]
 
 
 def _render(segments: list[TranscriptSegment]) -> str:
