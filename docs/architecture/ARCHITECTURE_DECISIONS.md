@@ -939,9 +939,82 @@ would be dishonest about which half of the stage exists.
 
 - The whole analysis stage runs in CI with no network, no SDK, no credential and
   no cost, and every test of it is deterministic.
+- A fixture batch carries candidates or a failure, never both. It may keep the
+  raw response beside an error: what the provider said before it was judged a
+  failure is the most useful thing about the failure.
 - Adding the Gemini adapter changes which object is constructed in `cli.py` and
   nothing else: the service, the pipeline and the artifacts are provider-neutral
   by construction, and `AnalyzerIdentity` already carries the shape a real
   provider needs.
 - Artifacts produced by a fixture run are marked as such and cannot be confused
   with provider output when the comparison eventually matters.
+
+---
+
+## ADR-024 — The analysis fingerprint covers the artifacts, not only the inputs
+
+**Status:** Accepted
+
+**Supersedes** the reuse contract in ADR-022 as first implemented.
+
+### Context
+
+ADR-017 defines a stage fingerprint as the identity of what a stage consumed.
+That works for transcription, which writes one artifact the reuse check reads
+back and validates in full: an edited `transcript.json` is caught by the reader,
+so the fingerprint only has to answer "were these the same inputs".
+
+Analysis writes four artifacts. The first implementation followed the
+transcription shape — a digest over the transcript, the raw batches and the
+stage configuration — and an independent review found the gap that leaves.
+`chunks.json` was never read back at all, on the argument that it could be
+rebuilt from the transcript. `candidates.json`, the shortlist a human is
+actually shown, was read only to check its own invariants. The identity fields
+above the raw batches were not covered either.
+
+So a candidate's topic, its interval, its score, the order of the ranking, the
+text of a chunk or the recorded analyzer version could all be edited between two
+runs, every artifact would still validate, and the second run would reuse them
+and report success.
+
+### Decision
+
+The analysis fingerprint covers the transcript digest and the **whole** of all
+four artifacts, each serialized canonically. Whole models, not chosen fields:
+selecting a subset is precisely how the first version left two artifacts
+unprotected, and selecting correctly would require knowing in advance which
+edits matter.
+
+`ANALYSIS_FINGERPRINT_VERSION` is 2. Artifacts written under version 1 are
+refused rather than reused under a weaker digest.
+
+This makes it an **integrity digest over one execution** rather than a portable
+identity. Two runs of identical inputs produce different fingerprints, because
+`generated_at` lives inside `candidates.json`. That is accepted: the question
+this digest answers is "may these four files be reused", not "is this the same
+experiment". `config_sha256` and `stage_config_sha256` remain the portable
+identities, and neither changes.
+
+**A digest is not enough on its own**, so `coherence_problem()` checks the four
+against each other and against the current transcript. A set of artifacts copied
+from another run would be internally consistent, would rebuild its own
+fingerprint, and would be entirely wrong about the run holding it. The same
+check runs before anything is written, so an incoherent set cannot be produced
+either.
+
+**All four are read back and validated**, including `chunks.json`, which gets
+the strict versioned reader it never had, and is compared against the chunks the
+current transcript and settings produce. A file trusted because it could be
+regenerated is a file nobody checked.
+
+### Consequences
+
+- Editing any field of any analysis artifact is refused with exit code 3, and
+  the refusal writes nothing.
+- Reuse costs four file reads and four model validations instead of two. That is
+  paid once per invocation and is far below the cost of the stage it skips.
+- The analysis stage and the transcription stage now compute their fingerprints
+  differently. That is deliberate and the reason is written down here, rather
+  than left as an inconsistency for a later reader to discover.
+- When CE-047–CE-052 generalise stages, this is the shape a multi-artifact stage
+  needs; transcription can keep the simpler one because it writes one artifact.

@@ -25,7 +25,7 @@ Python 3.12.10, FFmpeg 9.0.1:
 | `uv run ruff check .` | passed |
 | `uv run ruff format --check .` | passed, 83 files |
 | `uv run mypy src` | passed, 40 files, strict |
-| `uv run pytest` | 1043 passed |
+| `uv run pytest` | 1077 passed |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
@@ -35,7 +35,8 @@ Python 3.12.10, FFmpeg 9.0.1:
 | Transcription digests unchanged by the canonical extraction | pinned to `main` at `d047479` and asserted |
 | Provider SDK, network client or yt-dlp imported anywhere in `src/` | none; asserted by an AST sweep |
 | Provider SDK in the installed dependency closure | none; the wheel installs 17 packages, none of them a provider |
-| `analyze` end to end from the installed wheel, outside the repository | run reaches ANALYZED, reuse byte-identical, refusal exits 3, `--force` regenerates, analyzer failure exits 5 |
+| `analyze` end to end from the installed wheel, outside the repository | run reaches ANALYZED, reuse byte-identical, refusal exits 3, `--force` regenerates, analyzer failure exits 5, recovery from FAILED_ANALYSIS |
+| Each of the four artifacts edited or deleted in turn | every case refused with exit 3, and every other file plus the manifest left byte-identical |
 | Candidate collection identical under 24 permutations of the proposals | asserted |
 | Stage configuration coherent with the manifest | fingerprint rebuilt from the artifact matches the recorded one |
 | `uv build` | wheel and sdist built; the wheel ships `content_engine/resources/default.toml` |
@@ -69,7 +70,7 @@ Coverage:
 
 | Scope | Coverage |
 |---|---|
-| Total | 99.36% (2046 statements, 13 missed) |
+| Total | 99.38% (2104 statements, 13 missed) |
 | Domain | 100% |
 | Services | 100% |
 | Adapters | 100% except the faster-whisper decode loop |
@@ -92,7 +93,9 @@ Files with meaningful uncovered lines:
 
 Every module added by CE-030 to CE-033 is at 100%: `domain/candidate_rules.py`,
 `domain/analysis_rules.py`, `services/analysis_service.py` and
-`adapters/analysis/fixture_analyzer.py`.
+`adapters/analysis/fixture_analyzer.py`. The 13 uncovered lines are all
+pre-existing: the faster-whisper decode loop, `main()` and `__main__`, one
+transcription warning branch and two configuration lines.
 
 This baseline must be updated after every milestone or PR.
 
@@ -250,11 +253,50 @@ ADR-023 the fixture executor.
   `analysis/config.effective.json` and `analysis/candidates.json`, all computed
   and validated in memory first, then written atomically as UTF-8 with LF
   endings.
-- **Reuse** follows the transcription pattern: both digests are recomputed from
-  disk, the fingerprint is rebuilt from the transcript, the recorded batches and
-  the stored configuration, and the configuration being asked for now is compared
-  against the one recorded. Every refusal exits 3 and writes nothing; `--force`
-  replaces the artifacts atomically.
+- **Reuse proves all four artifacts.** An independent review of PR #5 found
+  that the first version proved two: `chunks.json` was never read back, on the
+  argument that it could be rebuilt from the transcript, and the fingerprint
+  covered only the raw batches — leaving `candidates.json` and the identity
+  fields above those batches trusted with no evidence. Both are now covered.
+
+  A reuse is accepted only when all four files are present, readable and valid
+  under their own schemas; the stage configuration digest recomputes to what the
+  manifest recorded; the four agree with each other and with the current
+  transcript; the chunks on disk are the ones this transcript and these settings
+  produce; the fingerprint rebuilds from all four plus the transcript; and the
+  configuration being asked for now is the one recorded. Every refusal exits 3
+  and writes nothing; `--force` replaces the artifacts atomically.
+
+  The fingerprint hashes the whole of each artifact rather than a chosen subset,
+  and its version is 2. This departs from the transcription stage, whose
+  fingerprint covers inputs only: that stage protects one artifact which is read
+  back and validated in full, while a digest over inputs alone cannot see an
+  edited output among four. The consequence is that it is an integrity digest
+  over one execution rather than a portable identity — two runs of identical
+  inputs differ, because `generated_at` is inside it. `config_sha256` and
+  `stage_config_sha256` remain the portable identities.
+- **The artifacts must agree with one another.** A fingerprint proves the four
+  files were written together; it cannot prove they were coherent when written,
+  nor that they still describe the transcript in front of them — a set moved
+  from another run would be internally consistent and completely wrong. Both
+  collections must name the transcript the run holds, the raw collection and the
+  stage configuration must agree on the analyzer, its version, the model and the
+  prompt and fixture identity, the batches must answer exactly the chunks on
+  disk, the funnel's `counts.proposed` must match the proposals the raw
+  collection holds, and the collection's limits must be the ones the stage ran
+  under. The same check runs before anything is written.
+- **A verified reuse settles the run's status.** A failed `--force` leaves the
+  earlier artifacts untouched, so a later invocation that proves they still
+  match every input is looking at a completed stage. If the run is already
+  `ANALYZED` nothing is rewritten and reuse stays byte-identical down to the
+  manifest; if it is `FAILED_ANALYSIS` the run advances to `ANALYZED`, the
+  failure is cleared, the verified stage record is kept, and the command reports
+  a recovery rather than a plain reuse. A refusal recovers nothing.
+- **One executor per run.** A `RawCandidateBatch` cannot name a model its
+  collection does not, and the service refuses an analyzer that answers under a
+  name other than the identity every artifact records. A fixture batch cannot
+  carry both a recorded failure and candidates; it may keep the response beside
+  an error, which is the most useful thing about a failure.
 
 Not implemented yet: CE-026 prompt `clip_candidates/v1`, CE-028 Gemini adapter,
 CE-029 structured output parsing. Those are PR C.
@@ -293,10 +335,12 @@ transcription stage does.
 - Grounding is coarse by design. A timestamp anywhere inside a long monologue is
   grounded, because it falls inside a segment. The rule refuses timestamps the
   transcript cannot support at all; it does not judge whether the moment is good.
-- The spec's `analysis/raw/chunk_*.json` per-chunk files are not written. The
-  aggregate `candidates.raw.json` carries the same content — one batch per chunk,
-  each with its verbatim response — so the directory stays empty rather than
-  duplicating it. Recorded here rather than resolved silently.
+- The spec's `analysis/raw/chunk_*.json` per-chunk files are not written.
+  `analysis/candidates.raw.json` is the canonical aggregate: one batch per
+  chunk, each with its verbatim response, plus the identity of what produced
+  them. `RunWorkspace.create` does create `analysis/raw/`, so that directory
+  exists on any run made by `content-engine run` and this stage leaves it empty.
+  Out of scope for now and recorded rather than resolved silently.
 - Deduplication is greedy, not optimal. It keeps the best candidate of each
   cluster in priority order, which is what ADR-009 asks for; it does not search
   for the globally best set of non-overlapping candidates.

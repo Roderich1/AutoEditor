@@ -115,10 +115,18 @@ mezclar artefactos incompatibles. `--force` regenera.
 
 `analyze` sigue la misma disciplina con cuatro artefactos en lugar de uno: los
 recalcula todos en memoria antes de escribir nada, y para reutilizarlos exige que
-ambos digests se recompongan desde el disco, que el fingerprint se reconstruya
-desde el transcript y las respuestas grabadas, y que la configuración pedida
-ahora sea la registrada. Un fixture distinto, un perfil distinto o una versión de
-regla distinta se rechazan con código 3 sin tocar nada.
+los cuatro estén presentes, se lean y validen contra su propio esquema, que
+concuerden entre sí y con el transcript actual, que los chunks en disco sean los
+que este transcript y esta configuración producen, que el fingerprint se
+reconstruya desde los cuatro más el transcript, y que la configuración pedida
+ahora sea la registrada. Editar cualquier campo de cualquiera de los cuatro
+—un `topic`, un intervalo, una puntuación, el orden del ranking— se rechaza con
+código 3 sin tocar nada.
+
+Si el run había quedado en `FAILED_ANALYSIS` por un `--force` fallido y los
+artefactos anteriores siguen coincidiendo con todas las entradas, la
+verificación demuestra que la etapa está completa: el run vuelve a `ANALYZED` y
+el fallo se limpia. Un rechazo no recupera nada.
 
 `analysis/config.effective.json` registra qué analizador ejecutó de verdad junto
 al proveedor que la configuración nombraba, y `manifest.versions.analysis_provider`

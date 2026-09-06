@@ -28,14 +28,18 @@ objective).
 | CE-033 | Global ranking and the `max_candidates` ceiling applied once | `domain/candidate_rules.py` | `tests/unit/test_candidate_selection.py` |
 | — | Analysis stage identity: effective configuration and fingerprint, one canonical payload each | `domain/analysis_rules.py` | `tests/unit/test_analysis_service.py` |
 | — | Orchestration, the four artifacts, and reuse verification | `services/analysis_service.py` | `tests/unit/test_analysis_service.py` |
+| — | Reuse proves all four artifacts and their coherence; a verified reuse recovers a failed run | `services/analysis_service.py`, `domain/analysis_rules.py`, `cli.py` | `tests/unit/test_analysis_reuse.py`, `tests/unit/test_cli_analyze.py` |
 | — | Fixture analyzer behind the port; no network, no SDK, no credential | `adapters/analysis/fixture_analyzer.py` | `tests/unit/test_fixture_analyzer.py` |
 | — | `analyze RUN_ID --fixture PATH [--config PATH] [--force]` | `cli.py` | `tests/unit/test_cli_analyze.py` |
 
 Decisions recorded: ADR-022 (the pipeline's binding rules, including the
 grounding contract and every tie-break), ADR-023 (the fixture analyzer is the
-executor until the provider exists).
+executor until the provider exists), ADR-024 (the analysis fingerprint covers
+the artifacts, not only the inputs — written after an independent review found
+that two of the four were being reused without evidence).
 
-Artifacts produced under `RUN_ID/analysis/`:
+Artifacts produced under `RUN_ID/analysis/`. All four are covered by the
+fingerprint and all four are read back and validated before a reuse:
 
 ```text
 chunks.json             ChunkCollection, versioned, tied to the transcript digest
@@ -43,6 +47,10 @@ candidates.raw.json     every proposal before a rule ran, with the verbatim resp
 config.effective.json   what the stage really ran, including every rule version
 candidates.json         the validated funnel: selected, rejected, invalid, events
 ```
+
+`analysis/raw/` is created by `RunWorkspace.create` and left empty: the spec's
+per-chunk `raw/chunk_*.json` files are not written, and `candidates.raw.json` is
+the canonical aggregate.
 
 ## PR C — provider (not started)
 
