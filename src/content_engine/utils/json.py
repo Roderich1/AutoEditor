@@ -29,8 +29,13 @@ def write_json(path: Path, value: Any) -> None:
 
     Serialization happens before anything is created on disk, so an
     unserializable value fails without leaving a temporary file behind.
+
+    ``allow_nan=False`` is the last line of defence. ``NaN``, ``Infinity`` and
+    ``-Infinity`` are Python extensions that no conforming JSON parser accepts.
+    The domain models refuse them at the boundary; one reaching here would still
+    be a bug, so it raises rather than producing a document only Python can read.
     """
-    _write_atomic(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    _write_atomic(path, json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
 
 
 def write_text(path: Path, value: str) -> None:

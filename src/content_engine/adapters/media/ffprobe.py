@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -26,9 +27,9 @@ def _parse_frame_rate(video: dict[str, Any]) -> float:
             continue
         try:
             value = float(Fraction(raw))
-        except (ValueError, ZeroDivisionError):
+        except (ValueError, ZeroDivisionError, OverflowError):
             continue
-        if value > 0:
+        if math.isfinite(value) and value > 0:
             return value
     return 0.0
 
@@ -114,8 +115,10 @@ class FFprobeAdapter:
 def _positive_duration(path: Path, value: object) -> float:
     try:
         duration = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError) as error:
+    except (TypeError, ValueError, OverflowError) as error:
         raise InvalidMediaError(f"Media does not declare a duration: {path}") from error
+    if not math.isfinite(duration):
+        raise InvalidMediaError(f"Media declares a non-finite duration ({duration}): {path}")
     if duration <= 0:
         raise InvalidMediaError(f"Media duration is not positive ({duration}): {path}")
     return duration

@@ -10,6 +10,7 @@ thirty second offset would poison every downstream stage.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -66,6 +67,22 @@ class _Report:
         )
 
 
+def _require_finite(value: float, label: str) -> float:
+    """Refuse NaN and the infinities before any comparison touches them.
+
+    Every ordering test against NaN is false, so a NaN start would slip past the
+    tolerance checks and be silently clamped to the bound it was compared with.
+    A provider that emits one is not describing a position in the audio, and the
+    output is refused rather than repaired.
+    """
+    if not math.isfinite(value):
+        raise TranscriptionError(
+            f"{label}: {value} is not a finite number, so it cannot describe a "
+            "position in the audio. The provider output is refused."
+        )
+    return value
+
+
 def _reject(message: str) -> None:
     raise TranscriptionError(
         f"{message}. The difference exceeds the {TIMESTAMP_TOLERANCE_SECONDS}s "
@@ -106,6 +123,10 @@ def _normalize_words(
     previous_start = start
     for position, raw_word in enumerate(segment.words):
         label = f"segment {index} word {position}"
+        _require_finite(raw_word.start, f"{label} start")
+        _require_finite(raw_word.end, f"{label} end")
+        if raw_word.probability is not None:
+            _require_finite(raw_word.probability, f"{label} probability")
         word_start = _pull_up(raw_word.start, previous_start, label, report, "clamped_word_bounds")
         word_start = _pull_down(word_start, end, label, report, "clamped_word_bounds")
         word_end = _pull_up(raw_word.end, word_start, label, report, "clamped_word_bounds")
@@ -128,10 +149,16 @@ def normalize_transcription(
     created_at: datetime,
 ) -> tuple[Transcript, NormalizationReport]:
     """Turn provider output into a validated transcript, or refuse it."""
+    _require_finite(audio_duration_seconds, "audio duration")
     if audio_duration_seconds <= 0:
         raise TranscriptionError(f"Audio duration must be positive, got {audio_duration_seconds}")
 
+    if raw.language_probability is not None:
+        _require_finite(raw.language_probability, "language probability")
+
     declared = raw.declared_duration_seconds
+    if declared is not None:
+        _require_finite(declared, "declared duration")
     if declared is not None and (
         abs(declared - audio_duration_seconds) > DURATION_TOLERANCE_SECONDS + _COMPARISON_EPSILON
     ):
@@ -147,6 +174,8 @@ def normalize_transcription(
 
     for position, raw_segment in enumerate(raw.segments):
         label = f"segment {position}"
+        _require_finite(raw_segment.start, f"{label} start")
+        _require_finite(raw_segment.end, f"{label} end")
         start = _pull_up(raw_segment.start, previous_start, label, report, "clamped_segment_bounds")
         start = _pull_down(start, audio_duration_seconds, label, report, "clamped_segment_bounds")
         end = _pull_up(raw_segment.end, start, label, report, "clamped_segment_bounds")
@@ -198,6 +227,7 @@ def transcription_fingerprint(
     """
     payload = {
         "audio_sha256": audio_sha256,
+        "provider": options.provider,
         "model": options.model,
         "beam_size": options.beam_size,
         "word_timestamps": options.word_timestamps,

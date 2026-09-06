@@ -36,10 +36,12 @@ class _Section(BaseModel):
     """Base for configuration sections.
 
     Sections declare types and invariants but never default values: the packaged
-    ``resources/default.toml`` is the single source of defaults.
+    ``resources/default.toml`` is the single source of defaults. ``allow_inf_nan``
+    is off: ``nan`` and ``inf`` are spellable in TOML floats and no setting here
+    has a meaningful non-finite value.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 def _require_even_dimensions(section: str, width: int, height: int) -> None:
