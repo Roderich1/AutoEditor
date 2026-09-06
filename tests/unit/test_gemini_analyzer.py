@@ -290,8 +290,9 @@ def test_an_empty_response_is_an_analysis_failure(
     chunk: TranscriptChunk, context: AnalysisContext
 ) -> None:
     client = client_returning(FakeResponse(text=None))
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError) as caught:
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
     assert caught.value.exit_code == EXIT_ANALYSIS
 
 
@@ -303,8 +304,9 @@ def test_a_truncated_answer_names_the_finish_reason(
             text='{"candidates": [', candidates=[FakeCandidate(finish_reason="MAX_TOKENS")]
         )
     )
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError, match="MAX_TOKENS"):
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
 
 
 def test_a_blocked_prompt_is_an_analysis_failure(
@@ -312,16 +314,18 @@ def test_a_blocked_prompt_is_an_analysis_failure(
 ) -> None:
     blocked = FakeResponse(text=None, prompt_feedback=_Blocked("SAFETY"))
     client = client_returning(blocked)
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError, match="SAFETY"):
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
 
 
 def test_a_different_model_answering_is_refused_when_it_is_verifiable(
     chunk: TranscriptChunk, context: AnalysisContext
 ) -> None:
     client = client_returning(FakeResponse(text=answer(), model_version="gemini-2.0-pro"))
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError, match="gemini-2.0-pro"):
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
 
 
 def test_a_dated_build_of_the_requested_model_is_accepted(
@@ -383,8 +387,9 @@ def test_retries_are_bounded(chunk: TranscriptChunk, context: AnalysisContext) -
 
     broken = errors.ServerError(500, {"error": {"message": "boom", "status": "INTERNAL"}})
     client = FakeClient(models=FakeModels(outcomes=[broken]))
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError):
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
     assert len(client.models.requests) == MAX_ATTEMPTS
 
 
@@ -397,8 +402,9 @@ def test_a_deterministic_client_error_is_never_retried(
 
     refused = errors.ClientError(code, {"error": {"message": "nope", "status": "INVALID_ARGUMENT"}})
     client = FakeClient(models=FakeModels(outcomes=[refused]))
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError):
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
     assert len(client.models.requests) == 1
 
 
@@ -408,8 +414,9 @@ def test_an_invalid_schema_answer_is_never_retried(
     client = FakeClient(
         models=FakeModels(outcomes=[FakeResponse(text=answer(proposal(category="x")))])
     )
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError):
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
     assert len(client.models.requests) == 1
 
 
@@ -427,8 +434,9 @@ def test_a_provider_error_message_never_repeats_a_credential(
         400, {"error": {"message": f"API key {SECRET} is not valid", "status": "INVALID_ARGUMENT"}}
     )
     client = FakeClient(models=FakeModels(outcomes=[leaking]))
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError) as caught:
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
     assert SECRET not in str(caught.value)
 
 
@@ -441,8 +449,9 @@ def test_a_provider_error_does_not_dump_the_sdk_object(
         403, {"error": {"message": "denied", "status": "PERMISSION_DENIED"}}
     )
     client = FakeClient(models=FakeModels(outcomes=[refused]))
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError) as caught:
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
     message = str(caught.value)
     assert "403" in message
     assert "{'error'" not in message
@@ -560,8 +569,9 @@ def test_an_unrecognised_failure_is_not_retried(
 ) -> None:
     """Only failures known to be transient are worth a second call."""
     client = FakeClient(models=FakeModels(outcomes=[ValueError("something else entirely")]))
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError) as caught:
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
     assert len(client.models.requests) == 1
     assert "ValueError" in str(caught.value)
 
@@ -572,8 +582,9 @@ def test_an_exhausted_timeout_says_the_request_did_not_complete(
     import httpx
 
     client = FakeClient(models=FakeModels(outcomes=[httpx.ConnectTimeout("no route")]))
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError) as caught:
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
     message = str(caught.value)
     assert "did not complete" in message
     assert f"{MAX_ATTEMPTS} attempts" in message
@@ -599,8 +610,9 @@ def test_a_very_long_provider_message_is_truncated(
         400, {"error": {"message": "detalle " * 200, "status": "INVALID_ARGUMENT"}}
     )
     client = FakeClient(models=FakeModels(outcomes=[noisy]))
+    analyzer = analyzer_for(client)
     with pytest.raises(AnalysisError) as caught:
-        analyzer_for(client).find_candidates(chunk, context)
+        analyzer.find_candidates(chunk, context)
     assert "..." in str(caught.value)
     assert len(str(caught.value)) < 600
 

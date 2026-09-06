@@ -331,27 +331,8 @@ def analyze(
             or analysis_directory.joinpath(CANDIDATES_FILENAME).is_file()
         )
         if already_analysed and not force:
-            collection = _refuse_or_reuse_analysis(manifest, analysis_directory, transcript, plan)
-            summary = (
-                f"{collection.counts.selected} selected of {collection.counts.proposed} proposed"
-            )
-            if manifest.status is RunStatus.ANALYZED:
-                # Already settled: reuse must not touch a single byte, so the
-                # manifest is not rewritten either.
-                return f"[green]Candidates reused:[/green] {summary}. Use --force to rerun."
-            # The run was left failed by an attempt that came after these
-            # artifacts and did not replace them. The verification above proved
-            # they still match the transcript, the fixture and the settings, so
-            # the stage is complete and the failure no longer describes anything.
-            # Reporting a reuse while leaving the run FAILED_ANALYSIS would make
-            # the status and the message contradict each other, and every later
-            # stage reads the status.
-            previous = manifest.status
-            run_service.advance(run_path, manifest, RunStatus.ANALYZED)
-            return (
-                f"[green]Candidates recovered:[/green] {summary}. The artifacts still match "
-                f"the current inputs, so the run moves from {previous} to "
-                f"{RunStatus.ANALYZED}. Use --force to rerun."
+            return _reuse_or_recover(
+                run_service, run_path, manifest, analysis_directory, transcript, plan
             )
 
         if force:
@@ -402,6 +383,42 @@ def analyze(
         )
 
     _execute(action)
+
+
+def _reuse_or_recover(
+    run_service: RunService,
+    run_path: Path,
+    manifest: RunManifest,
+    analysis_directory: Path,
+    transcript: Transcript,
+    plan: AnalysisPlan,
+) -> str:
+    """Report a proved reuse, settling the run's status if it was left failed.
+
+    Split out of `analyze` rather than inlined: the command was over the
+    cognitive complexity limit, and this is the part of it that answers a
+    different question from the rest. Everything above decides what to run;
+    this decides what an already-complete stage means.
+    """
+    collection = _refuse_or_reuse_analysis(manifest, analysis_directory, transcript, plan)
+    summary = f"{collection.counts.selected} selected of {collection.counts.proposed} proposed"
+    if manifest.status is RunStatus.ANALYZED:
+        # Already settled: reuse must not touch a single byte, so the manifest
+        # is not rewritten either.
+        return f"[green]Candidates reused:[/green] {summary}. Use --force to rerun."
+    # The run was left failed by an attempt that came after these artifacts and
+    # did not replace them. The verification above proved they still match the
+    # transcript, the analyzer and the settings, so the stage is complete and the
+    # failure no longer describes anything. Reporting a reuse while leaving the
+    # run FAILED_ANALYSIS would make the status and the message contradict each
+    # other, and every later stage reads the status.
+    previous = manifest.status
+    run_service.advance(run_path, manifest, RunStatus.ANALYZED)
+    return (
+        f"[green]Candidates recovered:[/green] {summary}. The artifacts still match "
+        f"the current inputs, so the run moves from {previous} to "
+        f"{RunStatus.ANALYZED}. Use --force to rerun."
+    )
 
 
 def _build_analyzer(settings: Settings, fixture: Path | None) -> ContentAnalyzerPort:

@@ -68,7 +68,7 @@ def load_prompt_text() -> str:
     resource = resources.files(PROMPT_PACKAGE).joinpath(*PROMPT_PARTS)
     try:
         raw = resource.read_bytes()
-    except (OSError, ModuleNotFoundError, FileNotFoundError) as error:
+    except (OSError, ModuleNotFoundError) as error:
         raise ConfigurationError(
             f"The packaged prompt {PROMPT_PACKAGE}/{PROMPT_RESOURCE} cannot be read: "
             f"{error}. The installation is incomplete."
