@@ -424,6 +424,8 @@ class FakeMedia:
     measured: dict[str, float] = field(default_factory=dict)
     #: Output basename -> the dimensions ffprobe will report.
     dimensions: dict[str, tuple[int, int]] = field(default_factory=dict)
+    #: What ffprobe will name the video codec, so a wrong encode can be placed.
+    video_codec: str = "h264"
     _known: dict[Path, dict[str, Any]] = field(default_factory=dict)
 
     def ffmpeg(self, arguments: Sequence[str], timeout: float | None = None) -> Any:
@@ -441,7 +443,7 @@ class FakeMedia:
         streams: list[dict[str, Any]] = [
             {
                 "codec_type": "video",
-                "codec_name": "h264",
+                "codec_name": self.video_codec,
                 "width": width,
                 "height": height,
                 "avg_frame_rate": "30/1",
