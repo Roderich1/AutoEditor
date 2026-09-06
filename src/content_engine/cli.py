@@ -12,7 +12,7 @@ from content_engine.adapters.media.ffmpeg import FFmpegAdapter
 from content_engine.adapters.media.ffprobe import FFprobeAdapter
 from content_engine.adapters.persistence.filesystem import RunWorkspace
 from content_engine.adapters.transcription.faster_whisper import FasterWhisperTranscriber
-from content_engine.config import Settings, load_settings
+from content_engine.config import Settings, config_sha256, load_settings
 from content_engine.domain.enums import RunStage, RunStatus
 from content_engine.domain.exceptions import (
     EXIT_CONFIGURATION,
@@ -163,6 +163,8 @@ def transcribe(
         if not audio_path.is_file():
             raise InvalidMediaError(f"Run audio is missing: {audio_path}")
 
+        _warn_about_configuration_drift(manifest, config_sha256(settings))
+
         options = options_from_settings(settings.transcription)
         service = TranscriptionService(FasterWhisperTranscriber())
         # Hardware is resolved before the reuse decision: auto may resolve
@@ -196,6 +198,9 @@ def transcribe(
             raise
 
         manifest = run_service.advance(run_path, manifest, RunStatus.TRANSCRIBED)
+        # The manifest must name the model that actually produced the transcript,
+        # not the one configured when the run was created.
+        manifest.versions.transcription_model = outcome.transcript.model
         run_service.record_stage(
             run_path,
             manifest,
@@ -252,8 +257,30 @@ def _refuse_or_skip(
         )
 
 
+def _warn_about_configuration_drift(manifest: RunManifest, current: str) -> None:
+    """Say so when this invocation is not the experiment the run was created for.
+
+    ``--config`` can point at a different profile than the one ``run`` recorded.
+    That is allowed, but it must never be silent: config_sha256 identifies the
+    logical experiment, and a transcript produced under other settings would
+    otherwise be filed under a configuration that never ran.
+    """
+    if current == manifest.config_sha256:
+        return
+    console.print(
+        f"[yellow]Warning:[/yellow] this configuration ({current[:12]}) is not the one "
+        f"recorded when the run was created ({manifest.config_sha256[:12]}). "
+        "manifest.config_sha256 keeps the creating configuration; the transcript and "
+        "its metrics record what actually ran."
+    )
+
+
 def _warn_about_downstream(run_path: Path) -> None:
-    stale = [name for name in DOWNSTREAM_DIRECTORIES if any(run_path.joinpath(name).iterdir())]
+    stale = [
+        name
+        for name in DOWNSTREAM_DIRECTORIES
+        if run_path.joinpath(name).is_dir() and any(run_path.joinpath(name).iterdir())
+    ]
     if stale:
         console.print(
             f"[yellow]Warning:[/yellow] {', '.join(stale)} were built on the previous "

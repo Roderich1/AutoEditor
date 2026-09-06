@@ -18,7 +18,7 @@ from content_engine.domain.enums import RunStage, RunStatus
 from content_engine.domain.exceptions import (
     EXIT_INVALID_INPUT,
     EXIT_TRANSCRIPTION,
-    ExternalProviderError,
+    TranscriptionProviderError,
 )
 from content_engine.domain.models import TRANSCRIPT_SCHEMA_VERSION, RawTranscription
 from content_engine.services.run_service import RunService
@@ -169,7 +169,7 @@ def test_a_provider_failure_is_recorded_against_the_transcription_stage(
 ) -> None:
     class Failing(FakeTranscriber):
         def transcribe(self, audio_path: Path, options: Any, hardware: Any) -> RawTranscription:
-            raise ExternalProviderError("CUDA out of memory")
+            raise TranscriptionProviderError("CUDA out of memory")
 
     monkeypatch.setattr(
         cli,
@@ -179,12 +179,12 @@ def test_a_provider_failure_is_recorded_against_the_transcription_stage(
 
     result = _transcribe(harness)
 
-    assert result.exit_code != 0
+    assert result.exit_code == EXIT_TRANSCRIPTION
     assert "kept for diagnosis" in result.output
     manifest = _manifest(harness)
     assert manifest["status"] == RunStatus.FAILED_TRANSCRIPTION.value
     assert manifest["failure"]["stage"] == RunStage.TRANSCRIPTION.value
-    assert manifest["failure"]["error_type"] == "ExternalProviderError"
+    assert manifest["failure"]["error_type"] == "TranscriptionProviderError"
 
 
 def test_output_that_disagrees_with_the_audio_fails_the_transcription_stage(
@@ -235,3 +235,45 @@ def test_a_retry_after_failure_reaches_transcribed(
 
     assert result.exit_code == 0
     assert _manifest(harness)["status"] == RunStatus.TRANSCRIBED.value
+
+
+def test_the_manifest_names_the_model_that_actually_produced_the_transcript(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A run created under one model and transcribed under another must not lie.
+
+    manifest.versions.transcription_model is a claim about the artifact on disk.
+    Recording the model configured at ``run`` time while a different one did the
+    work would file the experiment under settings that never ran.
+    """
+    profile = tmp_path.joinpath("other-model.toml")
+    profile.write_text('[transcription]\nmodel = "tiny"\n', encoding="utf-8")
+
+    result = _transcribe(harness, "--config", str(profile))
+
+    assert result.exit_code == 0
+    manifest = _manifest(harness)
+    transcript = json.loads(
+        harness.run_path.joinpath("transcript", "transcript.json").read_text(encoding="utf-8")
+    )
+    assert manifest["versions"]["transcription_model"] == transcript["model"]
+
+
+def test_a_configuration_that_differs_from_the_run_is_reported(
+    harness: Harness, tmp_path: Path
+) -> None:
+    profile = tmp_path.joinpath("other-model.toml")
+    profile.write_text('[transcription]\nmodel = "tiny"\n', encoding="utf-8")
+
+    result = _transcribe(harness, "--config", str(profile))
+
+    assert result.exit_code == 0
+    assert "not the one" in result.output
+    assert _manifest(harness)["config_sha256"] not in result.output
+
+
+def test_the_unchanged_configuration_is_not_reported_as_drift(harness: Harness) -> None:
+    result = _transcribe(harness)
+
+    assert result.exit_code == 0
+    assert "not the one" not in result.output
