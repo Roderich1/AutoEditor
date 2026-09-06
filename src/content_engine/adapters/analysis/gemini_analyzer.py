@@ -40,8 +40,8 @@ from typing import Any
 from content_engine.adapters.analysis.prompt import Prompt
 from content_engine.adapters.analysis.structured_output import (
     RESPONSE_SCHEMA_VERSION,
-    ProviderResponse,
     parse_provider_response,
+    provider_response_schema,
 )
 from content_engine.config import (
     ANALYSIS_CREDENTIAL_ENV_VAR,
@@ -243,7 +243,11 @@ class GeminiContentAnalyzer:
             # constant, so `analysis.prompt_version` really decides what is sent.
             system_instruction=self._prompt.text,
             response_mime_type="application/json",
-            response_schema=ProviderResponse,
+            # Assembled rather than handed the Pydantic model directly: the
+            # model's `extra="forbid"` serialises to `additionalProperties`,
+            # which `generateContent` rejects with a 400, and its docstrings
+            # would travel to the provider as schema descriptions.
+            response_schema=types.Schema(**provider_response_schema()),
             # The transcript is untrusted, so the model is handed nothing it
             # could use to act on anything the transcript asks for.
             tools=None,

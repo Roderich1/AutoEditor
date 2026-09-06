@@ -638,3 +638,47 @@ def test_token_usage_is_counted_so_a_run_can_report_what_it_spent(
     assert analyzer.calls == 1
     assert analyzer.prompt_tokens == 1200
     assert analyzer.response_tokens == 300
+
+
+def test_the_whole_request_serialises_to_something_the_api_accepts(
+    chunk: TranscriptChunk, context: AnalysisContext
+) -> None:
+    """The gap a doubled transport leaves open, closed as far as it can be.
+
+    Every other test here inspects the config object. None of them serialised
+    it, so the adapter shipped a `response_schema` carrying
+    `additionalProperties` -- which `generateContent` rejects with a 400 -- and
+    every unit test passed while the first real call could not have worked.
+
+    This cannot prove the API accepts the request; only a call can do that. It
+    does assert the two things that made it fail: nothing the schema subset
+    rejects, and none of this repository's internal prose.
+    """
+    client = client_returning(FakeResponse(text=answer()))
+    analyzer_for(client).find_candidates(chunk, context)
+    config = client.models.requests[0]["config"]
+
+    rendered = config.model_dump_json(exclude_none=True, by_alias=True)
+    schema = json.loads(rendered)["responseSchema"]
+    flattened = json.dumps(schema)
+
+    assert "additionalProperties" not in flattened
+    assert "additional_properties" not in flattened
+    assert "description" not in flattened
+    # The system instruction is the prompt and must survive intact; the schema
+    # beside it must not have become a second, accidental prompt.
+    assert "RawCandidate" not in flattened
+    assert "extra=" not in flattened
+
+
+def test_the_transcript_never_reaches_the_response_schema(
+    chunk: TranscriptChunk, context: AnalysisContext
+) -> None:
+    """Speech belongs in contents. A schema is instruction, and stays operator-written."""
+    client = client_returning(FakeResponse(text=answer()))
+    analyzer_for(client).find_candidates(chunk, context)
+    config = client.models.requests[0]["config"]
+
+    flattened = json.dumps(json.loads(config.model_dump_json(exclude_none=True))["response_schema"])
+
+    assert chunk.segments[0].text not in flattened

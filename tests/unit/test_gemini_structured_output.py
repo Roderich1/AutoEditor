@@ -24,8 +24,11 @@ from typing import Any
 import pytest
 
 from content_engine.adapters.analysis.structured_output import (
+    ProviderCandidate,
     ProviderResponse,
+    ProviderScores,
     parse_provider_response,
+    provider_response_schema,
 )
 from content_engine.domain.enums import ClipCategory
 from content_engine.domain.exceptions import EXIT_ANALYSIS, AnalysisError
@@ -251,3 +254,52 @@ def test_the_schema_names_the_categories_and_bounds_the_scores() -> None:
     for member in ClipCategory:
         assert member.value in schema
     assert "total_score" not in schema
+
+
+# --- the schema actually sent to the provider --------------------------------
+
+
+def test_the_request_schema_lists_exactly_the_fields_the_parser_expects() -> None:
+    """Assembled by hand, so this is what stops it drifting from the models."""
+    schema = provider_response_schema()
+    candidate = schema["properties"]["candidates"]["items"]
+
+    assert set(candidate["properties"]) == set(ProviderCandidate.model_fields)
+    assert set(candidate["required"]) == set(ProviderCandidate.model_fields)
+    scores = candidate["properties"]["scores"]
+    assert set(scores["properties"]) == set(ProviderScores.model_fields)
+    assert set(scores["required"]) == set(ProviderScores.model_fields)
+
+
+def test_the_request_schema_offers_every_category_the_parser_accepts() -> None:
+    schema = provider_response_schema()
+    enum = schema["properties"]["candidates"]["items"]["properties"]["category"]["enum"]
+
+    assert set(enum) == {member.value for member in ClipCategory}
+
+
+def test_the_request_schema_carries_nothing_generate_content_rejects() -> None:
+    """`additionalProperties` makes the API refuse the whole request with a 400.
+
+    Handing the Pydantic models to the SDK directly produced exactly that:
+    `extra="forbid"` serialises to `additionalProperties`, which is not in the
+    schema subset `generateContent` accepts. Nothing in the unit suite noticed,
+    because a doubled client never sends the request it is given.
+    """
+    rendered = json.dumps(provider_response_schema())
+
+    assert "additionalProperties" not in rendered
+    assert "additional_properties" not in rendered
+
+
+def test_the_request_schema_ships_no_internal_commentary() -> None:
+    """The only descriptions available are this module's notes to maintainers.
+
+    Handed to the SDK, the models' docstrings became `description` fields and
+    travelled to the provider inside every request -- paid for by the token, and
+    explaining `RawCandidate` to a model that has never heard of it.
+    """
+    rendered = json.dumps(provider_response_schema())
+
+    assert "description" not in rendered
+    assert "RawCandidate" not in rendered
