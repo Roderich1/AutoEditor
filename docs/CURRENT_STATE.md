@@ -161,18 +161,32 @@ Implemented in PR #4, pending merge:
   timestamps, including negative, zero-length and inverted ones, so CE-030 can
   refuse them with a recorded reason instead of a parse error; `NaN` and the
   infinities stay refused.
-- A proposal refused before scoring is an `InvalidCandidate`: the verbatim
-  proposal plus its reasons, with no interval, no boundary and no score, because
-  it never earned them. Anything that reached scoring is a `ValidatedCandidate`
-  where every field is real. `CandidateCollection` therefore keeps three lists —
-  `candidates`, `rejected`, `invalid` — split by how far a proposal got.
+- A proposal refused before scoring is an `InvalidCandidate`: the parsed
+  proposal plus its reasons, with no interval, no boundary and no deterministic
+  total, because it never earned them. `proposed.scores` still holds the six
+  ratings the provider supplied. The verbatim response stays on
+  `CandidateBatch.raw_response`. Anything that reached scoring is a
+  `ValidatedCandidate` where every field is real. `CandidateCollection`
+  therefore keeps three lists — `candidates`, `rejected`, `invalid` — split by
+  how far a proposal got.
+- A reason belongs to the phase that could have decided it. `InvalidCandidate`
+  may cite only `PRE_SCORING_REASONS`, and may cite several. A scored record
+  carries exactly one terminal reason: `BELOW_MIN_SCORE` or `NOT_IN_TOP_N` when
+  rejected, `DUPLICATE` when deduplicated.
 - `BoundaryAdjustment` checks that its deltas describe the movement they claim,
   and that a reverted adjustment really restored the proposal with zero deltas
   and unchanged anchors. `ValidatedCandidate` must agree with its own boundary.
 - `CandidateCounts` are terminal outcomes, mutually exclusive by construction:
   `invalid`, `below_min_score`, `deduplicated`, `not_in_top_n` and `selected`
-  sum to `proposed`, and the model enforces that identity along with the
-  agreement between each counter and the list it describes.
+  sum to `proposed`. Each one is counted from the records that hold it, not
+  merely balanced against the others, so two categories cannot be swapped while
+  the total still adds up.
+- Every `DeduplicationEvent` is checked against the two candidates it names: the
+  dropped one is recorded as deduplicated and dropped exactly once, the keeper
+  is one that neither deduplication nor the score filter had already removed,
+  both scores are the totals on record, and the overlap is recomputed from the
+  intervals and must reach `dedupe_iou`. Equal scores are broken by the earlier
+  start and then by the identifier.
 - CE-025 deterministic score, ADR-008 weights, `Decimal` with `ROUND_HALF_UP`.
 - CE-027 `ContentAnalyzerPort` as a Protocol only. No implementation, no SDK.
   `AnalysisContext.run_target_candidates` is named for its scope: the objective

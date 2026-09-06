@@ -643,17 +643,27 @@ The pipeline has phases, and a record has to be able to say which one it reached
 
 **Untrusted output is preserved, not policed.** `RawCandidate.start` and `.end`
 carry no ordering or sign constraint. Negative, zero-length and inverted
-intervals are accepted and kept verbatim. `NaN` and the infinities remain
+intervals are accepted and kept unaltered. `NaN` and the infinities remain
 refused: an impossible timestamp is data about the prompt, a non-number is not a
 timestamp at all.
+
+"Verbatim" belongs to one field only: `CandidateBatch.raw_response`, which the
+port keeps exactly as the provider sent it, so a parse failure still leaves
+evidence. `InvalidCandidate.proposed` is the *parsed* proposal, preserved
+without alteration but structured — the distinction matters when the disagreement
+under investigation is between what the provider said and what the domain made
+of it.
 
 **Two record types, split by phase reached**, rather than one type with optional
 fields:
 
 ```text
 InvalidCandidate     refused by CE-030, before snapping or scoring.
-                     Holds the verbatim proposal and the reasons. No interval,
-                     no boundary, no score - it never earned them.
+                     Holds the parsed proposal and the reasons. No interval, no
+                     boundary, no deterministic total - it never earned them.
+                     `proposed.scores` still carries the six ratings the
+                     provider supplied: those arrived with the proposal rather
+                     than being computed from it.
 
 ValidatedCandidate   reached scoring. Interval, boundary and total are all real.
                      Status is SUGGESTED, REJECTED or DEDUPLICATED.
@@ -671,6 +681,23 @@ the phase a fact the compiler knows.
 exists exactly when snapping ran, which is exactly when the record is a
 `ValidatedCandidate`. It is never optional within a type.
 
+**A reason belongs to the phase that could have decided it.** `enums.py` names
+the sets: `PRE_SCORING_REASONS` for what CE-030 can reach, and one named
+constant each for `BELOW_SCORE_REASON`, `DEDUPE_REASON` and `TOP_N_REASON`.
+`TERMINAL_REASONS` maps a status to the reasons it may carry.
+
+```text
+InvalidCandidate     one or more PRE_SCORING_REASONS. Several are allowed: a
+                     single CE-030 pass can find more than one defect.
+SUGGESTED            no reasons at all.
+REJECTED             exactly one, BELOW_MIN_SCORE or NOT_IN_TOP_N.
+DEDUPLICATED         exactly [DUPLICATE], and never a rank.
+```
+
+Reasons from different phases cannot be mixed. Without this a duplicate could be
+filed as a plain rejection and counted as a score failure, and every total in the
+funnel would still add up.
+
 **`CandidateCounts` are terminal outcomes, mutually exclusive by construction.**
 Every proposal reaches exactly one of `invalid`, `below_min_score`,
 `deduplicated`, `not_in_top_n` or `selected`, so they sum to `proposed` and the
@@ -680,9 +707,43 @@ previously had nowhere to go, which would have made the identity false. The
 exclusivity comes from the pipeline order: the minimum-score filter runs before
 deduplication, and the top-N cut runs last.
 
-Float comparisons in all of this use an explicit microsecond tolerance.
-Timestamps are binary floats, so equality between a value and the arithmetic
-that produced it is only ever equality to within representation error.
+**Every counter is read off the records, not merely required to balance.** Each
+of the five is counted from the list that holds it. The weaker check —
+`below_min_score + deduplicated + not_in_top_n == len(rejected)` — accepts any
+permutation of those three, and the difference between "the prompt scores badly"
+and "the cap is too tight" is exactly what the funnel exists to report.
+`counts.deduplicated == len(deduplication_events)` needs no separate check: the
+event rules below already make the two the same number.
+
+**A deduplication event is evidence, so it is held to the records it names.** It
+restates facts that live on both candidates, which is what makes it an audit
+trail and also what lets it disagree with them. For each event:
+
+```text
+kept_id != dropped_id             a candidate cannot deduplicate itself
+dropped_id                        is recorded DEDUPLICATED, and dropped once
+every DEDUPLICATED candidate      appears as dropped_id exactly once
+kept_id                           survived deduplication: never DEDUPLICATED,
+                                  never BELOW_MIN_SCORE
+kept_score, dropped_score         equal the totals on the two records
+kept_score >= dropped_score       deduplication keeps the better one
+iou                               recomputed from both intervals, and >= dedupe_iou
+```
+
+The pipeline order decides who may appear on which side. The minimum-score
+filter runs first, so a keeper was never removed by it; the top-N cut runs last,
+so a keeper may still end up `NOT_IN_TOP_N` rather than `SUGGESTED`.
+
+**Equal scores are broken deterministically**: the earlier `start` is kept, and
+if the starts are equal too, the smaller identifier. A rule is needed because
+without one the same input can produce two different shortlists, and the
+identifier is a stable last resort because it is derived from the proposed
+interval before snapping (D-3).
+
+Float comparisons in all of this use an explicit tolerance: a microsecond for
+timestamps, `1e-6` for totals and for the overlap ratio. These are binary
+floats, so equality between a value and the arithmetic that produced it is only
+ever equality to within representation error.
 
 ### Consequences
 
