@@ -23,9 +23,9 @@ Python 3.12.10, FFmpeg 9.0.1:
 | Check | Result |
 |---|---|
 | `uv run ruff check .` | passed |
-| `uv run ruff format --check .` | passed, 83 files |
+| `uv run ruff format --check .` | passed, 84 files |
 | `uv run mypy src` | passed, 40 files, strict |
-| `uv run pytest` | 1077 passed |
+| `uv run pytest` | 1086 passed, 250 more than the 836 on `main` |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
@@ -70,7 +70,7 @@ Coverage:
 
 | Scope | Coverage |
 |---|---|
-| Total | 99.38% (2104 statements, 13 missed) |
+| Total | 99.38% (2107 statements, 13 missed) |
 | Domain | 100% |
 | Services | 100% |
 | Adapters | 100% except the faster-whisper decode loop |
@@ -283,8 +283,12 @@ ADR-023 the fixture executor.
   stage configuration must agree on the analyzer, its version, the model and the
   prompt and fixture identity, the batches must answer exactly the chunks on
   disk, the funnel's `counts.proposed` must match the proposals the raw
-  collection holds, and the collection's limits must be the ones the stage ran
-  under. The same check runs before anything is written.
+  collection holds, the collection's limits must be the ones the stage ran
+  under, and all four must name the same chunking rules version — that last one
+  was added after a review found the check compared only two of the four, which
+  left a raw collection or a stage configuration free to claim the windows were
+  cut by rules that produced something else. The same check runs before anything
+  is written.
 - **A verified reuse settles the run's status.** A failed `--force` leaves the
   earlier artifacts untouched, so a later invocation that proves they still
   match every input is looking at a completed stage. If the run is already
