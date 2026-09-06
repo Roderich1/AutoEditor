@@ -8,6 +8,7 @@ boundary can learn which provider is behind it.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,7 +53,7 @@ def _context() -> AnalysisContext:
     return AnalysisContext(
         min_duration_seconds=20.0,
         max_duration_seconds=90.0,
-        target_candidates=10,
+        run_target_candidates=10,
         prompt_version="v1",
         prompt_sha256="a" * 64,
     )
@@ -175,6 +176,26 @@ def test_the_analysis_context_carries_the_prompt_identity() -> None:
 
     assert context.prompt_version == "v1"
     assert len(context.prompt_sha256) == 64
+
+
+def test_the_target_is_named_for_the_run_not_the_chunk() -> None:
+    """One semantics only: the objective is global, never a per-call quota.
+
+    The field is checked by name because the ambiguity this replaces was purely
+    one of naming: a field called target_candidates on a per-chunk call reads as
+    "return this many", and CandidateCollection means something else by it.
+    """
+    fields = {field.name for field in dataclasses.fields(AnalysisContext)}
+
+    assert "run_target_candidates" in fields
+    assert "target_candidates" not in fields
+
+
+def test_the_context_carries_no_per_chunk_budget_yet() -> None:
+    """A per-chunk budget would be a separate computed field, not this one."""
+    fields = {field.name for field in dataclasses.fields(AnalysisContext)}
+
+    assert not any(name.startswith("chunk_") for name in fields)
 
 
 def test_the_batch_is_immutable_and_holds_a_tuple() -> None:

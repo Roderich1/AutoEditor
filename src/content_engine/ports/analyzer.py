@@ -35,9 +35,16 @@ class AnalysisContext:
     #: cannot be trusted to obey it, so CE-030 enforces it regardless.
     min_duration_seconds: float
     max_duration_seconds: float
-    #: How many candidates the run is aiming for per chunk. An objective, not a
-    #: cap; the hard ceiling is applied by CE-033 over the whole run.
-    target_candidates: int
+    #: How many candidates the **whole run** is aiming for. Named for the scope
+    #: it has, because the obvious misreading is that it is a quota per call:
+    #: an analyzer given this must not treat it as "return this many for this
+    #: chunk". It is context for the request, and CE-033 applies the real
+    #: ceiling once, over every chunk's output together.
+    #:
+    #: If an adapter ever needs a per-chunk budget, it belongs here as a second,
+    #: separately named field computed from this one and the chunk count. It must
+    #: not be this field reinterpreted.
+    run_target_candidates: int
     #: Recorded on every run so a change in either is visible in the manifest.
     prompt_version: str
     prompt_sha256: str
