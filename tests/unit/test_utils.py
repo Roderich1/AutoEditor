@@ -92,3 +92,47 @@ def test_reading_invalid_json_reports_a_corrupt_artifact(tmp_path: Path) -> None
 def test_reading_a_missing_file_reports_a_corrupt_artifact(tmp_path: Path) -> None:
     with pytest.raises(CorruptArtifactError, match="Cannot read"):
         read_json(tmp_path.joinpath("absent.json"))
+
+
+def test_a_failed_write_leaves_neither_a_partial_file_nor_a_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash mid-write must not be observable as an artifact."""
+    target = tmp_path.joinpath("artifact.json")
+    target.write_text('{"previous": true}\n', encoding="utf-8")
+    original = Path.write_text
+
+    def failing(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self.suffix == ".tmp":
+            raise OSError("no space left on device")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+
+    with pytest.raises(OSError, match="no space left"):
+        write_json(target, {"replacement": True})
+
+    assert not list(tmp_path.glob("**/*.tmp"))
+    assert read_json(target) == {"previous": True}
+
+
+def test_text_artifacts_are_written_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """transcript.txt and transcript.srt get the same guarantee as the JSON."""
+    target = tmp_path.joinpath("transcript.srt")
+    target.write_text("1\n00:00:00,000 --> 00:00:01,000\nprevio\n", encoding="utf-8")
+    original = Path.write_text
+
+    def failing(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self.suffix == ".tmp":
+            raise OSError("disk full")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+
+    with pytest.raises(OSError, match="disk full"):
+        write_text(target, "1\n00:00:00,000 --> 00:00:02,000\nnuevo\n")
+
+    assert not list(tmp_path.glob("**/*.tmp"))
+    assert "previo" in target.read_text(encoding="utf-8")

@@ -5,26 +5,37 @@ from typing import Any
 from content_engine.domain.exceptions import CorruptArtifactError
 
 
-def write_json(path: Path, value: Any) -> None:
-    """Write a run artifact atomically as UTF-8 with LF line endings.
+def _write_atomic(path: Path, content: str) -> None:
+    """Write UTF-8 with LF endings through a temporary file.
 
-    Artifacts must be byte-comparable across operating systems, so the newline
-    translation Python applies by default on Windows is disabled explicitly.
+    Every run artifact is written this way, not only JSON: a reader must never
+    observe a half-written transcript, and a failure must not leave a partial
+    file at the final path or a ``.tmp`` beside it. The newline translation
+    Python applies by default on Windows is disabled explicitly so a run
+    produced on Windows is byte-comparable with the same run on Linux.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    temporary.replace(path)
+    try:
+        temporary.write_text(content, encoding="utf-8", newline="\n")
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def write_json(path: Path, value: Any) -> None:
+    """Write a run artifact atomically as UTF-8 with LF line endings.
+
+    Serialization happens before anything is created on disk, so an
+    unserializable value fails without leaving a temporary file behind.
+    """
+    _write_atomic(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
 def write_text(path: Path, value: str) -> None:
-    """Write a text artifact as UTF-8 with LF line endings."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(value, encoding="utf-8", newline="\n")
+    """Write a text artifact atomically as UTF-8 with LF line endings."""
+    _write_atomic(path, value)
 
 
 def read_json(path: Path) -> Any:

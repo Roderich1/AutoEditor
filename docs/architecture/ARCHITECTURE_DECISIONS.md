@@ -394,6 +394,14 @@ portable: hardware that resolved differently is a different execution and must
 not be treated as interchangeable. Hardware is therefore resolved *before* the
 reuse decision, not after.
 
+`transcribe` may be invoked with a `--config` profile other than the one `run`
+recorded. That is allowed — it is how a model is compared against another on the
+same audio — but it is never silent: the command reports the divergence between
+the two `config_sha256` values, and `manifest.versions.transcription_model` is
+updated to the model that actually produced the transcript.
+`manifest.config_sha256` keeps the configuration the run was *created* under, so
+it is not rewritten after the fact.
+
 `manifest.json` carries `schema_version`. A manifest from an unknown schema is
 refused rather than guessed at. `stages` is a map so CE-047–CE-052 can add
 fingerprints for later stages without changing the domain; today only
@@ -446,6 +454,14 @@ A failed run is never deleted automatically. The manifest records the stage, the
 exception type, the message and the timestamp, and the CLI prints the `run_id`
 and the run path.
 
+`manifest.failure` describes why the run is stopped *now*, not everything that
+ever went wrong. A successful advance therefore clears it: a run sitting at
+`TRANSCRIBED` with a `FAILED_AUDIO` record attached would be a manifest that
+contradicts itself, and `resume` (CE-049) would have to guess which half to
+believe. The history of attempts is not kept in the manifest; per-run logs
+(CE-062) are where that belongs. A retry that fails again overwrites the record
+with the new failure.
+
 ### Consequences
 
 - A manifest cannot claim a run reached a state it did not earn.
@@ -465,8 +481,12 @@ Not an ADR, but binding on every artifact the engine writes under `workspace/`:
 
 - UTF-8, no BOM;
 - LF line endings, written explicitly so Windows does not translate them;
-- JSON written atomically through a temporary file, and never with a `default=`
-  coercion that would hide an unserializable value;
+- written atomically through a temporary file and an atomic replace — every
+  artifact, not only the JSON ones, so `transcript.srt` and `transcript.txt` are
+  never observed half-written; a failed write leaves neither a partial file at
+  the final path nor a `.tmp` beside it;
+- JSON never serialized with a `default=` coercion that would hide an
+  unserializable value;
 - versioned with a `schema_version` where the artifact is read back later.
 
 The point is that a run produced on Windows and the same run produced on Ubuntu
