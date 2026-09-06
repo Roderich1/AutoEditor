@@ -19,3 +19,6 @@ class MediaService:
 
     def extract_audio(self, input_path: Path, output_path: Path) -> None:
         self.ffmpeg_adapter.extract_audio(input_path, output_path)
+
+    def audio_duration(self, audio_path: Path) -> float:
+        return self.probe_adapter.probe_audio_duration(audio_path)

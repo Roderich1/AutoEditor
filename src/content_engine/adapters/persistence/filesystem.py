@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from content_engine.domain.exceptions import InvalidMediaError
-from content_engine.domain.models import RunManifest
+from pydantic import ValidationError
+
+from content_engine.domain.exceptions import (
+    CorruptArtifactError,
+    InvalidRunIdError,
+    RunNotFoundError,
+    UnsupportedSchemaVersionError,
+)
+from content_engine.domain.models import MANIFEST_SCHEMA_VERSION, RunManifest
 from content_engine.utils.json import read_json, write_json
 
 
@@ -34,7 +41,7 @@ class RunWorkspace:
             or candidate.name != run_id
             or len(candidate.parts) != 1
         ):
-            raise InvalidMediaError(f"Invalid run identifier: {run_id}")
+            raise InvalidRunIdError(f"Invalid run identifier: {run_id!r}")
         return self.runs_root.joinpath(run_id)
 
     def create(self, run_id: str) -> Path:
@@ -48,11 +55,27 @@ class RunWorkspace:
     def require(self, run_id: str) -> Path:
         path = self.run_path(run_id)
         if not path.is_dir():
-            raise InvalidMediaError(f"Run does not exist: {run_id}")
+            raise RunNotFoundError(f"Run does not exist: {run_id}")
         return path
 
     def write_manifest(self, run_path: Path, manifest: RunManifest) -> None:
         write_json(run_path.joinpath("manifest.json"), manifest.model_dump(mode="json"))
 
     def read_manifest(self, run_path: Path) -> RunManifest:
-        return RunManifest.model_validate(read_json(run_path.joinpath("manifest.json")))
+        path = run_path.joinpath("manifest.json")
+        if not path.is_file():
+            raise CorruptArtifactError(f"Run has no manifest: {path}")
+        payload = read_json(path)
+        if not isinstance(payload, dict):
+            raise CorruptArtifactError(f"{path} does not contain a manifest object")
+        version = payload.get("schema_version")
+        if version != MANIFEST_SCHEMA_VERSION:
+            raise UnsupportedSchemaVersionError(
+                f"{path} declares manifest schema {version!r}; this build understands "
+                f"{MANIFEST_SCHEMA_VERSION}. The run was produced by a different version "
+                "and is not interpreted."
+            )
+        try:
+            return RunManifest.model_validate(payload)
+        except ValidationError as error:
+            raise CorruptArtifactError(f"{path} is not a valid manifest: {error}") from error

@@ -38,6 +38,9 @@ packages = ["src/content_engine"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+# Markdown under docs/ contains illustrative specification snippets and archived
+# handoff material. They are documentation, not source, and must not be rewritten.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -49,4 +52,9 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=content_engine --cov-report=term-missing"
+addopts = "--cov=content_engine --cov-report=term-missing --cov-fail-under=80"
+markers = [
+    "integration: exercises real FFmpeg or ffprobe; skipped with a reason when absent",
+    "slow: downloads or runs a real transcription model",
+    "ai: calls a paid external AI provider; never part of the normal suite",
+]

@@ -1,0 +1,31 @@
+# Line-ending policy.
+#
+# Generated run artifacts are written LF by the engine itself and never live
+# here; this file governs the repository's own text, so a checkout on Windows
+# and one on Linux hold the same bytes.
+
+* text=auto
+
+*.py    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.srt   text eol=lf
+*.sh    text eol=lf
+
+# Windows shells only read these correctly with CRLF.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.mp4   binary
+*.mkv   binary
+*.mov   binary
+*.wav   binary
+*.docx  binary

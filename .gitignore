@@ -24,3 +24,6 @@ dist/
 # Generated workspace artifacts
 workspace/runs/
 workspace/cache/
+
+# Local experiment media (see CLAUDE.md yt-dlp policy)
+samples-local/
