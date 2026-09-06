@@ -7,31 +7,44 @@
 - Merged pull requests: `#1 Proyecto base`, `#2 documentacion del proyecto base`,
   `#3 Stabilize Content Engine V0.1-V0.3` (merge commit `d047479`),
   `#4 Candidate engine foundation` (merge commit `70fb6ed`),
-  `#5 Candidate engine deterministic pipeline` (merge commit `1b15e0f`)
-- Active branch: `feat/gemini-candidate-provider`, based on `1b15e0f`
+  `#5 Candidate engine deterministic pipeline` (merge commit `1b15e0f`),
+  `#6 Candidate engine provider` (merge commit `5570531`)
+- Active branch: `feat/human-evaluation`, based on `5570531`
 - Current package version: `0.1.0`
 
 ## Verification baseline
 
-`main` at `1b15e0f` was verified before this branch started: ruff, ruff format
-(84 files), mypy strict (40 files), 1086 tests at 99.38%, 13 integration tests
-and `uv build`, all green. That is the baseline this branch is measured against.
+`main` at `5570531` was reproduced before this branch started: ruff, ruff
+format (94 files), mypy strict (43 files), 1252 tests at 99.45% over 2384
+statements with 13 missed, 13 integration tests and `uv build`, all green. That
+is the baseline this branch is measured against.
 
-Last verification, on `feat/gemini-candidate-provider`, Windows 11,
-Python 3.12.10, FFmpeg 9.0.1:
+Last verification, on `feat/human-evaluation`, Windows 11, Python 3.12.10,
+FFmpeg 9.0.1:
 
 | Check | Result |
 |---|---|
 | `uv run ruff check .` | passed |
-| `uv run ruff format --check .` | passed, 94 files |
-| `uv run mypy src` | passed, 43 files, strict |
-| `uv run pytest` | 1252 passed, 1 skipped, 166 more than the 1086 on `main` |
+| `uv run ruff format --check .` | passed, 111 files |
+| `uv run mypy src` | passed, 50 files, strict |
+| `uv run pytest` | 1765 passed, 1 skipped, 513 more than the 1252 on `main`; 99.61% over 3314 statements, 13 missed — the same 13 `main` already had |
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
+| Re-run with every cache disabled | `ruff --no-cache`, `mypy --no-incremental`, `pytest -p no:cacheprovider`: all green |
+| Every test import available in the CI environment | asserted against the `uv.lock` closure of the main dependencies and the dev group, per test module |
+| Publication failure injected at each step, shortlist same, grown and shrunk | the previous set stays byte-identical and still passes `verify_previews` |
+| Failure of the restore itself, on the first, a middle and the last file | the whole previous set stays reachable in `previews/` or `previews/.rollback/`, and the backup is never deleted |
+| Restore failure repeated three times | the backup is still complete after each attempt |
+| A pending backup on a later invocation | restored deterministically from its journal, or refused untouched when the journal is missing, unreadable, of another schema, or names an unknown phase |
+| A restore interrupted after 2 of 5 files, then resumed by `resolve_pending_rollback` | the previous set comes back byte-identical and `verify_previews` passes; asserted for the second, a middle and the last move, and for the shortlist unchanged, grown and shrunk |
+| Four resumes each stopping at a different position | nothing lost at any step, complete at the end |
+| The phase transition itself failing | the journal stays at `placing`, the previous set is whole in the backup, and a resume completes |
+| `preview_service.py` coverage | 100% |
+| Diff against `main` | 27 files, +8122/−46 |
 | SonarCloud quality gate | passes; Reliability and Security both A |
-| `uv run pytest -m integration --no-cov` | 13 passed with real FFmpeg |
+| `uv run pytest -m integration --no-cov` | 22 passed with real FFmpeg; 9 of them are the new preview pipeline |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
 | Transcription digests unchanged by the canonical extraction | pinned to `main` at `d047479` and asserted |
 | Provider SDK, network client or yt-dlp imported anywhere in `src/` | only `adapters/analysis/gemini_analyzer.py`; asserted by two AST sweeps, plus a test that the one exempted file still exists so a rename cannot silently widen the hole |
@@ -51,7 +64,16 @@ Python 3.12.10, FFmpeg 9.0.1:
 | Wheel in a clean venv, arbitrary working directory with spaces and non-ASCII characters | `doctor`, `inspect`, `run`, `transcribe` all work |
 | Real faster-whisper transcription | passed, model `small` on cpu/int8, 34 s of Spanish technical speech |
 | Artifacts UTF-8 without BOM, LF endings | verified byte by byte |
-| Secrets or media tracked in Git | none; tracked tree is 710 KB |
+| Secrets or media tracked in Git | none |
+| `preview` on the real analysed run | 15 previews in 26 s, every one verified independently with ffprobe |
+| `preview --force` on the real run after the transactional publish | 15 regenerated in 26 s, all verified, no `.rollback`, `.staging` or `.tmp` left, third invocation reused |
+| Second `preview` on the same run | reuse in 0.49 s, no encode, all 16 files and the manifest byte-identical |
+| The four analysis artifacts after previewing | SHA-256 unchanged; analysis fingerprint still `b6f2c48acd57` |
+| Wheel in a clean Python 3.12 venv, working directory with a space and `ñ` | `preview --force` produced all 15, a second call reused them, a full `review` session reached REVIEWED |
+| A deleted preview on a run whose manifest records the stage | exit 3, nothing rewritten, message names `--force` |
+| Credential or credential name under a reviewed run directory | none; searched recursively as bytes |
+| `.tmp` or `.staging` left anywhere after a completed run | none |
+| Third-party imports in the seven new modules | `pydantic` only; no network client, no provider SDK, no yt-dlp, and no module reads the environment |
 
 ### Real-speech smoke test
 
@@ -311,7 +333,7 @@ ADR-023 the fixture executor.
   carry both a recorded failure and candidates; it may keep the response beside
   an error, which is the most useful thing about a failure.
 
-### V0.4 provider — in PR C, pending merge
+### V0.4 provider — merged in `5570531` (PR #6)
 
 CE-026, CE-028 and CE-029, in `resources/prompts/clip_candidates/v1.txt`,
 `adapters/analysis/prompt.py`, `adapters/analysis/structured_output.py` and
@@ -408,6 +430,64 @@ prompt and fixture identity, the chunking and candidate settings, and every rule
 and schema version. `manifest.stages["analysis"]` records the fingerprint, the
 digest of that file, the schema version and the completion time, exactly as the
 transcription stage does.
+
+### V0.5 Human Evaluation — CE-034 to CE-039, on `feat/human-evaluation`
+
+Previews and human review, in `domain/previews.py`, `domain/preview_rules.py`,
+`domain/review.py`, `ports/preview.py`, `adapters/media/preview.py`,
+`services/preview_service.py`, `services/review_service.py` and two new CLI
+commands. ADR-028 records why preview encoding is a stage constant, ADR-029 why
+a decision is three types rather than one with optional fields, and ADR-030 the
+single backwards transition in the state machine.
+
+- **CE-034, previews.** `content-engine preview RUN_ID` cuts one 540x960 proxy
+  per selected candidate: H.264 and AAC, `veryfast` at CRF 30, the whole source
+  frame fitted inside the vertical frame and padded with `setsar=1` so nothing
+  is stretched or cropped. No subtitles and no final styling — those are
+  CE-040 to CE-045. The FFmpeg argument list is built by a pure function and
+  asserted element by element; `-ss` precedes `-i` so the encoder seeks instead
+  of decoding up to the interval, and `-t` follows it so the limit applies to
+  what is written.
+
+  Every encode happens in `previews/.staging/` and is read back with ffprobe
+  there — dimensions, codecs and duration against a documented 1.0 s tolerance.
+  Nothing is moved into `previews/` until the whole set has passed, so a
+  failure leaves the previous previews intact and a failed `--force` destroys
+  nothing. The index and the stage configuration are written last, and the
+  index the reuse check looks for first is written after everything else.
+
+- **CE-035 to CE-039, review.** `content-engine review RUN_ID` shows one
+  candidate at a time with its rank, identifier, topic, category, interval,
+  duration, total, the six component scores, hook, summary, reason and preview
+  path, then five keys: `[A]` approve, `[R]` reject, `[E]` edit range, `[S]`
+  skip, `[Q]` quit and save. Each explicit decision is written atomically
+  before the next candidate is shown.
+
+  Skipping records nothing, which is what makes "not decided yet" and "decided
+  to do nothing" different states: a skipped candidate is pending again next
+  session. `Q`, end of input and Ctrl+C all end the session without touching
+  the status or the failure record. The run reaches REVIEWED only when every
+  selected candidate has an explicit decision.
+
+- **The artifacts.** `previews/index.json` (candidate id, rank, interval,
+  expected and measured duration, filename, dimensions, codecs, SHA-256, size,
+  plus the analysis fingerprint and source digest they were cut from),
+  `previews/config.effective.json`, `review/decisions.json` and
+  `review/config.effective.json`. The manifest records a `preview` and a
+  `review` stage exactly as transcription and analysis do: a fingerprint, the
+  digest of the stage configuration beside the output, a schema version and a
+  completion time.
+
+- **Reuse.** The preview fingerprint covers the index and the configuration,
+  and the index holds a digest of every file, so it covers the output. A
+  deleted, truncated, replaced or renamed preview cannot be reused; nor can a
+  set produced under other dimensions, other preview rules, another analysis or
+  another source. Verification writes nothing, and a refusal names `--force`.
+
+- **What is deliberately not here.** No SRT or ASS, no final render, no
+  `vertical_blur` or `vertical_crop`, no CE-040 and beyond, no second Gemini
+  call, no prompt change and no scoring change. `preview` and `review` never
+  read `GEMINI_API_KEY` and open no socket.
 
 ## The real video: the first real Gemini run
 
@@ -544,19 +624,222 @@ that work has not been done.
 - A candidate identifier is a 64-bit prefix of a SHA-256. Collisions are refused
   by the collection rather than resolved, so an astronomically unlikely one would
   be a loud failure rather than a lost record.
+- **A run that has been previewed can no longer be re-analysed.**
+  `READY_FOR_REVIEW -> ANALYZED` is not an allowed transition, so
+  `analyze --force` on such a run is refused by the state machine rather than
+  stranding previews and decisions built on the old shortlist. Cascading
+  invalidation is CE-052; until then the workaround is a new run. ADR-030
+  records the trade-off.
+- **A preview is not byte-reproducible across FFmpeg builds.** Measured on the
+  real run, two `--force` regenerations on the same machine produced
+  byte-identical MP4s for all 15 candidates, so x264 is deterministic given the
+  same build, source and arguments. What is not guaranteed is the same output
+  from a different build or version, and x264 embeds its own build identity. So
+  the reuse guarantee is "an unchanged run rewrites nothing", not "two machines
+  produce identical previews". Every other artifact in the engine is
+  byte-comparable across platforms by contract; the previews are the only ones
+  that are not, and the only ones that are disposable.
+- **The duration tolerance is 1.0 s and is a stage constant.** The 15 real
+  previews drifted at most 0.040 s, so the tolerance has a wide margin over
+  what a correct encode actually costs. It is wide enough that a badly wrong
+  short clip would still have to be more than a second off to be caught, which
+  is the intended trade: the check exists to catch a truncated or empty encode,
+  not to measure frame accuracy.
+- **`review` is a line-oriented prompt loop, not a player.** It prints the path
+  to each preview; opening it is the reviewer's job. There is no key that
+  launches a video player, because that would mean shelling out to whatever the
+  platform associates with `.mp4`.
+- **Piping `review` through a legacy Windows codepage mangles accents.** The
+  artifacts are UTF-8 and an interactive console renders Spanish correctly;
+  redirecting stdout on a machine whose Python defaults to cp1252 replaces
+  unmappable characters. `PYTHONIOENCODING=utf-8` fixes it. The data is never
+  affected.
+- **On Windows, a preview path longer than 260 characters fails.** FFmpeg uses
+  the ANSI file APIs and is bound by `MAX_PATH`; past it, it exits 0 and writes
+  nothing. Observed at 268 characters while testing the wheel from a deeply
+  nested temporary directory. It is caught rather than inherited -- the adapter
+  refuses with "FFmpeg reported success but produced no preview at ...", the
+  run becomes FAILED_PREVIEW and no partial artifact is left -- but the fix is
+  a shorter workspace path, not a code change. Python itself is unaffected, so
+  every other artifact in the same run is written normally, which is why this
+  surfaces only at the encode.
+- **No human decision has been recorded on the real run.** The 15 previews
+  exist and the run is READY_FOR_REVIEW; the decisions are the operator's to
+  make, and inventing them would fabricate exactly the measurement CE-053 to
+  CE-059 are built to read. Full sessions are exercised only against fixtures.
+
+### Four defects found in review, and what they cost
+
+All four were fixed on the branch after the first review pass, each preceded by
+failing tests. They are recorded because three of them were failures of the same
+kind: a guarantee that was stated in a docstring and not enforced anywhere.
+
+**A reopened review stranded the run.** `review --force` moves a REVIEWED run
+back to READY_FOR_REVIEW before asking anything, and writes no decisions until
+the first answer. Quitting immediately therefore left a complete set of
+decisions beside a status saying the review was open, and every later session
+reported "already reviewed" while the status never moved again. `review` now
+settles that case: the decisions have already been proved coherent against this
+analysis and shortlist, so the status is the only thing that disagrees and it is
+corrected, recording the stage with the same fingerprint the completing session
+produced. Recovery is narrow on purpose -- a removed, partial or incoherent set
+leaves the run open, the last by refusal.
+
+**Publishing a preview set was not transactional.** Generation always was:
+everything is encoded and probed in `.staging`. Publication was not -- stale
+previews were unlinked, files were replaced one at a time, then the artifacts
+were written, so a failure after the first move left a mixture of two runs with
+`index.json` describing neither. The previous set was reusable and became
+unverifiable, which is the one outcome a failed `--force` was supposed to be
+unable to produce. The whole published set is now moved into `.rollback` first
+and restored byte for byte on any failure.
+
+Two attempts at the fix were themselves wrong, and both were caught by the
+tests rather than by reading: moving the old set aside outside the guard
+reproduced the same defect one step earlier, and inferring what to undo from the
+directory contents destroyed previous previews that had not been moved aside
+yet. The undo now works from a recorded list of what was moved and what was
+placed, because names alone cannot tell them apart when an unchanged shortlist
+is regenerated.
+
+**The audio codec was never checked.** `_measure` compared the video codec and
+refused a missing audio track, but accepted any codec that existed, so a preview
+whose audio was stream-copied or transcoded to mp3, opus, vorbis or PCM passed
+verification and was recorded in the index as AAC.
+
+**An over-long rejection detail crashed the session.** The 2000-character cap
+lives on the model, so a longer detail raised ValidationError out of the prompt
+loop and exited 1 as an unexpected internal error -- after earlier decisions had
+been saved, so a reviewer who pasted too much text saw a crash and no sign that
+their work had survived. The limit is now named once, shown in the prompt, and a
+violation prints the model's own message and asks again.
+
+### A fifth defect: the rollback could destroy the backup it was holding
+
+Found in review after the four above were fixed, and worse than any of them,
+because the code that caused it was the fix for defect 2.
+
+Publication moves the published set into `previews/.rollback/` and restores it if
+the new set cannot be placed. If a *restore* rename failed, the OSError replaced
+the original error on the way out of `_publish` and `generate`'s `finally` ran
+`shutil.rmtree(.rollback, ignore_errors=True)` unconditionally — deleting the
+only remaining copy and leaving `previews/` empty. Three separate places deleted
+the backup and none checked whether the restore had finished: that `finally`,
+`_publish` clearing a pre-existing backup before starting, and `_roll_back`'s own
+cleanup.
+
+The fix changes what is promised, not just the code. Atomicity is not available
+when the undo can fail, so the guarantee is now **durability**: every file of the
+previous set stays in `previews/` or in `previews/.rollback/`, the backup is
+deleted in exactly two places — after publication placed everything, or after a
+restore moved everything back — the error names the directory holding the data,
+and the next `preview` run finishes the restore from a journalled phase.
+ADR-031 records the reasoning, including why publishing by directory rename was
+rejected: on Windows a directory rename fails while a player holds a preview
+open, the two-rename swap is not atomic either, and same-filesystem renames are
+already guaranteed by keeping the working directories inside `previews/`.
+
+### A sixth defect: resuming a partial restore lost what it had recovered
+
+The two-phase journal was not enough, and the gap was found by review rather
+than by the suite.
+
+`placing` means "the previews directory holds files from the failed
+publication", and its undo deletes them before moving the previous set back.
+Correct the first time; destructive the second. Once two of five files had been
+moved back, the directory no longer held only new files — but the journal still
+said `placing`, because the two states are indistinguishable from the directory
+contents alone. Resuming re-ran the deletion, removed the two recovered files,
+and moved back only the three still in the backup. Five files in, three out, and
+`verify_previews` failing.
+
+A third phase closes it. `restoring` is written **after the last deletion and
+before the first move back**, and its undo never deletes anything. Moving a file
+back is idempotent, so a resume simply continues with whatever is left in the
+backup; and if the transition write itself fails, nothing has moved, the phase
+on disk is still `placing`, and a resume re-runs a deletion that now finds
+nothing to delete before retrying.
+
+The test that had covered this went through `generate`, which publishes a fresh
+set — complete and verifiable whether or not anything was recovered. It could
+not tell recovery from replacement and passed over the defect. Recovery is now
+asserted by calling `resolve_pending_rollback` directly.
+
+### SonarCloud: why the gate passes while the UI shows 0.0% coverage
+
+Measured through the SonarCloud API rather than inferred.
+
+**Coverage on new code is 0.0% because Sonar has no coverage data at all.** The
+`coverage` and `new_coverage` measures come back empty and `new_lines_to_cover`
+is 0. There is no scanner step in `.github/workflows/ci.yml` and no
+`sonar-project.properties`: the project uses SonarCloud Automatic Analysis,
+which reads the repository and never receives a coverage report. With zero lines
+known to be coverable, the ratio is displayed as 0.0%.
+
+**The gate passes because it has no coverage condition.** Its five conditions
+are `new_reliability_rating`, `new_security_rating`,
+`new_maintainability_rating`, `new_duplicated_lines_density` and
+`new_security_hotspots_reviewed`, and `ignoredConditions` is false. Coverage is
+neither measured nor gated there. The coverage gate for this project is
+`--cov-fail-under=80` in `pyproject.toml`, and the real figure is 99.60%.
+
+Importing coverage would mean adding the scanner with a `SONAR_TOKEN` secret,
+which CI deliberately does not have -- "no secrets" is a stated property of the
+workflow. That trade is a decision to take explicitly rather than as a side
+effect of this pull request.
+
+**The 29 new issues were all MAJOR code smells**, 28 of one rule
+(`python:S5778`, a `pytest.raises` block containing more than one call that
+could throw) and one of another (`python:S7632`, a malformed suppression
+comment). The gate condition is `new_maintainability_rating ≤ A`, which is a
+technical-debt ratio rather than an issue count, so 29 smells over ~6700 new
+lines still rate A. Both rules were fixed anyway: S5778 was a real precision
+problem, since those tests could pass because the wrong call failed, and fixing
+`test_preview_rules` also split tests that had conflated a `PreviewRecord`
+refusal with a `PreviewIndex` one.
+
+### Two blind spots CI found, and the guards added for them
+
+Both were environment differences rather than logic errors, and each is now
+caught locally.
+
+**An import the CI environment does not have.** Three test modules imported
+`click.testing.Result`. typer 0.27 no longer depends on click, and the only path
+by which click enters `uv.lock` is `faster-whisper`, which arrives with the
+`transcription` extra that CI does not install — so it resolved locally and
+failed there. `test_suite_portability.py` now reads every test module's imports
+with `ast` and checks each against the transitive closure of the main
+dependencies and the dev group taken from `uv.lock`, which is what
+`uv sync --frozen --group dev` really installs. Not the declared dependencies:
+`test_gemini_analyzer` legitimately imports `httpx`, which nothing declares and
+which `google-genai` brings.
+
+**A lint pass served from a cache.** `ruff check --fix` was run on the tests
+before the new domain modules existed, so ruff could not resolve
+`content_engine.domain.review` and sorted it as third-party. Later local runs
+reported a pass from the cache because the files had not changed since that
+verdict. The whole battery is now re-run with `--no-cache`, `--no-incremental`
+and `-p no:cacheprovider` before any claim of green.
 
 ## Current priority
 
-V0.4, the Candidate Intelligence Engine (CE-023–CE-033). The foundation
-(CE-023, CE-024, CE-025, CE-027) is merged as `70fb6ed`; the deterministic
-pipeline (CE-030–CE-033) and the `analyze` command as `1b15e0f`. CE-026, CE-028
-and CE-029 are on `feat/gemini-candidate-provider`, pending review.
+V0.5, Human Evaluation (CE-034–CE-039), on `feat/human-evaluation` and pending
+review. V0.4 is complete and merged: the foundation as `70fb6ed`, the
+deterministic pipeline and `analyze` as `1b15e0f`, the prompt, the Gemini
+adapter and structured output as `5570531`.
 
-That completes CE-023–CE-033, and the first real run has now happened: seven
-live calls over a 35-minute video, 15 candidates selected from 23 proposals,
-reuse proved without a credential. What is still missing is the reason the
-subsystem exists — candidate quality measured over a representative set. One
-video is a signal, not a measurement.
+The immediate next step is not code. The real run is READY_FOR_REVIEW with 15
+verified previews, and the measurement the whole subsystem exists for needs a
+person to watch them and decide:
+
+```bash
+content-engine review 20260906T134657-aprende-linux-ahora-curso-desde--881437
+```
+
+That produces the first real editorial data — approval rate, edit rate and
+rejection reasons — which is what CE-053 to CE-059 will read and what will say
+whether the prompt is any good. One video is still a signal rather than a
+measurement; the specification asks for at least five.
 
 ## Deferred to V0.7 (CE-047 to CE-052)
 

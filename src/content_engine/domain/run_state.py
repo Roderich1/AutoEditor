@@ -29,8 +29,27 @@ STAGE_OUTCOMES: dict[RunStage, tuple[RunStatus, RunStatus]] = {
     RunStage.AUDIO: (RunStatus.AUDIO_READY, RunStatus.FAILED_AUDIO),
     RunStage.TRANSCRIPTION: (RunStatus.TRANSCRIBED, RunStatus.FAILED_TRANSCRIPTION),
     RunStage.ANALYSIS: (RunStatus.ANALYZED, RunStatus.FAILED_ANALYSIS),
+    RunStage.PREVIEW: (RunStatus.READY_FOR_REVIEW, RunStatus.FAILED_PREVIEW),
+    RunStage.REVIEW: (RunStatus.REVIEWED, RunStatus.FAILED_REVIEW),
     RunStage.RENDER: (RunStatus.RENDERED, RunStatus.FAILED_RENDER),
 }
+
+#: Backwards moves the machine allows, and the only ones. ADR-030.
+#:
+#: Every other stage owns artifacts it derives from its inputs, so re-running it
+#: needs no backwards edge: the state it produces is the state it produced
+#: before. Review is the exception, because what it holds is not derived from
+#: anything -- it is a set of human decisions, and `review --force` discards
+#: them. A run whose decisions have just been thrown away must not go on
+#: claiming REVIEWED while the person works through the list again, and there is
+#: no honest state for it other than the one it came from.
+#:
+#: Written as an explicit pair rather than a general "one step back" rule. A
+#: general rule would also permit READY_FOR_REVIEW -> ANALYZED and
+#: REVIEWED -> READY_FOR_REVIEW for reasons nobody decided on.
+RE_ENTRY_TRANSITIONS: frozenset[tuple[RunStatus, RunStatus]] = frozenset(
+    {(RunStatus.REVIEWED, RunStatus.READY_FOR_REVIEW)}
+)
 
 
 def _predecessor(status: RunStatus) -> RunStatus:
@@ -69,6 +88,9 @@ def _build_transitions() -> dict[RunStatus, frozenset[RunStatus]]:
         transitions[failure].add(success)
         transitions[failure].add(failure)
         del stage
+
+    for current, target in RE_ENTRY_TRANSITIONS:
+        transitions[current].add(target)
 
     return {status: frozenset(targets) for status, targets in transitions.items()}
 

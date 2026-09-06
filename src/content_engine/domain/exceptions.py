@@ -119,3 +119,17 @@ class InvalidCandidateError(ContentEngineError):
 class RenderError(ContentEngineError):
     exit_code = EXIT_RENDER
     title = "Render failed"
+
+
+class PreviewRollbackError(RenderError):
+    """A preview publication failed and could not be fully undone.
+
+    Distinct from a plain ``RenderError`` because the operator has to do
+    something different about it. An ordinary render failure left everything as
+    it was and can simply be retried; this one means files are sitting in a
+    backup directory rather than where they belong, and the message names that
+    directory. Nothing has been lost, but the previews directory is incomplete
+    until a later run finishes the restore.
+    """
+
+    title = "Preview rollback incomplete"

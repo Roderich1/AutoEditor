@@ -1209,3 +1209,348 @@ claim is not evidence of a mismatch.
   schema bump with evidence behind it. Until then a run records the model it
   asked for, and this says so plainly rather than letting "the exact model" be
   assumed.
+
+---
+
+## ADR-028 — Preview encoding is a stage constant, not an experiment variable
+
+**Status:** Accepted
+
+### Context
+
+CE-034 needs a preview to be described precisely enough that a later run can
+decide whether to re-encode: dimensions, codecs, encoder preset, CRF, sample
+rate, channels, and how the source frame is fitted into the vertical one. Every
+other stage puts its settings in the configuration file, and `[render]` already
+holds exactly this list of keys for the final output.
+
+The obvious move was to do the same for `[preview]`. It has a cost that is easy
+to miss: `config_sha256` is computed over the whole configuration and is the
+logical identity of an experiment. Adding six encoder keys to `[preview]`
+changes that digest for every run, past and future — so the identity of an
+experiment about prompts and candidate quality would move because a throwaway
+proxy's CRF is now written down.
+
+### Decision
+
+`[preview]` keeps the three keys it already had: `enabled`, `width`, `height`.
+They are the ones an operator plausibly changes and the only ones that alter
+what a reviewer sees.
+
+Everything else — `libx264`, `veryfast`, CRF 30, `yuv420p`, AAC at 96k, 44.1 kHz
+stereo, `fit_pad` with black padding — is a constant of the preview stage in
+`domain.preview_rules`, versioned by `PREVIEW_RULES_VERSION` and
+`PREVIEW_ARGUMENT_VERSION`, and written out in full to
+`previews/config.effective.json`.
+
+The two versions are separate deliberately. The policy can stay the same while
+the argument list that expresses it changes, and it is the argument list that
+decides the bytes. Either one moving changes the stage configuration digest and
+therefore requires an explicit `--force`.
+
+### Consequences
+
+- A preview stage still explains itself completely: the effective configuration
+  artifact names every parameter that produced the file beside it, so nobody has
+  to read the source to find out what CRF a preview was encoded at.
+- Changing an encoder parameter is a code change with a version bump, not a
+  profile edit. That is the right friction for a proxy: it is not something to
+  sweep across an experiment matrix.
+- `config_sha256` for the "Aprende Linux" run analysed before this branch is
+  unchanged, so V0.5 did not invalidate the identity of a real experiment in
+  order to describe files that are deleted at the end of it.
+- If preview encoding ever becomes worth experimenting with, the keys move into
+  `[preview]` with a `config_sha256` bump and this ADR is superseded. Nothing
+  here makes that harder — the parameters already flow through one readable
+  model.
+- The verification target is stated separately from the encoder name. `libx264`
+  produces a stream ffprobe calls `h264`, so `video_codec` and
+  `expected_video_codec` are two fields; collapsing them would make the
+  post-encode check compare a name against a different name and fail on every
+  correct preview.
+
+---
+
+## ADR-029 — Human decisions are three types, and a rejection has no interval
+
+**Status:** Accepted
+
+### Context
+
+`V0_IMPLEMENTATION_SPEC.md` section 27 sketches one model for a review
+decision: `candidate_id`, a `decision` literal, the original bounds, then
+`final_start`, `final_end` and `reason` all optional.
+
+Four optional fields and a literal tag. Written that way, the type permits a
+rejection carrying an approved interval, an approval carrying a rejection
+reason, an "edit" whose final bounds equal the original ones, and an approval
+with no final bounds at all. Each of those is a record that says something
+different from what the person did, and this file is the only evidence in the
+whole engine of what a person decided.
+
+The PR brief also lists `final_start` and `final_end` among the fields *every*
+decision must keep. For a rejection there is nothing to keep: no interval was
+approved. That is a real contradiction in the specification, and it is resolved
+here rather than silently.
+
+### Decision
+
+Three models, discriminated on `decision`, in `domain/review.py`.
+
+`ApprovedDecision` carries `final_start` and `final_end`, validated to equal the
+original interval. They are stored rather than derived so a renderer can read
+`final_interval` without knowing which kind of decision it holds, and checked
+rather than trusted so a file claiming an approval with moved bounds is refused
+instead of being read as an edit.
+
+`RejectedDecision` carries an optional `EditorialReason` and an optional
+`detail`, **and no final bounds at all** — absent, not null. Storing the
+original values there would produce a row that reads as an approved clip, which
+is exactly the confusion CE-057's rejection metrics exist to measure. Anything
+that needs "the interval to render" asks `final_interval`, which answers `None`.
+
+`EditedDecision` carries final bounds that must be finite, ordered, inside the
+source, and actually different from the original ones. An edit that moved
+nothing is an approval, and is refused as an edit.
+
+Beyond that:
+
+- **`EditorialReason` is a separate enum from `RejectionReason`.** The latter
+  records why the deterministic rules discarded a proposal —
+  `invalid_interval`, `below_min_score`, `duplicate` — decisions made before any
+  person saw anything. The former records an editorial judgement about material
+  that passed every rule. Three of the names collide (`too_long`, `too_short`,
+  `duplicate`), and sharing one enum would make a single value mean "under
+  `min_duration_seconds`" in one row and "not worth posting" in the next.
+  CE-057 could then no longer separate the prompt's failures from the operator's
+  taste, which is the measurement this project exists to make.
+- **A reason is optional; `other` requires a detail.** Making a reason mandatory
+  would push a reviewer working through thirty candidates towards whichever
+  label was least effort, and a guessed label is worse than a missing one for
+  the metrics reading it. `other` is the exception because it names nothing: the
+  free text is its whole content.
+- **A detail without a reason is refused.** The detail explains a reason rather
+  than replacing it; allowing a bare detail would create a second, unstructured
+  reason channel that no metric can group by.
+- **A human edit is not constrained by `min_duration_seconds` or
+  `max_duration_seconds`.** Those shape what the model may propose, and CE-030
+  enforces them on proposals. A person watching the preview is the authority on
+  where their clip ends, and silently widening their interval back to the AI
+  minimum would render something they did not choose. The only bounds an edit
+  respects are finite, ordered and inside the source.
+- **`reviewed_at` must be timezone-aware UTC.** A naive timestamp is unorderable
+  against an aware one, and a local one reorders the session when the file is
+  read on another machine.
+
+### Consequences
+
+- Reading a decision means knowing which kind it is. That is the point: a
+  consumer cannot accidentally treat a rejection as a clip to render, because
+  the fields it would need are not there to read.
+- `review/decisions.json` is not a flat table. A consumer that wants one can
+  project it; the stored form does not pretend the three kinds are one thing.
+- The collection checks each decision's copied original bounds against the
+  candidate. Without that, an edited original would turn "the reviewer moved the
+  boundary by four seconds" into a measurement of nothing, and that difference
+  is precisely what CE-057 reads.
+- Adding a fourth kind of decision means adding a model, not adding another
+  optional field to a growing one.
+
+---
+
+## ADR-030 — Re-opening a review is the only backwards transition
+
+**Status:** Accepted, extends ADR-018
+
+### Context
+
+ADR-018 makes the run state machine strictly forward: a run advances one stage
+at a time or stops at the failure state of the stage that broke, and backwards
+moves are refused so a manifest can never claim a state it did not earn.
+
+`review --force` breaks that assumption for one specific reason. It discards
+human decisions and asks about every candidate again. A run in `REVIEWED` whose
+`decisions.json` has just been replaced with an empty collection would be
+claiming a finished editorial pass while the reviewer is still working through
+the list, and every later stage reads the status rather than the file.
+
+Every other stage's `--force` needs no backwards edge: it recomputes the same
+kind of artifact and ends in the state it was already in. Review is different
+because what it holds is not derived from anything.
+
+### Decision
+
+`RE_ENTRY_TRANSITIONS` holds exactly one pair:
+
+```text
+REVIEWED -> READY_FOR_REVIEW
+```
+
+Written as an explicit pair rather than as a general "one step back" rule. A
+general rule would also have permitted `READY_FOR_REVIEW -> ANALYZED` and
+`RENDERED -> REVIEWED`, for reasons nobody decided on.
+
+`RunStage` gains `PREVIEW` and `REVIEW`, with `FAILED_PREVIEW` and
+`FAILED_REVIEW` beside them, so `READY_FOR_REVIEW` and `REVIEWED` are produced
+by stages that own them instead of appearing on the success path with no stage
+behind them.
+
+`test_run_state.py` asserts the exhaustive property — that this is the only
+transition anywhere in the table that moves backwards along `SUCCESS_PATH` — so
+a second backwards edge added anywhere fails the suite rather than passing
+quietly.
+
+### Consequences
+
+- A failing encoder produces `FAILED_PREVIEW`. It is no longer possible to
+  record a preview failure as `FAILED_ANALYSIS`, which would have described an
+  external call that never happened, or to leave a manifest asserting
+  `READY_FOR_REVIEW` after previews that were not produced.
+- Quitting a review, reaching end of input and pressing Ctrl+C are not failures
+  and touch neither the status nor the failure record. `FAILED_REVIEW` exists
+  for a technical failure of the stage, not for a person stopping.
+- **A run that has been previewed can no longer be re-analysed.**
+  `READY_FOR_REVIEW -> ANALYZED` is not an allowed transition, so
+  `analyze --force` on such a run is refused with a state-machine error rather
+  than silently stranding the previews and decisions built on the old shortlist.
+  This is a real usability cost and it is deliberate for now: cascading
+  invalidation is CE-052's job, and until it exists refusing is safer than
+  orphaning. The workaround is a new run.
+- The re-entry edge is taken only by `review --force`, and only after a warning
+  that names how many decisions will be discarded.
+
+---
+
+## ADR-031 — Preview publication is durable, not atomic
+
+**Status:** Accepted
+
+### Context
+
+Publishing a preview set replaces several files at once: one MP4 per candidate,
+some of which must disappear when the shortlist changed, plus
+`config.effective.json` and `index.json`. The first implementation did it in
+place and in order, and a failure part-way through left the directory holding
+half of one set and half of another with `index.json` describing neither — worse
+than either set, because the previous previews had been reusable and were now
+unverifiable.
+
+The fix was to move the whole published set into `previews/.rollback/`, assemble
+the new one, and delete the backup last, restoring it on failure. That made the
+ordinary failure atomic. It also introduced a worse defect than the one it
+fixed: the backup was deleted unconditionally on the way out of `generate`, so
+a failure **during the restore** destroyed the only surviving copy and left
+`previews/` empty. Three separate places deleted the backup and none of them
+checked whether the restore had finished.
+
+That is the honest starting point for this decision: a restore is a sequence of
+renames, a rename can fail for reasons that have nothing to do with this program
+— a full disk, a revoked permission, a scanner holding a handle — and no
+ordering makes an operation that cannot complete complete. Atomicity is not
+available. Pretending otherwise is how the second defect got written.
+
+### Decision
+
+**The guarantee is durability, and it is stated as such.** Three outcomes, not
+two:
+
+1. the new set is published;
+2. publication failed and the previous set is restored byte for byte;
+3. publication failed and the restore could not finish — in which case every
+   file of the previous set is in `previews/` or in `previews/.rollback/`, the
+   backup is not deleted, the error names the directory holding the data, and
+   the next invocation finishes the restore.
+
+Outcome 3 is not atomic and is not described as though it were. The directory is
+temporarily incomplete; nothing is lost.
+
+**A backup is deleted in exactly two places**, both of which are reached only
+after the thing they conclude has provably finished: after publication has
+placed every file, and after a restore has moved every file back. The
+unconditional `rmtree` in `generate`'s `finally` is gone.
+
+**A pre-existing backup is never overwritten or blindly removed.**
+`resolve_pending_rollback` runs before anything else in `generate`, and
+`_publish` refuses outright if one is still there. The single exception is a
+backup directory that is empty *and* has no journal: it holds nothing
+recoverable, and that is checked rather than assumed.
+
+**The phase is journalled, and there are three of them.**
+`previews/.rollback/rollback.json` records how far the operation has got,
+because each phase forbids something the previous one required:
+
+| Phase | State of `previews/` | What the undo may do |
+|---|---|---|
+| `moving_aside` | part of the previous set is still here; nothing new placed | move back only — **delete nothing** |
+| `placing` | every old file is in the backup, so anything here is new | delete those, then advance to `restoring` |
+| `restoring` | the deletion is over; files here are recovered ones | move back only — **delete nothing** |
+
+The third phase is not a refinement, it is the fix for a second data loss. With
+only two phases, a restore interrupted half-way through moving files back left
+the journal saying `placing` — and `placing` and `restoring` are
+indistinguishable from the directory contents alone, since both leave
+publishable files sitting in it. Resuming therefore re-ran the deletion and
+removed exactly the files that had just been recovered, which were no longer in
+the backup either, having already left it. Five files in, three files out.
+
+So `restoring` is written **after the last deletion and before the first move
+back**, and its undo never deletes. That single ordering is what makes a resume
+safe, and it is why the journal is a state machine rather than a flag.
+
+Two properties make resuming sound. Moving a file back is idempotent — each
+move takes one file out of the backup, so a repeated call continues with
+whatever is left, and a file is always in the backup or in the directory, never
+neither. And if writing `restoring` fails, nothing has moved yet: the phase on
+disk is still `placing`, the previous set is whole in the backup, and a resume
+re-runs the deletion (finding nothing left to delete) and retries the
+transition.
+
+A journal this build cannot read is a refusal, never a default. The phase
+decides which files get deleted, so guessing it is worse than doing nothing.
+
+### Considered and rejected: publishing by directory rename
+
+Build `previews.new`, rename `previews` to `previews.old`, rename `previews.new`
+to `previews`, drop `previews.old`. Two renames instead of a dozen, and the
+suggestion is a good one. It was rejected on three grounds.
+
+**Windows holds directories.** A directory rename fails while any handle is open
+to the directory or to a file inside it. The entire point of this stage is that
+a person opens these previews in a video player, so the swap would fail exactly
+when the feature is being used. A per-file rename fails only for the file
+actually held, and the restore then puts everything back.
+
+**It is not atomic either.** Between the two renames there is no `previews`
+directory at all. A crash there leaves the run without a directory
+`RunWorkspace` created and that both `review` and the manifest's stage record
+reference — a worse state than an incomplete one, and one no later invocation
+could tell apart from a run that had never been previewed.
+
+**Same-filesystem renames are already guaranteed.** Keeping `.staging` and
+`.rollback` inside `previews/` is what makes every move a rename on one
+filesystem on both platforms, which is why the restore needs no space and cannot
+fail for want of any. Making them siblings of `previews/` under the run
+directory would preserve that too, and buys nothing else.
+
+### Consequences
+
+- A failed `--force` still costs nothing in the common case: the previous
+  previews are restored and still pass `verify_previews`.
+- A failed restore costs an incomplete directory and a message, not data. The
+  operator is told which directory holds the files, and `preview` finishes the
+  job on the next run — from any point, however many times it was interrupted.
+- Recovery is asserted by calling `resolve_pending_rollback` directly, never
+  through `generate`. A second `generate` publishes a fresh set that is complete
+  and verifiable whether or not anything was recovered, so it cannot tell
+  recovery from replacement; the test that did go through `generate` passed over
+  the resume defect for exactly that reason.
+- `PreviewRollbackError` exists so this is distinguishable from an ordinary
+  render failure. An ordinary one can just be retried; this one means files are
+  sitting somewhere other than where they belong.
+- The previews directory can legitimately contain a `.rollback` subdirectory
+  between runs. Nothing downstream scans for extra files — `require_previews`
+  reads the index and the names in it — so a pending backup does not make a
+  complete set look invalid.
+- `review` does not resolve a pending backup. It must not mutate the previews
+  directory, so it fails verification with a message pointing at `preview`,
+  which is the command that owns those files.

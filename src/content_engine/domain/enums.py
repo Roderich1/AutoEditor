@@ -16,6 +16,8 @@ class RunStatus(StrEnum):
     FAILED_AUDIO = "FAILED_AUDIO"
     FAILED_TRANSCRIPTION = "FAILED_TRANSCRIPTION"
     FAILED_ANALYSIS = "FAILED_ANALYSIS"
+    FAILED_PREVIEW = "FAILED_PREVIEW"
+    FAILED_REVIEW = "FAILED_REVIEW"
     FAILED_RENDER = "FAILED_RENDER"
 
 
@@ -26,6 +28,10 @@ class RunStage(StrEnum):
     AUDIO = "audio"
     TRANSCRIPTION = "transcription"
     ANALYSIS = "analysis"
+    #: CE-034. Low-cost proxies, so a person can watch what was proposed.
+    PREVIEW = "preview"
+    #: CE-035 to CE-039. The human decisions taken over those proxies.
+    REVIEW = "review"
     RENDER = "render"
 
 
@@ -163,3 +169,52 @@ class BoundaryAnchor(StrEnum):
     WORD_START = "word_start"
     WORD_END = "word_end"
     UNCHANGED = "unchanged"
+
+
+class ReviewDecisionType(StrEnum):
+    """What a person decided about one candidate.
+
+    Three outcomes, and each one implies a different record. An approval keeps
+    the interval it was shown, an edit replaces it, and a rejection has no
+    approved interval to keep at all. ``domain.review`` gives each its own
+    model and discriminates on this value, so a rejection cannot be handed the
+    fields of an approval.
+    """
+
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EDITED = "edited"
+
+
+class EditorialReason(StrEnum):
+    """Why a person rejected a candidate the pipeline was willing to show.
+
+    Deliberately *not* ``RejectionReason``. That enum records why the
+    deterministic rules discarded a proposal -- an inverted interval, a score
+    under the threshold, a duplicate of something better -- and every one of its
+    members describes a machine decision made before any person saw anything.
+    This one records an editorial judgement about material that passed all of
+    those rules. Sharing one enum between the two would make the funnel and the
+    review data uncomparable: ``too_short`` would mean "below
+    min_duration_seconds" in one row and "not worth posting" in the next, and
+    CE-057's rejection metrics could not tell the prompt's failures from the
+    operator's taste.
+
+    ``OTHER`` is the escape hatch and the only member that carries no meaning on
+    its own, which is why the decision model requires a free-text detail beside
+    it.
+    """
+
+    POOR_CONTEXT = "poor_context"
+    WEAK_HOOK = "weak_hook"
+    NOT_USEFUL = "not_useful"
+    BAD_BOUNDARY = "bad_boundary"
+    DUPLICATE = "duplicate"
+    TOO_LONG = "too_long"
+    TOO_SHORT = "too_short"
+    INCORRECT_TRANSCRIPT = "incorrect_transcript"
+    OTHER = "other"
+
+
+#: The reason whose whole content is the free text beside it.
+REASON_REQUIRING_DETAIL = EditorialReason.OTHER

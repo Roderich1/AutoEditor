@@ -21,6 +21,8 @@ uv run content-engine run sample.mp4 --config configs/fast.toml
 uv run content-engine transcribe RUN_ID --config configs/fast.toml
 uv run content-engine analyze RUN_ID                      # llama a Gemini
 uv run content-engine analyze RUN_ID --fixture fixture.json   # reproduce un archivo
+uv run content-engine preview RUN_ID                      # proxies 540x960
+uv run content-engine review RUN_ID                       # decisión humana
 ```
 
 `doctor --require-ai` convierte las credenciales y el modelo de análisis en
@@ -59,6 +61,118 @@ Un fallo real del proveedor deja el run en `FAILED_ANALYSIS` (código 5) y no
 escribe ningún artefacto. Los reintentos se limitan a fallos transitorios
 —timeout, 429, 5xx— con tres intentos y espera acotada; un 400, 401 o 403 no se
 reintenta (ADR-027).
+
+## Evaluación humana
+
+Ni `preview` ni `review` leen `GEMINI_API_KEY`, ni abren un socket, ni vuelven a
+llamar al proveedor: trabajan sobre candidatos ya generados.
+
+### `preview` — proxies de bajo costo (CE-034)
+
+```console
+uv run content-engine preview RUN_ID [--config PATH] [--force]
+```
+
+Un proxy por candidato seleccionado, en `previews/candidate_<id>.mp4`: 540x960,
+H.264 y AAC, `veryfast` con CRF 30. El encuadre completo del origen se ajusta
+dentro del marco vertical y se rellena con negro, con `setsar=1`, así que la
+imagen no se estira ni se recorta —en una grabación técnica lo importante suele
+estar en una esquina de la terminal—. Sin subtítulos y sin estilo final: eso es
+CE-040 a CE-045.
+
+FFmpeg se invoca con una lista de argumentos, nunca con `shell=True`. Cada
+codificación ocurre en `previews/.staging/` y se verifica allí con ffprobe
+—dimensiones, códecs y duración contra una tolerancia documentada de 1,0 s—;
+nada se mueve a `previews/` hasta que el conjunto completo pasa.
+
+La publicación es **duradera, no atómica**, y la diferencia importa (ADR-031).
+El conjunto publicado se aparta a `previews/.rollback/` antes de colocar el
+nuevo, así que un fallo al publicar restaura el anterior byte a byte. Si falla la
+restauración misma —un disco lleno, un permiso revocado—, ninguna operación
+puede completarse por decreto: lo que se garantiza es que **no se pierde nada**.
+Cada archivo del conjunto anterior queda en `previews/` o en
+`previews/.rollback/`, el respaldo no se borra mientras la restauración esté
+incompleta, el error nombra el directorio que contiene los datos, y la siguiente
+ejecución de `preview` termina la restauración.
+
+Terminarla es seguro desde cualquier punto porque `previews/.rollback/rollback.json`
+registra la fase, y son tres:
+
+| Fase | Estado de `previews/` | Qué puede hacer el deshacer |
+|---|---|---|
+| `moving_aside` | parte del conjunto anterior sigue aquí; nada nuevo colocado | solo mover de vuelta — **no borra nada** |
+| `placing` | todo lo anterior está en el respaldo; lo que hay aquí es nuevo | borrar eso y pasar a `restoring` |
+| `restoring` | el borrado terminó; lo que hay aquí ya está recuperado | solo mover de vuelta — **no borra nada** |
+
+`restoring` se escribe **después del último borrado y antes del primer archivo
+devuelto**. Sin esa tercera fase, una restauración interrumpida a mitad se
+reanudaba como si el directorio siguiera lleno de archivos nuevos y borraba
+justamente los que ya había recuperado. Mover un archivo de vuelta es
+idempotente, así que reanudar continúa con lo que quede; y si falla la escritura
+de la fase, nada se ha movido todavía y una ejecución posterior repite sin
+riesgo. Un respaldo cuyo diario falte o no se pueda interpretar se rechaza sin
+tocarlo, porque la fase decide qué archivos se eliminan y adivinarla borraría los
+que no tienen otra copia.
+
+`previews/index.json` describe cada archivo con su intervalo, su duración
+esperada y medida, sus dimensiones, sus códecs, su SHA-256 y su tamaño, junto al
+fingerprint del análisis y al digest del origen del que se cortó. Un preview
+borrado, truncado, editado o renombrado impide la reutilización, igual que un
+cambio de dimensiones, de reglas, de análisis o de origen.
+
+Si `preview.enabled = false`, el comando se rechaza con código 2 en lugar de
+avanzar: dejar un run en `READY_FOR_REVIEW` con un directorio vacío sería
+afirmar previews que nunca se generaron. Si el análisis no seleccionó ningún
+candidato, el comando avisa, escribe un índice vacío y honesto, y el run avanza
+igualmente.
+
+### `review` — decisión editorial (CE-035 a CE-039)
+
+```console
+uv run content-engine review RUN_ID [--config PATH] [--force]
+```
+
+Un candidato a la vez, con su posición, rank, ID, topic, categoría, inicio, fin,
+duración, total, las seis puntuaciones componentes, hook, resumen, motivo y la
+ruta de su preview. Después, cinco teclas:
+
+```text
+[A] Approve      aprueba el intervalo propuesto
+[R] Reject       rechaza, con motivo estructurado opcional
+[E] Edit range   corrige inicio y fin
+[S] Skip         no decide nada; el candidato vuelve a aparecer
+[Q] Quit/save    termina conservando lo ya decidido
+```
+
+Cada decisión explícita se guarda de forma atómica **antes** de mostrar el
+siguiente candidato, así que una terminal cerrada no cuesta nada de lo ya
+decidido. `S` no crea una decisión falsa: ausencia significa «todavía sin
+decidir», que es lo que permite reanudar exactamente lo pendiente. `Q`, EOF y
+Ctrl+C terminan la sesión sin marcar el run como fallido. El run llega a
+`REVIEWED` solo cuando cada candidato seleccionado tiene una decisión explícita.
+
+`review/decisions.json` está versionado y es estricto. Hay tres tipos de
+decisión discriminados por `decision`, no un modelo con campos opcionales
+(ADR-029): una aprobación conserva el intervalo original, una edición debe
+diferir realmente de él, y un rechazo **no tiene límites finales** —no se aprobó
+ningún intervalo, y fingirlos produciría una fila que se lee como un clip
+aprobado—. El motivo de rechazo usa un enum propio, `EditorialReason`, separado
+del `RejectionReason` del pipeline: uno describe por qué el sistema descartó una
+propuesta, el otro un juicio editorial sobre material que pasó todas las reglas.
+`other` es el único motivo que exige detalle libre, porque por sí solo no dice
+nada.
+
+Una edición humana no está limitada por `min_duration_seconds` ni
+`max_duration_seconds`: esa política acota lo que el modelo puede proponer, y
+quien mira el preview es la autoridad sobre dónde termina su clip. Solo se exige
+que sea finita, ordenada y dentro del origen.
+
+`--force` advierte cuántas decisiones va a descartar antes de preguntar nada, y
+no escribe hasta la primera decisión nueva, de modo que una sesión forzada y
+abandonada de inmediato conserva las anteriores. Sobre un run `REVIEWED` devuelve
+el estado a `READY_FOR_REVIEW`: es la única transición hacia atrás de la máquina
+de estados, y existe porque un run cuyas decisiones acaban de borrarse no puede
+seguir afirmando una revisión terminada (ADR-030).
 
 ## Configuración
 
@@ -112,6 +226,8 @@ Cada ejecución vive en `workspace/runs/RUN_ID` y es un experimento:
   `config.effective.json`
 - `analysis/` — `chunks.json`, `candidates.raw.json`, `candidates.json` y
   `config.effective.json`
+- `previews/` — `candidate_<id>.mp4`, `index.json` y `config.effective.json`
+- `review/` — `decisions.json` y `config.effective.json`
 
 ### Dos niveles de configuración
 
@@ -122,6 +238,8 @@ Un run guarda dos configuraciones, deliberadamente:
 | `config.effective.json` (raíz) | La configuración con la que se creó el experimento |
 | `transcript/config.effective.json` | Lo que la etapa de transcripción ejecutó realmente |
 | `analysis/config.effective.json` | Lo que la etapa de análisis ejecutó realmente |
+| `previews/config.effective.json` | Lo que la etapa de preview ejecutó realmente |
+| `review/config.effective.json` | Sobre qué material se tomaron las decisiones |
 
 Difieren siempre que `transcribe --config` apunta a otro perfil, algo legítimo
 —es como se compara un modelo contra otro sobre el mismo audio— pero nunca
@@ -169,6 +287,12 @@ escriben de forma atómica, en UTF-8 con saltos LF y sin BOM, por lo que el mism
 código produce los mismos bytes en Windows 11 y Ubuntu 24.04. Un fallo de
 escritura no deja ni un archivo parcial ni un `.tmp`. `.gitattributes` aplica la
 misma política al texto del propio repositorio.
+
+La única excepción a la comparabilidad byte a byte son los `.mp4` de preview:
+x264 incrusta su propia identidad de compilación y su salida no es determinista
+entre versiones. La garantía para ellos es que un run sin cambios no reescribe
+nada, no que dos máquinas produzcan bytes idénticos. Son también los únicos
+artefactos desechables.
 
 Ningún artefacto puede contener `NaN`, `Infinity` ni `-Infinity`: no son JSON
 estándar y no describen duraciones, posiciones ni probabilidades. Se rechazan en

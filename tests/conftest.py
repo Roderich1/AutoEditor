@@ -212,6 +212,22 @@ def raw_candidate(start: float, end: float, hook: int = 92, **overrides: Any) ->
     return RawCandidate(**payload)
 
 
+def weak_candidate(start: float, end: float, **overrides: Any) -> RawCandidate:
+    """A proposal no deterministic rule can rescue: it scores 10 and min_score is 65."""
+    payload: dict[str, Any] = {
+        "scores": CandidateScores(
+            hook=10,
+            value=10,
+            context_independence=10,
+            clarity=10,
+            engagement_potential=10,
+            relevance=10,
+        )
+    }
+    payload.update(overrides)
+    return raw_candidate(start, end, **payload)
+
+
 def proposals_of(
     chunk: TranscriptChunk,
     candidates: Sequence[RawCandidate],
@@ -379,3 +395,163 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
         tmp_path.joinpath("fixture.json"), analysis_fixture([DEFAULT_BATCH])
     )
     return Harness(run_path.name, run_path, fixture_path, tmp_path)
+
+
+# --- the preview harness -----------------------------------------------------
+#
+# Preview generation runs a real adapter against a fake encoder: the argument
+# list is built by the production code and asserted, while the "encode" writes a
+# deterministic placeholder and remembers what ffprobe should later say about
+# it. That keeps the unit suite free of FFmpeg without letting the command under
+# test be a stand-in for itself. Real FFmpeg is exercised in tests/integration.
+
+PREVIEW_WIDTH = 540
+PREVIEW_HEIGHT = 960
+
+
+@dataclass
+class FakeMedia:
+    """A fake encoder and the ffprobe answers about what it produced."""
+
+    width: int = PREVIEW_WIDTH
+    height: int = PREVIEW_HEIGHT
+    audio: bool = True
+    calls: list[list[str]] = field(default_factory=list)
+    probed: list[Path] = field(default_factory=list)
+    #: Output basenames the encoder must refuse, so a failure can be placed.
+    fail_for: set[str] = field(default_factory=set)
+    #: Output basename -> duration ffprobe will report, overriding the request.
+    measured: dict[str, float] = field(default_factory=dict)
+    #: Output basename -> the dimensions ffprobe will report.
+    dimensions: dict[str, tuple[int, int]] = field(default_factory=dict)
+    #: What ffprobe will name the video codec, so a wrong encode can be placed.
+    video_codec: str = "h264"
+    _known: dict[Path, dict[str, Any]] = field(default_factory=dict)
+
+    def ffmpeg(self, arguments: Sequence[str], timeout: float | None = None) -> Any:
+        from content_engine.domain.exceptions import ExternalToolError
+
+        self.calls.append(list(arguments))
+        output = Path(arguments[-1])
+        if output.name in self.fail_for:
+            raise ExternalToolError(f"ffmpeg failed: synthetic refusal of {output.name}")
+        requested = float(arguments[arguments.index("-t") + 1])
+        width, height = self.dimensions.get(output.name, (self.width, self.height))
+        duration = self.measured.get(output.name, requested)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(f"preview:{output.name}:{requested:.3f}".encode())
+        streams: list[dict[str, Any]] = [
+            {
+                "codec_type": "video",
+                "codec_name": self.video_codec,
+                "width": width,
+                "height": height,
+                "avg_frame_rate": "30/1",
+            }
+        ]
+        if self.audio:
+            streams.append(
+                {
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "sample_rate": "44100",
+                    "channels": 2,
+                }
+            )
+        self._known[output.resolve()] = {
+            "streams": streams,
+            "format": {"duration": f"{duration:.3f}", "format_name": "mov,mp4,m4a"},
+        }
+        return fake_process(arguments)
+
+    def ffprobe(self, arguments: Sequence[str], timeout: float | None = None) -> Any:
+        from content_engine.domain.exceptions import ExternalToolError
+
+        path = Path(arguments[-1])
+        self.probed.append(path)
+        if path.suffix == ".wav":
+            payload: dict[str, Any] = {
+                "streams": [{"codec_type": "audio", "codec_name": "pcm_s16le"}],
+                "format": {"duration": str(AUDIO_DURATION), "format_name": "wav"},
+            }
+            return fake_process(arguments, json.dumps(payload))
+        known = self._known.get(path.resolve())
+        if known is None:
+            raise ExternalToolError(f"ffprobe failed: {path} was never produced")
+        return fake_process(arguments, json.dumps(known))
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeMedia:
+        monkeypatch.setattr("content_engine.adapters.media.preview.run_command", self.ffmpeg)
+        monkeypatch.setattr("content_engine.adapters.media.ffprobe.run_command", self.ffprobe)
+        return self
+
+    def forget(self, path: Path) -> None:
+        """Make ffprobe deny a file it previously described."""
+        self._known.pop(path.resolve(), None)
+
+
+@pytest.fixture
+def media(monkeypatch: pytest.MonkeyPatch) -> FakeMedia:
+    return FakeMedia().install(monkeypatch)
+
+
+@dataclass
+class Analysed:
+    """An analysed run plus the pieces preview and review need from it."""
+
+    harness: Harness
+    media: FakeMedia
+
+    @property
+    def run_id(self) -> str:
+        return self.harness.run_id
+
+    @property
+    def run_path(self) -> Path:
+        return self.harness.run_path
+
+    @property
+    def previews(self) -> Path:
+        return self.run_path.joinpath("previews")
+
+    @property
+    def review(self) -> Path:
+        return self.run_path.joinpath("review")
+
+    def manifest(self) -> dict[str, Any]:
+        return self.harness.manifest()
+
+    def candidates(self) -> list[dict[str, Any]]:
+        payload: list[dict[str, Any]] = self.harness.candidates()["candidates"]
+        return payload
+
+    def analysis_fingerprint(self) -> str:
+        fingerprint: str = self.manifest()["stages"]["analysis"]["fingerprint"]
+        return fingerprint
+
+    def preview_snapshot(self) -> dict[str, bytes]:
+        return {
+            path.name: path.read_bytes()
+            for path in sorted(self.previews.iterdir())
+            if path.is_file()
+        }
+
+    def decisions(self) -> dict[str, Any]:
+        payload: dict[str, Any] = json.loads(
+            self.review.joinpath("decisions.json").read_text(encoding="utf-8")
+        )
+        return payload
+
+
+def analyse(harness: Harness, *arguments: str) -> Any:
+    """Run the analyze command over the harness fixture."""
+    return CliRunner().invoke(
+        cli.app, ["analyze", harness.run_id, "--fixture", str(harness.fixture_path), *arguments]
+    )
+
+
+@pytest.fixture
+def analysed(harness: Harness, media: FakeMedia) -> Analysed:
+    result = analyse(harness)
+    assert result.exit_code == EXIT_SUCCESS, cli_output(result)
+    return Analysed(harness, media)

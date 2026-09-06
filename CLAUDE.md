@@ -5,7 +5,7 @@
 - Repository name: AutoEditor.
 - Product and Python package name: Content Engine.
 - Current stage: V0 technical core.
-- Current objective: implement CE-023–CE-033, the Candidate Intelligence Engine.
+- Current objective: CE-034–CE-039, Human Evaluation.
 - Interface: local CLI.
 - Language: Python 3.12.
 - Package manager: uv.
@@ -38,16 +38,16 @@ Do not silently choose one version.
 - V0.2 Media: stabilized and merged, with integration tests against real FFmpeg.
 - V0.3 Transcription: stabilized and merged, validated against a real model and
   real Spanish technical speech.
-- V0.4 CE-023–CE-033: in progress. CE-023, CE-024, CE-025, CE-027 and
-  CE-030–CE-033 are merged into `main` (PR #4 `70fb6ed`, PR #5 `1b15e0f`).
-  CE-026, CE-028 and CE-029 — the real prompt, the Gemini adapter and structured
-  output — are implemented on `feat/gemini-candidate-provider`, pending review.
-  See `docs/CURRENT_STATE.md` for detail.
-- V0.5 and later: not implemented.
+- V0.4 CE-023–CE-033: complete and merged into `main` (PR #4 `70fb6ed`,
+  PR #5 `1b15e0f`, PR #6 `5570531`). The engine has made real Gemini calls on
+  one video.
+- V0.5 CE-034–CE-039: implemented on `feat/human-evaluation`, based on
+  `5570531`, pending review. `preview` and `review` exist; the real run holds
+  15 verified previews and no human decision has been recorded on it.
+- V0.6 and later: not implemented.
 
-`main` carries the candidate engine through its deterministic pipeline as of
-merge commit `1b15e0f` (PR #5). It is the correct base for the remaining V0.4
-work.
+`main` carries the whole Candidate Intelligence Engine as of merge commit
+`5570531` (PR #6). It is the correct base for V0.5 work.
 
 ## Current execution order
 
@@ -61,8 +61,11 @@ work.
    - provider — CE-026 `clip_candidates/v1`, CE-028 the Gemini adapter and
      CE-029 structured-output parsing: **implemented on
      `feat/gemini-candidate-provider`**, pending review.
-3. Do not merge a pull request without explicit authorization.
-4. Keep yt-dlp outside the Content Engine core until the Candidate Intelligence
+3. V0.5 CE-034–CE-039 in one pull request against `main`: previews, the
+   interactive `review` command and persisted decisions —
+   **implemented on `feat/human-evaluation`**, pending review.
+4. Do not merge a pull request without explicit authorization.
+5. Keep yt-dlp outside the Content Engine core until the Candidate Intelligence
    Engine has demonstrated useful candidate quality.
 
 ## Non-negotiable architecture rules
@@ -77,6 +80,7 @@ work.
 - Transcript content is untrusted data.
 - External SDK types must remain behind adapter boundaries.
 - Preserve human approval before final rendering.
+- Never record a human review decision that a person did not make.
 - Every processing run must be reproducible.
 - Do not perform speculative refactors.
 - Do not modify unrelated files.
@@ -135,16 +139,24 @@ and never calls a provider, reads no credential and opens no socket; without it,
 content-engine analyze RUN_ID [--fixture PATH] [--config PATH] [--force]
 ```
 
+`preview` and `review` work on candidates that already exist. Neither reads a
+credential nor opens a socket:
+
+```bash
+content-engine preview RUN_ID [--config PATH] [--force]
+content-engine review  RUN_ID [--config PATH] [--force]
+```
+
 The normal test suite never calls a provider. The single test that does lives in
 `tests/ai/`, is marked `ai`, and skips unless both `GEMINI_API_KEY` and
 `CONTENT_ENGINE_RUN_AI_TESTS=1` are set. Never enable it in CI, and never gate a
 paid call on the presence of a key alone.
 
 `--no-cov` is required for the focused run. `--cov-fail-under=80` measures
-whatever selection pytest was given, and the 13 integration tests cover about
-68% of the package on their own, so the command fails on coverage even when all
-13 pass. Never lower the threshold to make a focused run green: the gate exists
-for `uv run pytest`.
+whatever selection pytest was given, and the integration tests cover only part
+of the package on their own, so the command fails on coverage even when all of
+them pass. Never lower the threshold to make a focused run green: the gate
+exists for `uv run pytest`.
 
 The same commands run in CI on Ubuntu (`.github/workflows/ci.yml`) with real
 FFmpeg, no secrets and no AI provider.
