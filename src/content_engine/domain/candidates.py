@@ -6,12 +6,19 @@ describe what an analyzer proposed and what the deterministic rules made of it.
 Two ideas shape everything here.
 
 **A record must not be able to lie about what happened to it.** A proposal
-refused before it was ever measured has no interval, no boundary and no score,
-because it never earned them. Rather than filling those fields with invented
-values, such a proposal is a different type: ``InvalidCandidate`` keeps the
-provider's numbers verbatim and says why they were refused.
-``ValidatedCandidate`` is the record of something that got far enough to be
-scored, and every one of its fields is therefore real.
+refused before it was ever measured has no interval, no boundary and no total
+score, because it never earned them. Rather than filling those fields with
+invented values, such a proposal is a different type: ``InvalidCandidate``
+preserves the parsed proposal, including the six ratings the provider supplied,
+and says why it was refused. ``ValidatedCandidate`` is the record of something
+that got far enough to be scored, and every one of its fields is therefore real.
+
+Which reasons a record may cite follows from the same idea. A phase that never
+ran cannot have decided anything, so ``InvalidCandidate`` is limited to the
+reasons CE-030 can reach, and a scored record to the one terminal reason its
+status allows. Without that rule a duplicate could be filed as a plain
+rejection and counted under the wrong heading, with every total still adding
+up.
 
 **Untrusted output is preserved, not repaired.** ``RawCandidate`` accepts any
 finite pair of timestamps, including negative, zero-length and inverted ones. A
@@ -28,6 +35,10 @@ from datetime import datetime
 from pydantic import ConfigDict, Field, model_validator
 
 from content_engine.domain.enums import (
+    BELOW_SCORE_REASON,
+    PRE_SCORING_REASONS,
+    TERMINAL_REASONS,
+    TOP_N_REASON,
     BoundaryAnchor,
     CandidateStatus,
     ClipCategory,
@@ -48,9 +59,15 @@ CANDIDATES_SCHEMA_VERSION = 1
 #: far above the error these sums accumulate.
 TIME_EPSILON = 1e-6
 
+#: Totals are quantised to two decimals and an overlap is a ratio of two sums of
+#: floats. Neither survives a JSON round trip as an exact bit pattern, so the
+#: records are compared to the arithmetic that produced them, not equated to it.
+SCORE_EPSILON = 1e-6
+IOU_EPSILON = 1e-6
 
-def _close(left: float, right: float) -> bool:
-    return abs(left - right) <= TIME_EPSILON
+
+def _close(left: float, right: float, tolerance: float = TIME_EPSILON) -> bool:
+    return abs(left - right) <= tolerance
 
 
 class _Artifact(_Model):
@@ -199,19 +216,39 @@ class RawCandidate(_Artifact):
 class InvalidCandidate(_Artifact):
     """A proposal refused by CE-030, before it could be snapped or scored.
 
-    It holds the provider's proposal verbatim and the reasons it was refused,
-    and nothing else. There is no ``start``, no ``duration`` and no ``boundary``,
-    because it never reached the phase that would have produced them. Optional
-    versions of those fields would let a caller ask a question that has no
-    answer; filling them with plausible values would make the diagnosis record
-    fiction.
+    It holds the parsed proposal and the reasons it was refused, and nothing
+    else. There is no ``start``, no ``duration``, no ``boundary`` and no
+    ``total_score``, because it never reached the phase that would have produced
+    them — though ``proposed.scores`` still carries the six ratings the provider
+    supplied, since those arrived with the proposal rather than being computed
+    from it. Optional versions of the missing fields would let a caller ask a
+    question that has no answer; filling them with plausible values would make
+    the diagnosis record fiction.
+
+    The truly verbatim response is ``CandidateBatch.raw_response``, which the
+    port keeps exactly as the provider sent it. ``proposed`` is what survived
+    parsing: unmodified, but structured.
+
+    More than one reason is allowed, because a single CE-030 pass can find more
+    than one defect in the same proposal. Every one of them must be a reason
+    that pass could actually have reached.
     """
 
     id: str = Field(min_length=1)
     chunk_id: str = Field(min_length=1)
-    #: Exactly what the analyzer returned, unmodified.
+    #: The proposal as parsed, with no field altered.
     proposed: RawCandidate
     rejection_reasons: list[RejectionReason] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_phase(self) -> InvalidCandidate:
+        later = [reason for reason in self.rejection_reasons if reason not in PRE_SCORING_REASONS]
+        if later:
+            raise ValueError(
+                f"candidate {self.id} was refused before scoring but cites "
+                f"{', '.join(sorted(later))}, which can only be decided after a score exists"
+            )
+        return self
 
 
 class BoundaryAdjustment(_Artifact):
@@ -341,22 +378,71 @@ class ValidatedCandidate(_Artifact):
         if self.status is CandidateStatus.SUGGESTED:
             if self.rejection_reasons:
                 raise ValueError(f"candidate {self.id} is suggested but carries rejection reasons")
-        else:
-            if not self.rejection_reasons:
-                raise ValueError(f"candidate {self.id} is {self.status} without a reason")
-            if self.rank is not None:
-                raise ValueError(f"candidate {self.id} is ranked but was not selected")
+            return self
+
+        if not self.rejection_reasons:
+            raise ValueError(f"candidate {self.id} is {self.status} without a reason")
+        if self.rank is not None:
+            raise ValueError(f"candidate {self.id} is ranked but was not selected")
+
+        # A terminal outcome happened once, so it has one cause, so it belongs
+        # to exactly one counter. A list of two would leave the funnel free to
+        # file the same candidate under whichever heading suited it.
+        if len(self.rejection_reasons) != 1:
+            raise ValueError(
+                f"candidate {self.id} is {self.status} with {len(self.rejection_reasons)} "
+                "reasons; a terminal outcome has exactly one"
+            )
+        allowed = TERMINAL_REASONS[self.status]
+        reason = self.rejection_reasons[0]
+        if reason not in allowed:
+            raise ValueError(
+                f"candidate {self.id} is {self.status} citing {reason}, which is not a "
+                f"terminal reason for that status; expected one of {', '.join(sorted(allowed))}"
+            )
         return self
 
 
 class DeduplicationEvent(_Artifact):
-    """One candidate dropped for covering the same moment as a better one."""
+    """One candidate dropped for covering the same moment as a better one.
+
+    The event restates facts that are already on both candidates: their totals,
+    and the overlap between their intervals. That is deliberate — it is the
+    audit record of a decision — but it means the event can disagree with them,
+    so ``CandidateCollection`` checks every field against the two records it
+    names. What cannot be checked there is checked here: an event naming the
+    same candidate on both sides describes no decision at all.
+    """
 
     kept_id: str = Field(min_length=1)
     dropped_id: str = Field(min_length=1)
     iou: float = Field(ge=0, le=1)
     kept_score: float = Field(ge=0, le=100)
     dropped_score: float = Field(ge=0, le=100)
+
+    @model_validator(mode="after")
+    def validate_sides(self) -> DeduplicationEvent:
+        if self.kept_id == self.dropped_id:
+            raise ValueError(
+                f"deduplication event names {self.kept_id} as both kept and dropped; "
+                "a candidate cannot deduplicate itself"
+            )
+        return self
+
+
+def _interval_iou(first: ValidatedCandidate, second: ValidatedCandidate) -> float:
+    """Intersection over union of two candidate intervals.
+
+    Written here rather than imported from CE-032 on purpose: this is the
+    definition the record is held to, and sharing a helper with the algorithm
+    would let a change in how deduplication decides silently redefine what its
+    own audit trail claims.
+    """
+    overlap = min(first.end, second.end) - max(first.start, second.start)
+    if overlap <= 0:
+        return 0.0
+    union = (first.end - first.start) + (second.end - second.start) - overlap
+    return overlap / union
 
 
 class CandidateCounts(_Artifact):
@@ -377,6 +463,12 @@ class CandidateCounts(_Artifact):
     The pipeline order is what makes them exclusive: the minimum-score filter
     runs before deduplication, so a candidate below the threshold is never also
     counted as a duplicate, and the top-N cut runs last over what is left.
+
+    Every one of these is read back off the records by ``CandidateCollection``,
+    not merely required to add up. A sum that balances can still have two
+    categories swapped, and the difference between "the prompt scores badly" and
+    "the cap is too tight" is exactly the kind of thing this file exists to
+    keep honest.
     """
 
     proposed: int = Field(ge=0)
@@ -440,42 +532,161 @@ class CandidateCollection(_Artifact):
         if duplicates:
             raise ValueError(f"identifier appears more than once: {', '.join(duplicates)}")
 
-        known = set(scored_ids)
-        for event in self.deduplication_events:
-            unknown = {event.kept_id, event.dropped_id} - known
-            if unknown:
-                raise ValueError(
-                    f"deduplication event references unknown candidates: "
-                    f"{', '.join(sorted(unknown))}"
-                )
+        scored = {candidate.id: candidate for candidate in (*self.candidates, *self.rejected)}
+        self._validate_deduplication(scored)
 
-        if self.counts.selected != len(self.candidates):
-            raise ValueError(
-                f"counts.selected is {self.counts.selected} for "
-                f"{len(self.candidates)} selected candidates"
-            )
-        if self.counts.invalid != len(self.invalid):
-            raise ValueError(
-                f"counts.invalid is {self.counts.invalid} for "
-                f"{len(self.invalid)} invalid candidates"
-            )
-        if self.counts.deduplicated != len(self.deduplication_events):
-            raise ValueError(
-                f"counts.deduplicated is {self.counts.deduplicated} for "
-                f"{len(self.deduplication_events)} deduplication events"
-            )
-        dropped_after_scoring = (
-            self.counts.below_min_score + self.counts.deduplicated + self.counts.not_in_top_n
+        below_min_score = [
+            candidate
+            for candidate in self.rejected
+            if candidate.rejection_reasons == [BELOW_SCORE_REASON]
+        ]
+        not_in_top_n = [
+            candidate
+            for candidate in self.rejected
+            if candidate.rejection_reasons == [TOP_N_REASON]
+        ]
+        deduplicated = [
+            candidate
+            for candidate in self.rejected
+            if candidate.status is CandidateStatus.DEDUPLICATED
+        ]
+
+        # Each counter is read off the records rather than balanced against the
+        # others. Checking only that the three sum to len(rejected) would accept
+        # any permutation of them, which is the failure this file is here to
+        # prevent: a duplicate filed as a score failure changes what the funnel
+        # says about the prompt while every total still adds up.
+        for name, counted, records, described in (
+            ("selected", self.counts.selected, self.candidates, "selected candidates"),
+            ("invalid", self.counts.invalid, self.invalid, "invalid candidates"),
+            (
+                "below_min_score",
+                self.counts.below_min_score,
+                below_min_score,
+                "candidates rejected below the minimum score",
+            ),
+            (
+                "deduplicated",
+                self.counts.deduplicated,
+                deduplicated,
+                "deduplicated candidates",
+            ),
+            (
+                "not_in_top_n",
+                self.counts.not_in_top_n,
+                not_in_top_n,
+                "candidates cut by the cap",
+            ),
+        ):
+            if counted != len(records):
+                raise ValueError(f"counts.{name} is {counted} for {len(records)} {described}")
+
+        # counts.deduplicated == len(deduplication_events) needs no check of its
+        # own: _validate_deduplication pairs every deduplicated record with
+        # exactly one event and refuses an event that drops anything else, so
+        # the two are the same number by then.
+        total = (
+            self.counts.invalid
+            + self.counts.below_min_score
+            + self.counts.deduplicated
+            + self.counts.not_in_top_n
+            + self.counts.selected
         )
-        if dropped_after_scoring != len(self.rejected):
-            raise ValueError(
-                f"{dropped_after_scoring} counted as dropped after scoring for "
-                f"{len(self.rejected)} rejected candidates"
-            )
-        total = self.counts.invalid + dropped_after_scoring + self.counts.selected
         if self.counts.proposed != total:
             raise ValueError(
                 f"counts.proposed is {self.counts.proposed} but the terminal outcomes "
                 f"sum to {total}"
             )
         return self
+
+    def _validate_deduplication(self, scored: dict[str, ValidatedCandidate]) -> None:
+        """Hold every event to the two records it names.
+
+        The event exists to make a removal auditable, so an event nobody can
+        check is worse than none: it reads as evidence. Each field is therefore
+        compared against the candidates themselves, and the pipeline order —
+        minimum score, then deduplication, then the top-N cut — says which
+        candidates could have been on either side. A keeper may end up suggested
+        or cut by the cap afterwards, but it can never be one that the score
+        filter had already removed, nor one that deduplication itself dropped.
+        """
+        dropped_by_event: set[str] = set()
+        for event in self.deduplication_events:
+            unknown = {event.kept_id, event.dropped_id} - set(scored)
+            if unknown:
+                raise ValueError(
+                    f"deduplication event references unknown candidates: "
+                    f"{', '.join(sorted(unknown))}"
+                )
+            kept = scored[event.kept_id]
+            dropped = scored[event.dropped_id]
+
+            if dropped.status is not CandidateStatus.DEDUPLICATED:
+                raise ValueError(
+                    f"deduplication event drops {event.dropped_id}, which is not recorded "
+                    f"as deduplicated but as {dropped.status}"
+                )
+            if event.dropped_id in dropped_by_event:
+                raise ValueError(
+                    f"candidate {event.dropped_id} is removed by more than one deduplication event"
+                )
+            dropped_by_event.add(event.dropped_id)
+
+            if kept.status is CandidateStatus.DEDUPLICATED or kept.rejection_reasons == [
+                BELOW_SCORE_REASON
+            ]:
+                raise ValueError(
+                    f"deduplication event keeps {event.kept_id}, which did not survive "
+                    f"deduplication itself: it is recorded as {kept.status} for "
+                    f"{', '.join(sorted(kept.rejection_reasons))}"
+                )
+
+            if not _close(event.kept_score, kept.total_score, SCORE_EPSILON):
+                raise ValueError(
+                    f"deduplication event records kept_score {event.kept_score} for "
+                    f"{event.kept_id}, which scored {kept.total_score}"
+                )
+            if not _close(event.dropped_score, dropped.total_score, SCORE_EPSILON):
+                raise ValueError(
+                    f"deduplication event records dropped_score {event.dropped_score} for "
+                    f"{event.dropped_id}, which scored {dropped.total_score}"
+                )
+            if event.kept_score < event.dropped_score - SCORE_EPSILON:
+                raise ValueError(
+                    f"deduplication event keeps {event.kept_id} at {event.kept_score}, "
+                    f"scored below the {event.dropped_score} of {event.dropped_id}, "
+                    "which it dropped"
+                )
+            if _close(event.kept_score, event.dropped_score, SCORE_EPSILON) and (
+                kept.start,
+                kept.id,
+            ) > (dropped.start, dropped.id):
+                raise ValueError(
+                    f"deduplication event keeps {event.kept_id} over {event.dropped_id} at "
+                    "the same score; a tie is broken by the earlier start and then by the "
+                    f"identifier, which keeps {event.dropped_id}"
+                )
+
+            overlap = _interval_iou(kept, dropped)
+            if not _close(event.iou, overlap, IOU_EPSILON):
+                raise ValueError(
+                    f"deduplication event records iou {event.iou} for {event.kept_id} and "
+                    f"{event.dropped_id}, whose intervals overlap at {overlap}"
+                )
+            if event.iou < self.dedupe_iou:
+                raise ValueError(
+                    f"deduplication event records iou {event.iou} for {event.dropped_id}, "
+                    f"below the deduplication threshold of {self.dedupe_iou}"
+                )
+
+        unevidenced = sorted(
+            candidate.id
+            for candidate in self.rejected
+            if candidate.status is CandidateStatus.DEDUPLICATED
+            and candidate.id not in dropped_by_event
+        )
+        if unevidenced:
+            raise ValueError(
+                f"recorded as deduplicated but no deduplication event removes them: "
+                f"{', '.join(unevidenced)}"
+            )

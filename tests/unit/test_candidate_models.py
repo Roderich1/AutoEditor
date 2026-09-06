@@ -232,16 +232,19 @@ def test_a_deduplicated_candidate_must_also_say_why() -> None:
         _validated(status=CandidateStatus.DEDUPLICATED)
 
 
-def test_a_rejected_candidate_is_kept_with_its_reasons() -> None:
+def test_a_rejected_candidate_is_kept_with_its_reason() -> None:
+    """Nothing is discarded silently, and a scored drop has one cause.
+
+    TOO_LONG and UNGROUNDED are CE-030 findings, so a candidate carrying them
+    never reached scoring and is an InvalidCandidate; see the phase rules in
+    test_candidate_contracts.py.
+    """
     candidate = _validated(
         status=CandidateStatus.REJECTED,
-        rejection_reasons=[RejectionReason.TOO_LONG, RejectionReason.UNGROUNDED],
+        rejection_reasons=[RejectionReason.BELOW_MIN_SCORE],
     )
 
-    assert candidate.rejection_reasons == [
-        RejectionReason.TOO_LONG,
-        RejectionReason.UNGROUNDED,
-    ]
+    assert candidate.rejection_reasons == [RejectionReason.BELOW_MIN_SCORE]
 
 
 # --- boundary adjustment -----------------------------------------------------
@@ -361,7 +364,7 @@ def test_a_ranked_candidate_is_necessarily_suggested() -> None:
         _validated(
             rank=1,
             status=CandidateStatus.REJECTED,
-            rejection_reasons=[RejectionReason.TOO_SHORT],
+            rejection_reasons=[RejectionReason.NOT_IN_TOP_N],
         )
 
 

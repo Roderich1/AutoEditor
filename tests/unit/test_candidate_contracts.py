@@ -379,15 +379,7 @@ def test_an_identifier_cannot_be_in_both_candidates_and_rejected() -> None:
                 not_in_top_n=0,
                 selected=1,
             ),
-            deduplication_events=[
-                DeduplicationEvent(
-                    kept_id="cand_000000000001",
-                    dropped_id="cand_000000000001",
-                    iou=0.9,
-                    kept_score=91.15,
-                    dropped_score=80.0,
-                )
-            ],
+            deduplication_events=[],
         )
 
 
@@ -458,22 +450,20 @@ def test_a_deduplication_event_cannot_name_a_candidate_that_does_not_exist() -> 
         )
 
 
-def test_the_deduplicated_count_must_match_the_recorded_events() -> None:
-    dropped = _validated(
-        id="cand_000000000002",
-        status=CandidateStatus.DEDUPLICATED,
-        rejection_reasons=[RejectionReason.DUPLICATE],
-    )
+def test_the_deduplicated_count_must_match_the_deduplicated_records() -> None:
+    """The count follows the records; the events then follow the count.
 
-    with pytest.raises(ValidationError, match="deduplicated"):
-        _collection(
-            rejected=[dropped],
-            deduplication_events=[],
+    Checking it against len(deduplication_events) instead would be checking a
+    tally against another tally: both could be wrong together, and neither names
+    a candidate.
+    """
+    with pytest.raises(ValidationError, match="counts.deduplicated is 2 for 1"):
+        _deduplicated_collection(
             counts=CandidateCounts(
-                proposed=2,
+                proposed=3,
                 invalid=0,
                 below_min_score=0,
-                deduplicated=1,
+                deduplicated=2,
                 not_in_top_n=0,
                 selected=1,
             ),
@@ -483,6 +473,8 @@ def test_the_deduplicated_count_must_match_the_recorded_events() -> None:
 def test_a_coherent_funnel_is_accepted() -> None:
     dropped = _validated(
         id="cand_000000000002",
+        boundary=_overlapping_boundary(),
+        total_score=80.0,
         status=CandidateStatus.DEDUPLICATED,
         rejection_reasons=[RejectionReason.DUPLICATE],
     )
@@ -496,15 +488,7 @@ def test_a_coherent_funnel_is_accepted() -> None:
     collection = _collection(
         rejected=[dropped, weak],
         invalid=[_invalid()],
-        deduplication_events=[
-            DeduplicationEvent(
-                kept_id="cand_000000000001",
-                dropped_id="cand_000000000002",
-                iou=0.9,
-                kept_score=91.15,
-                dropped_score=91.15,
-            )
-        ],
+        deduplication_events=[_event()],
         counts=CandidateCounts(
             proposed=4,
             invalid=1,
@@ -585,9 +569,11 @@ def test_post_scoring_drops_must_match_the_rejected_list() -> None:
 
     A count claiming a candidate was scored and dropped, with no record of it in
     the list, would make the funnel unauditable in the direction that matters:
-    something disappeared and nothing says which.
+    something disappeared and nothing says which. The error names the counter
+    that has no records behind it rather than the total, because a total only
+    ever says that one of five numbers is wrong.
     """
-    with pytest.raises(ValidationError, match="dropped after scoring"):
+    with pytest.raises(ValidationError, match="counts.below_min_score is 1 for 0"):
         _collection(
             rejected=[],
             counts=CandidateCounts(
@@ -945,6 +931,24 @@ def test_an_event_iou_must_reach_the_configured_threshold() -> None:
     """Below dedupe_iou they are different moments, so the drop lost material."""
     with pytest.raises(ValidationError, match="threshold"):
         _deduplicated_collection(dedupe_iou=0.95)
+
+
+def test_an_event_cannot_drop_a_candidate_covering_a_different_moment() -> None:
+    """Two intervals that never meet are two moments, whatever the event says."""
+    elsewhere = _duplicate_of_the_selected(
+        boundary=_boundary(
+            proposed_start=500.0,
+            proposed_end=550.0,
+            adjusted_start=499.5,
+            adjusted_end=551.0,
+        )
+    )
+
+    with pytest.raises(ValidationError, match="threshold"):
+        _deduplicated_collection(
+            rejected=[elsewhere],
+            deduplication_events=[_event(iou=0.0)],
+        )
 
 
 def test_an_event_cannot_keep_a_candidate_that_was_itself_deduplicated() -> None:
