@@ -1418,3 +1418,115 @@ quietly.
   orphaning. The workaround is a new run.
 - The re-entry edge is taken only by `review --force`, and only after a warning
   that names how many decisions will be discarded.
+
+---
+
+## ADR-031 — Preview publication is durable, not atomic
+
+**Status:** Accepted
+
+### Context
+
+Publishing a preview set replaces several files at once: one MP4 per candidate,
+some of which must disappear when the shortlist changed, plus
+`config.effective.json` and `index.json`. The first implementation did it in
+place and in order, and a failure part-way through left the directory holding
+half of one set and half of another with `index.json` describing neither — worse
+than either set, because the previous previews had been reusable and were now
+unverifiable.
+
+The fix was to move the whole published set into `previews/.rollback/`, assemble
+the new one, and delete the backup last, restoring it on failure. That made the
+ordinary failure atomic. It also introduced a worse defect than the one it
+fixed: the backup was deleted unconditionally on the way out of `generate`, so
+a failure **during the restore** destroyed the only surviving copy and left
+`previews/` empty. Three separate places deleted the backup and none of them
+checked whether the restore had finished.
+
+That is the honest starting point for this decision: a restore is a sequence of
+renames, a rename can fail for reasons that have nothing to do with this program
+— a full disk, a revoked permission, a scanner holding a handle — and no
+ordering makes an operation that cannot complete complete. Atomicity is not
+available. Pretending otherwise is how the second defect got written.
+
+### Decision
+
+**The guarantee is durability, and it is stated as such.** Three outcomes, not
+two:
+
+1. the new set is published;
+2. publication failed and the previous set is restored byte for byte;
+3. publication failed and the restore could not finish — in which case every
+   file of the previous set is in `previews/` or in `previews/.rollback/`, the
+   backup is not deleted, the error names the directory holding the data, and
+   the next invocation finishes the restore.
+
+Outcome 3 is not atomic and is not described as though it were. The directory is
+temporarily incomplete; nothing is lost.
+
+**A backup is deleted in exactly two places**, both of which are reached only
+after the thing they conclude has provably finished: after publication has
+placed every file, and after a restore has moved every file back. The
+unconditional `rmtree` in `generate`'s `finally` is gone.
+
+**A pre-existing backup is never overwritten or blindly removed.**
+`resolve_pending_rollback` runs before anything else in `generate`, and
+`_publish` refuses outright if one is still there. The single exception is a
+backup directory that is empty *and* has no journal: it holds nothing
+recoverable, and that is checked rather than assumed.
+
+**The phase is journalled.** `previews/.rollback/rollback.json` records how far
+publication had got, because the undo for the two phases is the opposite of the
+other. In `moving_aside` the previews directory still holds part of the previous
+set, so the undo moves files back and deletes nothing. In `placing` every old
+file is already in the backup, so anything publishable left in the directory
+belongs to the failed attempt and is deleted first. Applying the wrong one
+deletes exactly the files that have no second copy — which is a defect an
+earlier version of this code actually had, when it inferred the answer from the
+directory contents instead. One flag suffices because the phases are disjoint by
+construction: nothing is placed until everything has been moved aside.
+
+A journal this build cannot read is a refusal, never a default. The phase
+decides which files get deleted, so guessing it is worse than doing nothing.
+
+### Considered and rejected: publishing by directory rename
+
+Build `previews.new`, rename `previews` to `previews.old`, rename `previews.new`
+to `previews`, drop `previews.old`. Two renames instead of a dozen, and the
+suggestion is a good one. It was rejected on three grounds.
+
+**Windows holds directories.** A directory rename fails while any handle is open
+to the directory or to a file inside it. The entire point of this stage is that
+a person opens these previews in a video player, so the swap would fail exactly
+when the feature is being used. A per-file rename fails only for the file
+actually held, and the restore then puts everything back.
+
+**It is not atomic either.** Between the two renames there is no `previews`
+directory at all. A crash there leaves the run without a directory
+`RunWorkspace` created and that both `review` and the manifest's stage record
+reference — a worse state than an incomplete one, and one no later invocation
+could tell apart from a run that had never been previewed.
+
+**Same-filesystem renames are already guaranteed.** Keeping `.staging` and
+`.rollback` inside `previews/` is what makes every move a rename on one
+filesystem on both platforms, which is why the restore needs no space and cannot
+fail for want of any. Making them siblings of `previews/` under the run
+directory would preserve that too, and buys nothing else.
+
+### Consequences
+
+- A failed `--force` still costs nothing in the common case: the previous
+  previews are restored and still pass `verify_previews`.
+- A failed restore costs an incomplete directory and a message, not data. The
+  operator is told which directory holds the files, and `preview` finishes the
+  job on the next run.
+- `PreviewRollbackError` exists so this is distinguishable from an ordinary
+  render failure. An ordinary one can just be retried; this one means files are
+  sitting somewhere other than where they belong.
+- The previews directory can legitimately contain a `.rollback` subdirectory
+  between runs. Nothing downstream scans for extra files — `require_previews`
+  reads the index and the names in it — so a pending backup does not make a
+  complete set look invalid.
+- `review` does not resolve a pending backup. It must not mutate the previews
+  directory, so it fails verification with a message pointing at `preview`,
+  which is the command that owns those files.

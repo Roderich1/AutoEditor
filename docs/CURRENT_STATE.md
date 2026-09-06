@@ -27,15 +27,19 @@ FFmpeg 9.0.1:
 | `uv run ruff check .` | passed |
 | `uv run ruff format --check .` | passed, 111 files |
 | `uv run mypy src` | passed, 50 files, strict |
-| `uv run pytest` | 1725 passed, 1 skipped, 473 more than the 1252 on `main`; 99.60% over 3247 statements, 13 missed — the same 13 `main` already had |
+| `uv run pytest` | 1747 passed, 1 skipped, 495 more than the 1252 on `main`; 99.61% over 3309 statements, 13 missed — the same 13 `main` already had |
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
 | Re-run with every cache disabled | `ruff --no-cache`, `mypy --no-incremental`, `pytest -p no:cacheprovider`: all green |
 | Every test import available in the CI environment | asserted against the `uv.lock` closure of the main dependencies and the dev group, per test module |
-| Publication failure injected at each step, shortlist same, grown and shrunk | 39 cases; the previous set stays byte-identical and still passes `verify_previews` |
-| Diff against `main` | 26 files, +6863/−46 |
+| Publication failure injected at each step, shortlist same, grown and shrunk | the previous set stays byte-identical and still passes `verify_previews` |
+| Failure of the restore itself, on the first, a middle and the last file | the whole previous set stays reachable in `previews/` or `previews/.rollback/`, and the backup is never deleted |
+| Restore failure repeated three times | the backup is still complete after each attempt |
+| A pending backup on a later invocation | restored deterministically from its journal, or refused untouched when the journal is missing, unreadable, of another schema, or names an unknown phase |
+| `preview_service.py` coverage | 100% |
+| Diff against `main` | 27 files, +7781/−46 |
 | SonarCloud quality gate | passes; Reliability and Security both A |
 | `uv run pytest -m integration --no-cov` | 22 passed with real FFmpeg; 9 of them are the new preview pipeline |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
@@ -706,6 +710,38 @@ loop and exited 1 as an unexpected internal error -- after earlier decisions had
 been saved, so a reviewer who pasted too much text saw a crash and no sign that
 their work had survived. The limit is now named once, shown in the prompt, and a
 violation prints the model's own message and asks again.
+
+### A fifth defect: the rollback could destroy the backup it was holding
+
+Found in review after the four above were fixed, and worse than any of them,
+because the code that caused it was the fix for defect 2.
+
+Publication moves the published set into `previews/.rollback/` and restores it if
+the new set cannot be placed. If a *restore* rename failed, the OSError replaced
+the original error on the way out of `_publish` and `generate`'s `finally` ran
+`shutil.rmtree(.rollback, ignore_errors=True)` unconditionally — deleting the
+only remaining copy and leaving `previews/` empty. Three separate places deleted
+the backup and none checked whether the restore had finished: that `finally`,
+`_publish` clearing a pre-existing backup before starting, and `_roll_back`'s own
+cleanup.
+
+The fix changes what is promised, not just the code. Atomicity is not available
+when the undo can fail, so the guarantee is now **durability**: every file of the
+previous set stays in `previews/` or in `previews/.rollback/`, the backup is
+deleted in exactly two places — after publication placed everything, or after a
+restore moved everything back — the error names the directory holding the data,
+and the next `preview` run finishes the restore from a journalled phase.
+ADR-031 records the reasoning, including why publishing by directory rename was
+rejected: on Windows a directory rename fails while a player holds a preview
+open, the two-rename swap is not atomic either, and same-filesystem renames are
+already guaranteed by keeping the working directories inside `previews/`.
+
+The journal carries one field, the phase, because the undo for the two phases is
+opposite: in `moving_aside` the previews directory still holds part of the
+previous set and nothing may be deleted, in `placing` everything there belongs to
+the failed attempt and must go. Inferring that from the directory contents is
+what made an earlier version of this code delete previews that had no second
+copy.
 
 ### SonarCloud: why the gate passes while the UI shows 0.0% coverage
 

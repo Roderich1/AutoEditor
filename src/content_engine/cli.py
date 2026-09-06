@@ -85,6 +85,7 @@ from content_engine.services.preview_service import (
     PreviewPlan,
     PreviewService,
     require_previews,
+    resolve_pending_rollback,
     verify_previews,
 )
 from content_engine.services.review_service import (
@@ -665,6 +666,19 @@ def preview(
         plan = _plan_previews(run_path, manifest, settings)
 
         previews_directory = run_path.joinpath("previews")
+        # Before the reuse decision, not after. A backup left pending by an
+        # earlier failed publication holds part of the published set, so
+        # verifying the directory without finishing the restore first would
+        # refuse a set that is merely unfinished.
+        try:
+            restored = resolve_pending_rollback(previews_directory)
+        except ContentEngineError as error:
+            run_service.fail(run_path, manifest, RunStage.PREVIEW, error)
+            _report_run_context(run_path, manifest)
+            raise
+        if restored is not None:
+            console.print(f"[yellow]Recovered:[/yellow] {restored}.")
+
         # Whether this stage has run is a question for the manifest and for the
         # index together. Either signal sends the invocation through
         # verification, which refuses whatever is inconsistent and leaves the

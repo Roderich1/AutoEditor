@@ -28,6 +28,7 @@ from content_engine.domain.preview_rules import (
     preview_filename,
 )
 from content_engine.domain.previews import PREVIEW_INDEX_SCHEMA_VERSION
+from content_engine.services.preview_service import ROLLBACK_DIRNAME, ROLLBACK_JOURNAL
 from tests.conftest import (
     Analysed,
     FakeMedia,
@@ -272,6 +273,78 @@ class TestForce:
         stray.write_bytes(b"left over from an older shortlist")
         preview(analysed.run_id, "--force")
         assert not stray.exists()
+
+
+class TestAPendingRollback:
+    """A backup an earlier failure could not put back is finished, or refused.
+
+    Both cases matter at the command boundary. Finishing it silently would hide
+    that a previous run went wrong; refusing without saying where the files are
+    would leave the operator with an incomplete directory and no lead.
+    """
+
+    @staticmethod
+    def strand(run: Analysed, *, with_journal: bool) -> dict[str, bytes]:
+        """Move the whole published set into a backup, as a failed publish would."""
+        rollback = run.previews.joinpath(ROLLBACK_DIRNAME)
+        rollback.mkdir()
+        held: dict[str, bytes] = {}
+        for path in sorted(run.previews.iterdir()):
+            if path.is_file():
+                held[path.name] = path.read_bytes()
+                path.replace(rollback.joinpath(path.name))
+        if with_journal:
+            # Truthful: every file of the previous set really is in the backup
+            # and nothing new was placed, which is what `placing` means.
+            rollback.joinpath(ROLLBACK_JOURNAL).write_text(
+                json.dumps({"schema_version": 1, "phase": "placing"}), encoding="utf-8"
+            )
+        return held
+
+    def test_it_is_finished_and_reported(self, analysed: Analysed) -> None:
+        assert preview(analysed.run_id).exit_code == EXIT_SUCCESS
+        held = self.strand(analysed, with_journal=True)
+        assert not list(analysed.previews.glob("*.mp4"))
+
+        result = preview(analysed.run_id)
+        assert result.exit_code == EXIT_SUCCESS, cli_output(result)
+        output = cli_output(result).lower()
+        assert "recovered" in output
+        assert "backup" in output
+        assert {
+            path.name: path.read_bytes()
+            for path in sorted(analysed.previews.iterdir())
+            if path.is_file()
+        } == held
+        assert not analysed.previews.joinpath(ROLLBACK_DIRNAME).exists()
+        assert "reused" in cli_output(preview(analysed.run_id)).lower()
+
+    def test_one_that_cannot_be_interpreted_fails_the_stage_and_is_kept(
+        self, analysed: Analysed
+    ) -> None:
+        assert preview(analysed.run_id).exit_code == EXIT_SUCCESS
+        held = self.strand(analysed, with_journal=False)
+
+        result = preview(analysed.run_id)
+        assert result.exit_code == EXIT_RENDER
+        output = cli_output(result)
+        assert ROLLBACK_DIRNAME in output
+        assert analysed.manifest()["status"] == RunStatus.FAILED_PREVIEW
+        rollback = analysed.previews.joinpath(ROLLBACK_DIRNAME)
+        assert {
+            path.name: path.read_bytes() for path in sorted(rollback.iterdir()) if path.is_file()
+        } == held
+
+    def test_a_refused_backup_is_still_there_on_the_next_attempt(self, analysed: Analysed) -> None:
+        assert preview(analysed.run_id).exit_code == EXIT_SUCCESS
+        held = self.strand(analysed, with_journal=False)
+
+        for _ in range(2):
+            assert preview(analysed.run_id, "--force").exit_code == EXIT_RENDER
+        rollback = analysed.previews.joinpath(ROLLBACK_DIRNAME)
+        assert {
+            path.name: path.read_bytes() for path in sorted(rollback.iterdir()) if path.is_file()
+        } == held
 
 
 class TestRecovery:

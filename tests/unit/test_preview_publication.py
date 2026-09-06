@@ -1,26 +1,34 @@
-"""Publishing a preview set is all-or-nothing (CE-034).
+"""Publishing a preview set never loses one (CE-034).
 
 Generation was already transactional: everything is encoded and probed in a
 staging directory, so a failed encode never touched the published set. The
 *publication* was not. It removed stale previews, then replaced files one at a
 time, then wrote the two artifacts -- so a failure anywhere after the first
 `unlink` or the first `replace` left the directory holding a mixture of two
-runs, with `index.json` describing neither.
+runs, with `index.json` describing neither. That is worse than either set: the
+previous previews were reusable and became unverifiable.
 
-That is the worst possible outcome for this stage. A failed `--force` is
-supposed to be free: the previous previews are still there and still verifiable.
-A half-published set destroys work that took twenty-six seconds to produce and
-leaves nothing that can be verified at all.
+The first fix moved the whole published set aside and restored it on failure,
+which made the ordinary failure atomic. It also introduced a worse defect,
+because it deleted the backup unconditionally on the way out -- so a failure
+*during the restore* destroyed the only remaining copy.
 
-Every test here injects a failure at one specific step of publication and then
-demands two things of the previous set: byte-identical files, and a successful
-`verify_previews` against the fingerprint recorded before the attempt. The
-second is what makes the first meaningful -- files that merely still exist are
-not the same as a set a later run will accept.
+What the tests hold, therefore, is two different promises, and the distinction
+is the point rather than a hedge:
+
+- when publication fails and the restore succeeds, the previous set is
+  **byte-identical and still passes `verify_previews`**. Files that merely exist
+  are not the same as a set a later run will accept, which is why both are
+  asserted;
+- when the restore *itself* fails, the guarantee is **durability, not
+  atomicity**. Every file stays reachable in `previews/` or in
+  `previews/.rollback/`, the backup survives, and a later invocation finishes
+  the job. `recoverable()` is that union and is what those tests assert against.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -265,7 +273,14 @@ def fail_on_move_aside(nth: int) -> Callable[..., Any]:
     calls = {"count": 0}
 
     def guarded(self: Path, target: Any) -> Any:
-        if ROLLBACK_DIRNAME in str(target) and STAGING_DIRNAME not in str(self):
+        # `.tmp` is write_json's atomic rename, and the journal is written into
+        # this same directory, so without the exclusion "the nth move-aside"
+        # would mean the (n-1)th file.
+        if (
+            ROLLBACK_DIRNAME in str(target)
+            and STAGING_DIRNAME not in str(self)
+            and self.suffix != ".tmp"
+        ):
             calls["count"] += 1
             if calls["count"] == nth:
                 raise OSError(f"synthetic move-aside failure on file {nth}")
@@ -601,3 +616,228 @@ class TestFailuresDuringRestoration:
             service("second").generate(plan, directory, LATER)
 
         assert snapshot(rollback) == stranded
+
+
+class TestAPendingBackupIsInterpretedOrLeftAlone:
+    """The journal decides what an interrupted publication meant.
+
+    It carries one thing: how far publication had got. That is enough, because
+    the two phases are disjoint -- nothing is placed until everything has been
+    moved aside -- and it is *necessary*, because the two need opposite undo
+    steps. In `moving_aside` the files in the previews directory are the
+    previous set and must be kept; in `placing` they belong to the attempt that
+    failed and must go. Guessing wrong deletes the wrong ones, so a journal this
+    build cannot read is never guessed at.
+    """
+
+    @staticmethod
+    def held_data(directory: Path) -> dict[str, bytes]:
+        """The previous set inside a pending backup, journal excluded.
+
+        The journal is deliberately corrupted by most tests here, so comparing
+        it would be comparing the thing under test against itself.
+        """
+        rollback = directory.joinpath(ROLLBACK_DIRNAME)
+        return {
+            path.name: path.read_bytes()
+            for path in sorted(rollback.iterdir())
+            if path.is_file() and path.name != ROLLBACK_JOURNAL
+        }
+
+    def strand(
+        self, directory: Path, monkeypatch: pytest.MonkeyPatch, plan: PreviewPlan
+    ) -> dict[str, bytes]:
+        """Leave a real pending backup behind, and return the data it holds."""
+        monkeypatch.setattr(preview_service, "write_json", fail_on_write(PREVIEW_INDEX_FILENAME))
+        monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
+        with pytest.raises(RenderError):
+            service("second").generate(plan, directory, LATER)
+        monkeypatch.undo()
+        data = self.held_data(directory)
+        assert data, "the stranded backup should hold the previous set"
+        return data
+
+    def test_a_journal_naming_another_schema_is_refused(
+        self, published: tuple[Path, PreviewPlan, str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory, plan, _, _ = published
+        held = self.strand(directory, monkeypatch, plan)
+        journal = directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL)
+        payload = json.loads(journal.read_text(encoding="utf-8"))
+        payload["schema_version"] = 99
+        journal.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(RenderError, match="schema"):
+            service("third").generate(plan, directory, LATER)
+        assert self.held_data(directory) == held
+
+    def test_a_journal_naming_an_unknown_phase_is_refused(
+        self, published: tuple[Path, PreviewPlan, str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory, plan, _, _ = published
+        held = self.strand(directory, monkeypatch, plan)
+        journal = directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL)
+        journal.write_text(json.dumps({"schema_version": 1, "phase": "halfway"}), encoding="utf-8")
+
+        with pytest.raises(RenderError, match="halfway"):
+            service("third").generate(plan, directory, LATER)
+        assert self.held_data(directory) == held
+
+    def test_an_unreadable_journal_is_refused(
+        self, published: tuple[Path, PreviewPlan, str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory, plan, _, _ = published
+        held = self.strand(directory, monkeypatch, plan)
+        directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL).write_text(
+            "{truncated", encoding="utf-8"
+        )
+
+        with pytest.raises(RenderError, match="cannot be read"):
+            service("third").generate(plan, directory, LATER)
+        assert self.held_data(directory) == held
+
+    def test_a_journal_that_is_not_an_object_is_refused(
+        self, published: tuple[Path, PreviewPlan, str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory, plan, _, _ = published
+        held = self.strand(directory, monkeypatch, plan)
+        directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL).write_text("[]", encoding="utf-8")
+
+        with pytest.raises(RenderError, match="rollback journal"):
+            service("third").generate(plan, directory, LATER)
+        assert self.held_data(directory) == held
+
+    def test_an_empty_backup_with_no_journal_is_cleared(
+        self, published: tuple[Path, PreviewPlan, str, str]
+    ) -> None:
+        """It holds nothing recoverable, so removing it discards nothing.
+
+        The only case where a pre-existing backup directory may go without being
+        read, and it is checked to be empty first rather than assumed.
+        """
+        directory, plan, _, _ = published
+        directory.joinpath(ROLLBACK_DIRNAME).mkdir()
+
+        outcome = service("second").generate(plan, directory, LATER)
+        assert not directory.joinpath(ROLLBACK_DIRNAME).exists()
+        assert verify_previews(
+            directory, outcome.fingerprint, outcome.stage_config_sha256, plan
+        ).previews
+
+    def test_publish_refuses_to_overwrite_a_backup_it_was_handed(
+        self, published: tuple[Path, PreviewPlan, str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`_publish` guards itself, so a caller that skipped the resolution stops.
+
+        `generate` resolves a pending backup before publishing, so this branch is
+        unreachable through it. It is still checked, because the thing it
+        prevents is overwriting the only copy of somebody's previous set.
+        """
+        directory, plan, _, _ = published
+        held = self.strand(directory, monkeypatch, plan)
+        staging = directory.joinpath(STAGING_DIRNAME)
+        staging.mkdir(exist_ok=True)
+        index = read_index_from(directory.joinpath(ROLLBACK_DIRNAME))
+
+        with pytest.raises(RenderError, match="has not been restored"):
+            PreviewService._publish(
+                directory, staging, index, preview_stage_config(width=540, height=960)
+            )
+        assert self.held_data(directory) == held
+
+
+class TestTheJournalWriteItself:
+    def test_a_journal_that_cannot_be_written_leaves_no_backup_behind(
+        self, published: tuple[Path, PreviewPlan, str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The journal is written first, so failing it has nothing to strand.
+
+        This is the one place a backup directory is removed on a failure path,
+        and it is sound only because it is provably empty: the journal precedes
+        every move, so nothing of the previous set can be inside it yet.
+        """
+        directory, plan, fingerprint, digest = published
+        before = snapshot(directory)
+        monkeypatch.setattr(preview_service, "write_json", fail_on_write(ROLLBACK_JOURNAL))
+
+        with pytest.raises(OSError, match=ROLLBACK_JOURNAL):
+            service("second").generate(plan, directory, LATER)
+
+        assert not directory.joinpath(ROLLBACK_DIRNAME).exists()
+        assert snapshot(directory) == before
+        assert verify_previews(directory, fingerprint, digest, plan).previews
+
+
+class TestTheMovingAsidePhase:
+    """A backup stranded before anything was placed needs the opposite undo.
+
+    This is the phase distinction the journal exists for. Here the previews
+    directory still holds part of the previous set -- the files not yet moved --
+    so the undo must move the saved ones back and delete nothing. Applying the
+    `placing` undo instead would delete exactly the files that have no copy in
+    the backup, which is the bug the phase flag prevents.
+    """
+
+    def test_a_restore_stranded_before_any_placement_keeps_everything(
+        self, published: tuple[Path, PreviewPlan, str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory, plan, fingerprint, digest = published
+        before = snapshot(directory)
+
+        # Fail the second move-aside, so the phase is still `moving_aside`, and
+        # fail the restore that follows.
+        monkeypatch.setattr(Path, "replace", fail_on_move_aside_then_restore(2))
+        with pytest.raises(RenderError):
+            service("second").generate(plan, directory, LATER)
+
+        journal = json.loads(
+            directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL).read_text(encoding="utf-8")
+        )
+        assert journal["phase"] == "moving_aside"
+        assert recoverable(directory) | before == recoverable(directory)
+
+        monkeypatch.undo()
+        outcome = service("third").generate(plan, directory, LATER)
+        assert not directory.joinpath(ROLLBACK_DIRNAME).exists()
+        assert verify_previews(
+            directory, outcome.fingerprint, outcome.stage_config_sha256, plan
+        ).previews
+        del fingerprint, digest
+
+
+def fail_on_move_aside_then_restore(nth: int) -> Callable[..., Any]:
+    """Fail the nth move-aside, then fail the first restore move that follows.
+
+    One injector rather than two, because the two failures have to happen in the
+    same `Path.replace` patch: the restore is triggered by the move-aside
+    failing, so both are moves and both must be intercepted.
+    """
+    real = Path.replace
+    state = {"aside": 0, "restored": 0}
+
+    def guarded(self: Path, target: Any) -> Any:
+        # `.tmp` sources are write_json's own atomic rename, including the
+        # journal's. Counting those as move-asides made this injector fire one
+        # file early, before anything real had moved.
+        if (
+            ROLLBACK_DIRNAME in str(target)
+            and STAGING_DIRNAME not in str(self)
+            and self.suffix != ".tmp"
+        ):
+            state["aside"] += 1
+            if state["aside"] == nth:
+                raise OSError(f"synthetic move-aside failure on file {nth}")
+        elif ROLLBACK_DIRNAME in str(self) and self.suffix != ".tmp":
+            state["restored"] += 1
+            raise OSError("synthetic restore failure")
+        return real(self, target)
+
+    return guarded
+
+
+def read_index_from(directory: Path) -> Any:
+    """The index saved inside a pending backup, for tests that need a real one."""
+    from content_engine.domain.previews import PreviewIndex
+
+    payload = json.loads(directory.joinpath(PREVIEW_INDEX_FILENAME).read_text(encoding="utf-8"))
+    return PreviewIndex.model_validate(payload)

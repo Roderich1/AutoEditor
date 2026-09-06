@@ -8,10 +8,20 @@ and each one is the answer to a way this could go wrong.
 
 **Nothing reaches the previews directory until everything is verified.** Every
 encode happens inside a staging directory, and every file is probed there. Only
-once the whole set exists and has been checked is anything moved into place.
-A failure therefore cannot leave a half-generated set that a later run would
-read as complete, and a failed ``--force`` cannot destroy the previews that were
-already there -- the old files are still the only files in the directory.
+once the whole set exists and has been checked is anything moved into place. A
+failure therefore cannot leave a half-generated set that a later run would read
+as complete.
+
+**Publication is durable, not atomic.** Two outcomes are atomic: the new set is
+published, or the previous one is restored byte for byte. There is a third,
+because the restore is itself a sequence of renames and a rename can fail for
+reasons outside this program. In that case every file of the previous set stays
+in ``previews/`` or in ``previews/.rollback/``, the backup is never deleted
+while the restore is unfinished, the error names the directory holding the data,
+and the next invocation finishes the restore. Nothing is lost; the directory is
+temporarily incomplete. ``_publish`` explains the mechanism and ADR-031 the
+reasoning, including why claiming plain atomicity here would be a promise this
+code cannot keep.
 
 **A record is a measurement, not a request.** The dimensions, duration and
 codecs in the index come from ffprobe reading the finished file; the digest and
@@ -38,6 +48,7 @@ from pydantic import ValidationError
 from content_engine.domain.candidates import ValidatedCandidate
 from content_engine.domain.exceptions import (
     IncompatibleArtifactError,
+    PreviewRollbackError,
     RenderError,
 )
 from content_engine.domain.models import MediaInfo
@@ -76,6 +87,24 @@ ROLLBACK_DIRNAME = ".rollback"
 #: holds old files not yet moved aside or new ones already placed, and those
 #: two states need opposite undo steps.
 ROLLBACK_JOURNAL = "rollback.json"
+#: Bumped whenever the journal changes shape. A journal this build cannot read
+#: is refused rather than guessed at, because guessing decides which files get
+#: deleted.
+ROLLBACK_SCHEMA_VERSION = 1
+
+#: Publication has two phases, and the undo for each is the opposite of the
+#: other, so the phase is the one thing the journal has to carry.
+#:
+#: In ``moving_aside`` some of the previous set may still be in the previews
+#: directory and nothing new has been placed, so the undo moves files back and
+#: deletes nothing. In ``placing`` every file of the previous set is already in
+#: the backup, so anything publishable left in the directory is new and the undo
+#: removes it first.
+#:
+#: The phases are disjoint by construction -- no file is placed until every old
+#: file has been moved aside -- which is what makes one flag sufficient.
+PHASE_MOVING_ASIDE = "moving_aside"
+PHASE_PLACING = "placing"
 
 #: Written in this order, and the order matters: the file the reuse check looks
 #: for first is written last, so an interrupted run cannot leave a directory
@@ -127,14 +156,24 @@ class PreviewService:
                 f"The run source is missing, so no preview can be cut from it: {plan.source_path}"
             )
 
+        # A backup left pending by an earlier failure is finished, or refused,
+        # before anything else happens. Encoding over it would be building a new
+        # set on top of a directory that is still half of an old one.
+        resolve_pending_rollback(directory)
+
         staging = directory.joinpath(STAGING_DIRNAME)
         try:
             records = self._render_all(plan, staging)
             index = self._build_index(plan, records, generated_at)
             self._publish(directory, staging, index, plan.config)
         finally:
+            # The staging directory only. `.rollback` is never removed here:
+            # deleting it unconditionally is exactly how a failed restore turned
+            # a recoverable state into a lost one, because the `finally` ran
+            # after the restore had already given up. It is removed in one place
+            # only -- once publication has succeeded, or once a restore has put
+            # every single file back.
             shutil.rmtree(staging, ignore_errors=True)
-            shutil.rmtree(directory.joinpath(ROLLBACK_DIRNAME), ignore_errors=True)
 
         return PreviewOutcome(
             index=index,
@@ -272,87 +311,240 @@ class PreviewService:
         index: PreviewIndex,
         config: PreviewStageConfig,
     ) -> None:
-        """Replace the published set with the staged one, all of it or none of it.
+        """Replace the published set with the staged one.
 
         Publication touches several files: one MP4 per candidate, some of which
         may have to disappear because the shortlist changed, plus the stage
         configuration and the index. Doing that in place cannot be made atomic
         by ordering alone -- every ordering has a point at which a failure
         leaves half of one set and half of another, with the index describing
-        neither. And an unverifiable mixture is strictly worse than either set:
-        the previous previews were reusable, and a `--force` that fails is
-        supposed to cost nothing.
+        neither. So the whole published set is moved into ``.rollback`` first,
+        the new set is assembled, and the backup is deleted last.
 
-        So the whole published set is moved aside first, into a directory beside
-        the staging one, and only then is the new set assembled. A failure at
-        any point puts the old set back exactly as it was, byte for byte, and
-        re-raises. Success deletes the copy.
+        **What this guarantees, precisely.** Two outcomes are atomic: the new
+        set is published, or the previous one is restored byte for byte. There
+        is a third, and it is not atomic. A restore is a sequence of renames and
+        a rename can fail for reasons outside this program -- a full disk, a
+        revoked permission, a scanner holding a handle -- and no amount of
+        ordering makes an operation that cannot complete complete. What is
+        guaranteed in that case is **durability, not atomicity**: every file of
+        the previous set remains in ``previews/`` or in ``previews/.rollback/``,
+        the backup is never deleted while the restore is unfinished, the error
+        names the directory holding the data, and the next invocation finishes
+        the restore deterministically. Nothing is lost; the directory is
+        temporarily incomplete.
 
-        The moves are renames within one directory, so they are cheap however
-        large the previews are, and the restore path is renames too -- it
-        performs no encode, allocates no space and cannot fail for want of any.
+        Saying "all or nothing" without that qualification would be a claim the
+        design cannot keep, which is worse than a smaller promise kept.
+
+        **Why files rather than directories.** Publishing by renaming whole
+        directories -- build ``previews.new``, swap it in, drop ``previews.old``
+        -- would reduce this to two renames, and was considered. It was rejected
+        on three grounds. On Windows a directory rename fails while any handle
+        is open to the directory or to a file inside it, and a reviewer watching
+        a preview in a player is the normal state of this stage, so the swap
+        would fail exactly when the feature is being used; a per-file rename
+        fails only for the file actually held. The swap is not atomic either --
+        between the two renames there is no ``previews`` directory at all, and a
+        crash there leaves the run without a directory that ``RunWorkspace``
+        created and that ``review`` and the manifest both reference. And keeping
+        ``.staging`` and ``.rollback`` inside ``previews/`` is what guarantees
+        every rename stays on one filesystem on both platforms, which is why the
+        restore needs no space and cannot fail for want of any.
         """
         directory.mkdir(parents=True, exist_ok=True)
         rollback = directory.joinpath(ROLLBACK_DIRNAME)
-        shutil.rmtree(rollback, ignore_errors=True)
-        rollback.mkdir(parents=True, exist_ok=True)
-
-        # What actually happened, rather than what was meant to. The undo below
-        # needs to distinguish an old file that has been moved aside from a new
-        # one that has been placed, and it cannot tell them apart by name --
-        # regenerating an unchanged shortlist reuses every name. Inferring it
-        # from the directory contents is what made the first version of this
-        # delete previous previews that had not been moved aside yet.
-        moved_aside: list[str] = []
-        placed: list[str] = []
-
+        if rollback.exists():
+            # Never overwritten. A pending backup is the only copy of something.
+            # `generate` resolves one before calling this, so reaching here means
+            # a caller skipped that step or a resolution has just failed.
+            raise PreviewRollbackError(
+                f"A previous publication left a backup in {rollback} that has not been "
+                "restored, so a new one cannot start without discarding it. Resolve it "
+                "first: the next `preview` run finishes the restore, or the files can be "
+                "moved back by hand."
+            )
+        rollback.mkdir(parents=True)
         try:
-            # Moving the old set aside is itself part of the transaction. Doing
-            # it before the guard would leave a failure half-way through the
-            # move with a partly emptied directory and nothing to put back --
-            # the same defect this method exists to remove, one step earlier.
+            _write_journal(rollback, PHASE_MOVING_ASIDE)
+        except OSError:
+            # Provably empty: the journal is the first thing written and nothing
+            # has been moved, so there is nothing here to lose.
+            shutil.rmtree(rollback, ignore_errors=True)
+            raise
+
+        phase = PHASE_MOVING_ASIDE
+        try:
             for path in sorted(directory.iterdir()):
-                if path.is_file() and (path.suffix == ".mp4" or path.name in ARTIFACT_FILENAMES):
+                if _is_publishable(path):
                     path.replace(rollback.joinpath(path.name))
-                    moved_aside.append(path.name)
+            _write_journal(rollback, PHASE_PLACING)
+            phase = PHASE_PLACING
             for entry in index.previews:
                 staging.joinpath(entry.filename).replace(directory.joinpath(entry.filename))
-                placed.append(entry.filename)
             for name, payload in (
                 (PREVIEW_STAGE_CONFIG_FILENAME, config.model_dump(mode="json")),
                 (PREVIEW_INDEX_FILENAME, index.model_dump(mode="json")),
             ):
                 write_json(directory.joinpath(name), payload)
-                placed.append(name)
-        except BaseException:
-            PreviewService._roll_back(directory, rollback, moved_aside, placed)
+        except BaseException as failure:
+            # The phase is taken from this frame rather than read back off disk.
+            # It is the same information, and a read here could fail at the one
+            # moment the undo must not be prevented from starting.
+            try:
+                _restore(directory, rollback, phase)
+            except OSError as restore_failure:
+                raise _stranded(directory, rollback, failure, restore_failure) from failure
             raise
+        # Only now, with every file of the new set in place: the previous one is
+        # no longer needed.
+        shutil.rmtree(rollback)
+
+
+def _is_publishable(path: Path) -> bool:
+    """Whether a path is one of the files publication owns.
+
+    The previews and the two artifacts, and nothing else -- not the staging or
+    rollback directories, and not anything an operator happened to leave here.
+    """
+    return path.is_file() and (path.suffix == ".mp4" or path.name in ARTIFACT_FILENAMES)
+
+
+def _write_journal(rollback: Path, phase: str) -> None:
+    """Record how far publication has got, atomically."""
+    write_json(
+        rollback.joinpath(ROLLBACK_JOURNAL),
+        {"schema_version": ROLLBACK_SCHEMA_VERSION, "phase": phase},
+    )
+
+
+def _read_journal(rollback: Path) -> str:
+    """The phase a pending backup was left in, or a refusal.
+
+    Every failure to read this is a refusal rather than a default. The phase
+    decides whether the undo deletes files from the previews directory, so
+    guessing it wrong deletes the wrong ones -- and a backup nobody can
+    interpret is exactly the case where doing nothing is right.
+    """
+    path = rollback.joinpath(ROLLBACK_JOURNAL)
+    if not path.is_file():
+        raise PreviewRollbackError(
+            f"{rollback} holds a backup of a previous preview set but no {ROLLBACK_JOURNAL}, "
+            "so how far the publication got cannot be established and restoring it "
+            "automatically could delete the wrong files. It is left untouched: the files "
+            "in that directory are the previous previews and can be moved back by hand."
+        )
+    try:
+        payload = read_json(path)
+    except Exception as error:  # noqa: BLE001 - any unreadable journal is one refusal
+        raise PreviewRollbackError(
+            f"{path} cannot be read ({error}), so the pending backup in {rollback} is left "
+            "untouched. The files in it are the previous previews."
+        ) from error
+    if not isinstance(payload, dict):
+        raise PreviewRollbackError(f"{path} does not contain a rollback journal.")
+    if payload.get("schema_version") != ROLLBACK_SCHEMA_VERSION:
+        raise PreviewRollbackError(
+            f"{path} declares rollback journal schema {payload.get('schema_version')!r}; this "
+            f"build understands {ROLLBACK_SCHEMA_VERSION}. The backup in {rollback} is left "
+            "untouched."
+        )
+    phase = payload.get("phase")
+    if phase == PHASE_MOVING_ASIDE:
+        return PHASE_MOVING_ASIDE
+    if phase == PHASE_PLACING:
+        return PHASE_PLACING
+    raise PreviewRollbackError(
+        f"{path} names publication phase {phase!r}, which this build does not know how "
+        f"to undo. The backup in {rollback} is left untouched."
+    )
+
+
+def _restore(directory: Path, rollback: Path, phase: str) -> None:
+    """Put a saved set back, and delete the backup only if all of it went back.
+
+    In ``placing`` every file of the previous set is already in the backup, so
+    anything publishable still in the directory belongs to the attempt that
+    failed and is removed first. In ``moving_aside`` the opposite holds -- what
+    is in the directory is the previous set, not yet moved -- so nothing is
+    deleted.
+
+    The ``rmtree`` at the end is the only place a backup is discarded on this
+    path, and it is reached only after every move has succeeded. An exception
+    from any move leaves the directory in place with everything still in it.
+    """
+    if phase == PHASE_PLACING:
+        for path in sorted(directory.iterdir()):
+            if _is_publishable(path):
+                path.unlink()
+    for saved in sorted(rollback.iterdir()):
+        if saved.is_file() and saved.name != ROLLBACK_JOURNAL:
+            saved.replace(directory.joinpath(saved.name))
+    shutil.rmtree(rollback)
+
+
+def _stranded(
+    directory: Path,
+    rollback: Path,
+    failure: BaseException,
+    restore_failure: OSError,
+) -> PreviewRollbackError:
+    """The error for a publication that failed and could not be undone.
+
+    It has one job beyond reporting: to say where the data is. The operator is
+    being told that the previews directory is incomplete *and* that nothing has
+    been lost, and neither half of that is useful without the path.
+    """
+    saved = sorted(
+        path.name for path in rollback.iterdir() if path.is_file() and path.name != ROLLBACK_JOURNAL
+    )
+    return PreviewRollbackError(
+        f"The preview publication in {directory} failed ({failure}), and undoing it failed "
+        f"too ({restore_failure}). Nothing has been lost: {len(saved)} file(s) of the "
+        f"previous set are held in {ROLLBACK_DIRNAME} inside that directory "
+        f"({', '.join(saved) or 'none'}), and that backup is not deleted. The previews "
+        "directory is incomplete until the restore finishes; the next `preview` run "
+        "completes it, or the files can be moved back by hand."
+    )
+
+
+def resolve_pending_rollback(directory: Path) -> str | None:
+    """Finish a restore an earlier failure could not, or refuse to touch it.
+
+    Returns a description when something was restored, and None when there was
+    nothing pending. Raises when the backup exists but cannot be resolved
+    deterministically, in which case it is left exactly as it was.
+
+    This is what makes the durability guarantee more than a promise: a stranded
+    backup is not something an operator has to unpick by hand, it is something
+    the next invocation of the same command finishes.
+    """
+    rollback = directory.joinpath(ROLLBACK_DIRNAME)
+    if not rollback.is_dir():
+        return None
+
+    held = [path for path in rollback.iterdir() if path.is_file() and path.name != ROLLBACK_JOURNAL]
+    if not held and not rollback.joinpath(ROLLBACK_JOURNAL).is_file():
+        # An empty directory with no journal holds nothing recoverable, so
+        # removing it is not discarding anything. This is the one case where a
+        # pre-existing backup directory may be deleted without being read.
         shutil.rmtree(rollback, ignore_errors=True)
+        return None
 
-    @staticmethod
-    def _roll_back(
-        directory: Path,
-        rollback: Path,
-        moved_aside: list[str],
-        placed: list[str],
-    ) -> None:
-        """Undo a partial publication, leaving the previous set byte for byte.
-
-        Two steps, in this order and driven by what was recorded rather than by
-        what is on disk. Everything the failed attempt managed to place is
-        removed, so a new preview whose name is not in the old set cannot
-        survive as a stray. Then everything that was moved aside goes back.
-
-        ``missing_ok`` is deliberate: ``write_json`` is atomic, so a name can be
-        in ``placed`` and yet absent if the failure happened inside the write,
-        and refusing to continue over one absent file would abandon the restore
-        half-done -- which is the state this whole method exists to prevent.
-        """
-        for name in placed:
-            directory.joinpath(name).unlink(missing_ok=True)
-        for name in moved_aside:
-            rollback.joinpath(name).replace(directory.joinpath(name))
-        shutil.rmtree(rollback, ignore_errors=True)
+    phase = _read_journal(rollback)
+    try:
+        _restore(directory, rollback, phase)
+    except OSError as restore_failure:
+        raise _stranded(
+            directory,
+            rollback,
+            RuntimeError("an earlier publication left this backup"),
+            restore_failure,
+        ) from restore_failure
+    return (
+        f"restored {len(held)} file(s) of the previous preview set from a backup an earlier "
+        f"run could not put back"
+    )
 
 
 def _load(path: Path, description: str) -> dict[str, object]:

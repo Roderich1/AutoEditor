@@ -83,8 +83,20 @@ CE-040 a CE-045.
 FFmpeg se invoca con una lista de argumentos, nunca con `shell=True`. Cada
 codificación ocurre en `previews/.staging/` y se verifica allí con ffprobe
 —dimensiones, códecs y duración contra una tolerancia documentada de 1,0 s—;
-nada se mueve a `previews/` hasta que el conjunto completo pasa. Por eso un
-fallo conserva los previews anteriores y un `--force` fallido no destruye nada.
+nada se mueve a `previews/` hasta que el conjunto completo pasa.
+
+La publicación es **duradera, no atómica**, y la diferencia importa (ADR-031).
+El conjunto publicado se aparta a `previews/.rollback/` antes de colocar el
+nuevo, así que un fallo al publicar restaura el anterior byte a byte. Si falla la
+restauración misma —un disco lleno, un permiso revocado—, ninguna operación
+puede completarse por decreto: lo que se garantiza es que **no se pierde nada**.
+Cada archivo del conjunto anterior queda en `previews/` o en
+`previews/.rollback/`, el respaldo no se borra mientras la restauración esté
+incompleta, el error nombra el directorio que contiene los datos, y la siguiente
+ejecución de `preview` termina la restauración a partir de la fase registrada en
+`previews/.rollback/rollback.json`. Un respaldo cuyo diario falte o no se pueda
+interpretar se rechaza sin tocarlo, porque la fase decide qué archivos se
+eliminan y adivinarla borraría los que no tienen otra copia.
 
 `previews/index.json` describe cada archivo con su intervalo, su duración
 esperada y medida, sus dimensiones, sus códecs, su SHA-256 y su tamaño, junto al
