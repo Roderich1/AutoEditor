@@ -15,8 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from click.testing import Result
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from content_engine import cli
 from content_engine.adapters.media.preview import FFmpegPreviewRenderer
