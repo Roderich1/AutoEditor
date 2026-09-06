@@ -15,6 +15,7 @@ has none.
 from __future__ import annotations
 
 from content_engine.domain.candidate_rules import CandidatePolicy, snap_boundary
+from content_engine.domain.candidates import TranscriptChunk
 from content_engine.domain.enums import BoundaryAnchor
 from content_engine.domain.models import Transcript, TranscriptSegment
 from tests.conftest import CANDIDATE_POLICY, chunk_of, raw_candidate, speech_transcript
@@ -236,5 +237,17 @@ def test_reversion_undoes_both_ends_even_when_only_one_broke_the_policy() -> Non
 # --- purity ------------------------------------------------------------------
 
 
-def test_snapping_is_a_pure_function_of_its_arguments() -> None:
-    assert _snap(10.2, 39.4) == _snap(10.2, 39.4)
+def test_snapping_depends_on_the_values_and_not_on_the_objects() -> None:
+    """The chunk reaches CE-031 fresh from a model on a first run and read back
+    from chunks.json on a later one. The adjustment has to be the same either
+    way, or reuse would compare a stage against artifacts it cannot reproduce.
+    """
+    proposal = raw_candidate(10.2, 39.4)
+    chunk = chunk_of(speech_transcript())
+    restored = TranscriptChunk.model_validate(chunk.model_dump(mode="json"))
+
+    first = snap_boundary(proposal, chunk, SOURCE_DURATION, CANDIDATE_POLICY)
+    second = snap_boundary(proposal, restored, SOURCE_DURATION, CANDIDATE_POLICY)
+
+    assert first == second
+    assert (first.adjusted_start, first.adjusted_end) == (10.0, 39.0)

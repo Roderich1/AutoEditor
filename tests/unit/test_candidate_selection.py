@@ -20,6 +20,7 @@ from content_engine.domain.candidate_rules import (
     interval_iou,
     select_candidates,
 )
+from content_engine.domain.candidates import RawCandidate
 from content_engine.domain.enums import CandidateStatus, RejectionReason
 from content_engine.domain.scoring import calculate_total
 from tests.conftest import (
@@ -349,10 +350,17 @@ def test_the_same_proposal_from_two_chunks_keeps_distinct_identifiers() -> None:
     assert first != second
 
 
-def test_an_identifier_is_reproducible_from_the_same_inputs() -> None:
-    arguments = (TRANSCRIPT_SHA, "chunk_0000", 0, raw_candidate(10.0, 39.0), PROMPT)
+def test_an_identifier_survives_the_json_round_trip_of_its_proposal() -> None:
+    """The identifier is recomputed on a rerun from a proposal that has been
+    written to candidates.raw.json and read back. If it changed there, every
+    identifier in the artifacts would be unreproducible.
+    """
+    proposal = raw_candidate(10.0, 39.0)
+    restored = RawCandidate.model_validate(proposal.model_dump(mode="json"))
 
-    assert candidate_id(*arguments) == candidate_id(*arguments)
+    assert candidate_id(TRANSCRIPT_SHA, "chunk_0000", 0, proposal, PROMPT) == candidate_id(
+        TRANSCRIPT_SHA, "chunk_0000", 0, restored, PROMPT
+    )
 
 
 def test_an_identifier_changes_with_the_transcript_it_came_from() -> None:
