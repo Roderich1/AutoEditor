@@ -22,6 +22,9 @@ idempotency system and yt-dlp are explicitly out of scope.
 | 12 | `transcript/config.effective.json` and `stage_config_sha256`: run configuration and stage configuration are both recoverable | CE-007, CE-010, CE-017 |
 | 13 | State machine tests rewritten against a matrix transcribed from ADR-018 rather than derived from the implementation | CE-009 |
 | 14 | `.gitattributes` line-ending policy | — |
+| 15 | Reuse verifies `transcript/config.effective.json` itself, not only the manifest digests; one canonical fingerprint payload | CE-010, CE-017 |
+| 16 | GitHub Actions on Ubuntu with real FFmpeg, no secrets and no AI provider | CE-064 |
+| 17 | SonarQube findings resolved: one throwing call per `pytest.raises`, split assertions, pinned action SHAs, `--frozen --no-build` | CE-060 |
 
 ## Deferred to V0.7 (CE-047 to CE-052)
 
@@ -50,12 +53,14 @@ stage service exists yet and none is invented here.
 
 ## Known limitations
 
+- The focused integration run needs `uv run pytest -m integration --no-cov`. The
+  coverage gate measures whatever selection pytest was given, and those 13 tests
+  cover about 68% of the package alone. The gate is unchanged for the full suite.
+
 - The faster-whisper model call itself is not covered by automated tests; it
   needs a real model. It is verified manually and recorded in `CURRENT_STATE.md`.
 - `ANALYZED` onwards are declared in the state machine but unreachable until V0.4
   and V0.6 exist.
-- There is no CI yet (CE-064). Integration tests must be run locally with FFmpeg
-  installed.
 - `metrics.processing_seconds`, and so the RTF, include model download and load.
 - The cumulative effect of the 0.05 s tolerance is unbounded in theory; each
   correction is counted, and no real ASR produces the pattern that would trigger

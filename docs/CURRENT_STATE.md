@@ -18,8 +18,11 @@ FFmpeg 9.0.1:
 | `uv run ruff check .` | passed |
 | `uv run ruff format --check .` | passed, 61 files |
 | `uv run mypy src` | passed, 30 files, strict |
-| `uv run pytest` | 595 passed |
-| `uv run pytest` from a working directory outside the repository | 595 passed, no stray files |
+| `uv run pytest` | 608 passed |
+| `uv run pytest` from a working directory outside the repository | 608 passed, no stray files |
+| `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | 608 passed at both; no assertion depends on the console width |
+| GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
+| SonarCloud quality gate | passes; Reliability and Security both A |
 | `uv run pytest -m integration --no-cov` | 13 passed with real FFmpeg |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
 | Stage configuration coherent with the manifest | fingerprint rebuilt from the artifact matches the recorded one |
@@ -54,7 +57,7 @@ Coverage:
 
 | Scope | Coverage |
 |---|---|
-| Total | 99% (1145 statements, 14 missed) |
+| Total | 99% (1182 statements, 14 missed) |
 | Domain | 100% |
 | Services | 100% |
 | CLI | 98% |
@@ -130,6 +133,9 @@ This baseline must be updated after every milestone or PR.
 - `NaN`, `Infinity` and `-Infinity` are refused wherever a real number is
   required: configuration, ffprobe output, provider output, every domain model,
   and `write_json` as a last defence.
+- Reuse re-reads `transcript/config.effective.json` and rebuilds both the stage
+  hash and the fingerprint from it. A missing, corrupt, mis-schemaed, edited or
+  mismatched artifact is refused with exit code 3 and nothing is written.
 - `manifest.json` is at schema 2. A manifest written by an earlier build is
   refused rather than reinterpreted, which is the documented behaviour.
 
