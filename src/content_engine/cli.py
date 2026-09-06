@@ -309,7 +309,17 @@ def analyze(
         require_fixture_covers(analyzer, [chunk.id for chunk in plan.chunks.chunks])
 
         analysis_directory = run_path.joinpath("analysis")
-        if analysis_directory.joinpath(CANDIDATES_FILENAME).is_file() and not force:
+        # Whether this stage has run is a question for the manifest, not for the
+        # presence of one file. Gating on candidates.json alone meant deleting it
+        # put the command back on the produce path, so a run whose manifest still
+        # recorded a completed analysis quietly got a new one. Either signal now
+        # sends the invocation through verification, which refuses whatever is
+        # inconsistent and leaves the decision to --force.
+        already_analysed = (
+            RunStage.ANALYSIS.value in manifest.stages
+            or analysis_directory.joinpath(CANDIDATES_FILENAME).is_file()
+        )
+        if already_analysed and not force:
             collection = _refuse_or_reuse_analysis(manifest, analysis_directory, transcript, plan)
             summary = (
                 f"{collection.counts.selected} selected of {collection.counts.proposed} proposed"

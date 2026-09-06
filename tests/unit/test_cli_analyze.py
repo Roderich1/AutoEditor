@@ -714,3 +714,41 @@ def test_reuse_of_an_already_analyzed_run_does_not_rewrite_the_manifest(
     _analyze(harness)
 
     assert harness.run_path.joinpath("manifest.json").read_bytes() == before
+
+
+def test_deleting_the_candidates_does_not_silently_re_analyse(harness: Harness) -> None:
+    """Whether the stage has run is a question for the manifest, not for the
+    presence of one file. Gating on candidates.json meant deleting it put the
+    command back on the produce path, so a run whose manifest still recorded a
+    completed analysis quietly got a new one — the opposite of what every other
+    inconsistency here does.
+    """
+    _analyze(harness)
+    harness.analysis.joinpath(CANDIDATES_FILENAME).unlink()
+
+    result = _analyze(harness)
+
+    assert result.exit_code == EXIT_INVALID_INPUT
+    assert "--force" in cli_output(result)
+    assert not harness.analysis.joinpath(CANDIDATES_FILENAME).is_file()
+
+
+def test_force_still_regenerates_after_the_candidates_were_deleted(
+    harness: Harness,
+) -> None:
+    _analyze(harness)
+    harness.analysis.joinpath(CANDIDATES_FILENAME).unlink()
+
+    result = _analyze(harness, "--force")
+
+    assert result.exit_code == EXIT_SUCCESS
+    assert harness.analysis.joinpath(CANDIDATES_FILENAME).is_file()
+
+
+def test_a_run_that_never_analysed_still_analyses(harness: Harness) -> None:
+    """The gate must not turn a first run into a refusal."""
+    assert RunStage.ANALYSIS.value not in harness.manifest()["stages"]
+
+    result = _analyze(harness)
+
+    assert result.exit_code == EXIT_SUCCESS
