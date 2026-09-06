@@ -9,7 +9,6 @@ thirty second offset would poison every downstream stage.
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,7 +26,7 @@ from content_engine.domain.models import (
     TranscriptSegment,
     TranscriptWord,
 )
-from content_engine.utils.hashing import sha256_bytes
+from content_engine.utils.canonical import canonical_sha256
 
 #: Largest correction attributable to floating point and provider rounding.
 TIMESTAMP_TOLERANCE_SECONDS = 0.05
@@ -236,24 +235,13 @@ def stage_config(
     )
 
 
-def _canonical(payload: dict[str, object]) -> str:
-    """One serialization for every hash in this module: sorted, compact, strict."""
-    return json.dumps(
-        payload,
-        sort_keys=True,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
 def stage_config_sha256(config: TranscriptionStageConfig) -> str:
     """Hash the stage configuration so a manifest can address that exact artifact.
 
     Independent of how the artifact is laid out on disk, so reformatting the JSON
     does not invalidate a run.
     """
-    return sha256_bytes(_canonical(config.model_dump(mode="json")).encode("utf-8"))
+    return canonical_sha256(config.model_dump(mode="json"))
 
 
 def transcription_fingerprint(audio_sha256: str, config: TranscriptionStageConfig) -> str:
@@ -274,4 +262,4 @@ def transcription_fingerprint(audio_sha256: str, config: TranscriptionStageConfi
     payload: dict[str, object] = dict(config.model_dump(mode="json"))
     payload["audio_sha256"] = audio_sha256
     payload["transcript_schema_version"] = TRANSCRIPT_SCHEMA_VERSION
-    return sha256_bytes(_canonical(payload).encode("utf-8"))
+    return canonical_sha256(payload)
