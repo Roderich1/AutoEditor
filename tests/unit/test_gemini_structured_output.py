@@ -22,11 +22,11 @@ import json
 from typing import Any
 
 import pytest
+
 from content_engine.adapters.analysis.structured_output import (
     ProviderResponse,
     parse_provider_response,
 )
-
 from content_engine.domain.enums import ClipCategory
 from content_engine.domain.exceptions import EXIT_ANALYSIS, AnalysisError
 
