@@ -791,3 +791,230 @@ this field reinterpreted.
 - An adapter cannot silently multiply the run objective by the chunk count.
 - The two sides of the port can be read independently without the reader having
   to hold the distinction in their head.
+
+---
+
+## ADR-022 — The deterministic pipeline's binding rules
+
+**Status:** Accepted
+
+### Context
+
+CE-030 to CE-033 were specified as intentions rather than as algorithms. The
+specification asks for candidates "grounded near transcript content" without
+saying what near means, for boundaries snapped to "nearby" edges without saying
+which one wins when two are equally near, and for duplicates to keep "the
+stronger candidate" without saying what happens when two are equally strong.
+
+Every one of those gaps is a place where two correct-looking implementations
+produce two different shortlists from the same transcript. That is fatal to the
+only thing V0.4 exists to measure: whether a change to the prompt changed the
+candidates. If the deterministic half is not deterministic, a difference cannot
+be attributed to anything.
+
+### Decision
+
+**One pipeline order, and it is binding.**
+
+```text
+proposals from every chunk
+  -> CE-030 validation           invalid
+  -> CE-031 boundary snapping    only for intervals that survived
+  -> CE-025 deterministic score
+  -> minimum-score filter        below_min_score
+  -> CE-032 global deduplication deduplicated
+  -> CE-033 global ranking
+  -> max_candidates ceiling      not_in_top_n
+  -> selected
+```
+
+The order is what makes the five outcomes of ADR-020 mutually exclusive. The
+score filter runs before deduplication, so a candidate below the threshold can
+never be the reason a good one disappears. The ceiling runs last, over every
+chunk's output together.
+
+**Grounding is arithmetic, and its tolerance is the snapping window.** An
+instant is grounded when it falls inside a segment or word interval of its
+chunk, or lies within `boundary_snap_seconds` of a real segment or word edge.
+Both endpoints must be grounded. No text similarity, no heuristic, no model.
+
+Tying the tolerance to the snapping window is the substantive choice: an
+endpoint CE-031 could not have reached a boundary from is an endpoint nothing in
+the transcript supports, and accepting it would mean clipping audio the analyzer
+never saw a boundary for. A consequence worth stating: because a word is
+contained in its segment, word edges can never ground an instant that segment
+edges do not. They are consulted because the rule is defined over both, not
+because they decide anything today.
+
+**CE-030 accumulates every applicable reason** in a fixed order, rather than
+stopping at the first. A proposal that is both inverted and outside its chunk
+says something different about the prompt than one that is merely inverted, and
+the whole point of keeping refused proposals is to be able to see that. Duration
+rules are skipped when there is no positive duration to judge: calling an
+inverted interval "too short" would invent a measurement of something that is
+not a length.
+
+**Snapping has a total order.** Nearest edge wins; a segment edge beats a word
+edge at the same distance; a remaining tie takes the earliest for a start and
+the latest for an end. The last rule widens the clip rather than narrowing it,
+because a clip that begins a word early is watchable and one that begins a word
+late is not.
+
+**An adjustment that leaves the interval unusable is reverted whole** — inverted,
+past the end of the source, or outside the duration policy — restoring the
+proposal with zero deltas and unchanged anchors. Reverting rather than
+discarding is the rule, and half an adjustment is never kept: ADR-010 asks for
+better boundaries, not for fewer candidates, and the analyzer's judgement that a
+moment is worth clipping outranks an editorial refinement.
+
+**Deduplication is greedy over one priority order** — total descending, then the
+earlier start, then the identifier — applied globally across chunks, comparing
+each candidate against the survivors in that same order. This makes the keeper
+well defined when a candidate overlaps several survivors, and it does not
+require the duplicate relation to be transitive, which it is not: A can absorb B
+while C, which overlaps B but not A, survives as the different moment it is.
+
+**CE-033 reuses that identical order** for ranking. A total exactly at
+`min_score` survives; only a total below it is refused.
+
+**A candidate's identifier is computed before snapping**, from the transcript
+digest, the chunk, the ordinal of the proposal within its batch, the proposal
+itself and the prompt identity. Before, because the identifier is the last
+tie-break in an ordering that runs before snapping has happened. Including the
+chunk and the ordinal, because deriving it from content alone would give the
+same identifier to the same moment returned by two overlapping chunks — and that
+pair is exactly the record the funnel needs in order to count a duplicate.
+
+### Consequences
+
+- The same proposals produce the same collection, in the same order, on any
+  machine, and permuting the batches changes nothing.
+- Every one of these rules is versioned in the stage configuration, so a change
+  to snapping or deduplication invalidates reuse even though no setting moved.
+- Grounding is coarser than a semantic check would be. A timestamp inside a long
+  monologue is grounded wherever it falls. That is accepted: this rule exists to
+  refuse timestamps the transcript cannot support at all, not to judge whether
+  the moment is a good one.
+
+---
+
+## ADR-023 — A fixture analyzer is the executor until the provider exists
+
+**Status:** Accepted
+
+### Context
+
+The deterministic pipeline, its four artifacts and its reuse rules have to be
+built and exercised before the Gemini adapter of ADR-019 exists. Running them
+needs an analyzer. Using the real one would put a paid, non-reproducible network
+call inside every test of code that is meant to be deterministic, and would make
+CI depend on a credential.
+
+### Decision
+
+`FixtureAnalyzer` implements `ContentAnalyzerPort` by replaying answers recorded
+in a strict, versioned JSON file. It is temporary infrastructure for PR B and its
+tests, never a production provider.
+
+**It names itself.** The analyzer is `fixture`, its model is the fixture's, and
+its prompt identity is `fake-fixture/v1`, hashed from a versioned template.
+`manifest.versions.analysis_provider` and `analysis_model` are updated to what
+actually ran, exactly as the transcription stage records the model that really
+produced a transcript. A run analysed from a file must never leave behind a
+manifest asserting a Gemini call that never happened.
+
+**It does not borrow CE-026's identity.** `clip_candidates/v1` does not exist,
+so `manifest.versions.prompt_version` and `prompt_sha256` stay null. Filling
+them would put a hash in the manifest for a prompt nobody has written. The
+fake's own identity goes in `analysis/config.effective.json`, where it is true.
+
+**`AnalysisProvider` is not touched.** It still has one member, `gemini`, and the
+packaged defaults still name it. `fixture` is a run-time fact recorded in
+artifacts, not a configurable provider.
+
+**`--fixture` is required.** A command that silently produced nothing without one
+would be dishonest about which half of the stage exists.
+
+### Consequences
+
+- The whole analysis stage runs in CI with no network, no SDK, no credential and
+  no cost, and every test of it is deterministic.
+- A fixture batch carries candidates or a failure, never both. It may keep the
+  raw response beside an error: what the provider said before it was judged a
+  failure is the most useful thing about the failure.
+- Adding the Gemini adapter changes which object is constructed in `cli.py` and
+  nothing else: the service, the pipeline and the artifacts are provider-neutral
+  by construction, and `AnalyzerIdentity` already carries the shape a real
+  provider needs.
+- Artifacts produced by a fixture run are marked as such and cannot be confused
+  with provider output when the comparison eventually matters.
+
+---
+
+## ADR-024 — The analysis fingerprint covers the artifacts, not only the inputs
+
+**Status:** Accepted
+
+**Supersedes** the reuse contract in ADR-022 as first implemented.
+
+### Context
+
+ADR-017 defines a stage fingerprint as the identity of what a stage consumed.
+That works for transcription, which writes one artifact the reuse check reads
+back and validates in full: an edited `transcript.json` is caught by the reader,
+so the fingerprint only has to answer "were these the same inputs".
+
+Analysis writes four artifacts. The first implementation followed the
+transcription shape — a digest over the transcript, the raw batches and the
+stage configuration — and an independent review found the gap that leaves.
+`chunks.json` was never read back at all, on the argument that it could be
+rebuilt from the transcript. `candidates.json`, the shortlist a human is
+actually shown, was read only to check its own invariants. The identity fields
+above the raw batches were not covered either.
+
+So a candidate's topic, its interval, its score, the order of the ranking, the
+text of a chunk or the recorded analyzer version could all be edited between two
+runs, every artifact would still validate, and the second run would reuse them
+and report success.
+
+### Decision
+
+The analysis fingerprint covers the transcript digest and the **whole** of all
+four artifacts, each serialized canonically. Whole models, not chosen fields:
+selecting a subset is precisely how the first version left two artifacts
+unprotected, and selecting correctly would require knowing in advance which
+edits matter.
+
+`ANALYSIS_FINGERPRINT_VERSION` is 2. Artifacts written under version 1 are
+refused rather than reused under a weaker digest.
+
+This makes it an **integrity digest over one execution** rather than a portable
+identity. Two runs of identical inputs produce different fingerprints, because
+`generated_at` lives inside `candidates.json`. That is accepted: the question
+this digest answers is "may these four files be reused", not "is this the same
+experiment". `config_sha256` and `stage_config_sha256` remain the portable
+identities, and neither changes.
+
+**A digest is not enough on its own**, so `coherence_problem()` checks the four
+against each other and against the current transcript. A set of artifacts copied
+from another run would be internally consistent, would rebuild its own
+fingerprint, and would be entirely wrong about the run holding it. The same
+check runs before anything is written, so an incoherent set cannot be produced
+either.
+
+**All four are read back and validated**, including `chunks.json`, which gets
+the strict versioned reader it never had, and is compared against the chunks the
+current transcript and settings produce. A file trusted because it could be
+regenerated is a file nobody checked.
+
+### Consequences
+
+- Editing any field of any analysis artifact is refused with exit code 3, and
+  the refusal writes nothing.
+- Reuse costs four file reads and four model validations instead of two. That is
+  paid once per invocation and is far below the cost of the stage it skips.
+- The analysis stage and the transcription stage now compute their fingerprints
+  differently. That is deliberate and the reason is written down here, rather
+  than left as an inconsistency for a later reader to discover.
+- When CE-047–CE-052 generalise stages, this is the shape a multi-artifact stage
+  needs; transcription can keep the simpler one because it writes one artifact.

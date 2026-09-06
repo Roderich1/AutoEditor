@@ -38,23 +38,26 @@ Do not silently choose one version.
 - V0.2 Media: stabilized and merged, with integration tests against real FFmpeg.
 - V0.3 Transcription: stabilized and merged, validated against a real model and
   real Spanish technical speech.
-- V0.4 CE-023–CE-033: in progress. The Candidate Intelligence Engine is being
-  built in stages; see `docs/CURRENT_STATE.md` for which CE requirements have
-  landed.
+- V0.4 CE-023–CE-033: in progress. CE-023, CE-024, CE-025 and CE-027 are merged
+  into `main` (PR #4, merge commit `70fb6ed`). CE-030–CE-033 and the `analyze`
+  command are implemented on `feat/candidate-engine-pipeline`, pending review.
+  See `docs/CURRENT_STATE.md` for detail.
 - V0.5 and later: not implemented.
 
-`main` carries the stabilized code as of merge commit `d047479` (PR #3). It is
-the correct base for V0.4 work.
+`main` carries the candidate-engine foundation as of merge commit `70fb6ed`
+(PR #4). It is the correct base for the remaining V0.4 work.
 
 ## Current execution order
 
 1. V0.1–V0.3 stabilization: **merged** (`d047479`).
 2. CE-023–CE-033 in three pull requests against `main`:
    - foundation — chunker, candidate schemas, deterministic score, the analyzer
-     port as a Protocol only;
+     port as a Protocol only: **merged** (`70fb6ed`, PR #4);
    - deterministic pipeline — validation, boundary snapping, IoU and
-     deduplication, ranking, the `analyze` command driven by a fake analyzer;
-   - provider — the `clip_candidates/v1` prompt and the Gemini adapter.
+     deduplication, ranking, the `analyze` command driven by a fixture analyzer:
+     **implemented on `feat/candidate-engine-pipeline`**, pending review;
+   - provider — CE-026 `clip_candidates/v1`, CE-028 the Gemini adapter and
+     CE-029 structured-output parsing: **next**.
 3. Do not merge a pull request without explicit authorization.
 4. Keep yt-dlp outside the Content Engine core until the Candidate Intelligence
    Engine has demonstrated useful candidate quality.
@@ -119,6 +122,13 @@ Run integration tests with real FFmpeg when media behaviour changes:
 
 ```bash
 uv run pytest -m integration --no-cov
+```
+
+The analysis stage is exercised with a fixture analyzer and never calls a
+provider:
+
+```bash
+content-engine analyze RUN_ID --fixture PATH [--config PATH] [--force]
 ```
 
 `--no-cov` is required for the focused run. `--cov-fail-under=80` measures

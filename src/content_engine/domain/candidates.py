@@ -48,10 +48,15 @@ from content_engine.domain.models import TranscriptSegment, _Model
 
 #: Bumped whenever analysis/chunks.json changes incompatibly.
 CHUNKS_SCHEMA_VERSION = 1
+#: Bumped whenever the windowing rule or the rendered chunk text format changes.
+#: Both change what the analyzer is shown, so both change what it returns.
+CHUNKING_RULES_VERSION = 1
 #: Bumped whenever analysis/candidates.raw.json changes incompatibly.
 RAW_CANDIDATES_SCHEMA_VERSION = 1
 #: Bumped whenever analysis/candidates.json changes incompatibly.
 CANDIDATES_SCHEMA_VERSION = 1
+#: Bumped whenever analysis/config.effective.json changes incompatibly.
+ANALYSIS_STAGE_CONFIG_SCHEMA_VERSION = 1
 
 #: Timestamps are seconds held as binary floats, so equality between a value and
 #: the arithmetic that produced it is only ever equality to within representation
@@ -187,6 +192,137 @@ class CandidateScores(_Artifact):
     clarity: int = Field(ge=0, le=100)
     engagement_potential: int = Field(ge=0, le=100)
     relevance: int = Field(ge=0, le=100)
+
+
+class RawCandidateBatch(_Artifact):
+    """What one analyzer call returned for one chunk, as written to disk.
+
+    The disk counterpart of ``CandidateBatch`` on the port. The port's version
+    is a frozen dataclass because it lives for the length of a call; this one is
+    a validated artifact because it has to survive a process boundary and be
+    read back by a later invocation that will trust it.
+
+    ``raw_response`` is preserved exactly as the provider returned it, with no
+    normalisation of whitespace, encoding or line endings. That is what makes a
+    disagreement between what the provider said and what the domain made of it
+    investigable after the fact, and it is the only field here that is verbatim.
+    """
+
+    chunk_id: str = Field(min_length=1)
+    candidates: list[RawCandidate]
+    raw_response: str
+    model: str = Field(min_length=1)
+
+
+class RawCandidateCollection(_Artifact):
+    """``analysis/candidates.raw.json``.
+
+    Everything the analyzer proposed, before a single rule ran, together with
+    the identity of whatever produced it. Kept as its own artifact rather than
+    folded into the validated collection because the two answer different
+    questions: this one says what the provider did, the other says what the
+    engine decided about it.
+    """
+
+    schema_version: int = RAW_CANDIDATES_SCHEMA_VERSION
+    #: The chunking rules version, so the batches can be tied to the windows
+    #: they were produced from.
+    rules_version: int
+    transcript_sha256: str = Field(min_length=64, max_length=64)
+    #: What actually ran, never what the configuration hoped would run.
+    analyzer: str = Field(min_length=1)
+    analyzer_version: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+    prompt_sha256: str = Field(min_length=64, max_length=64)
+    #: The fixture these batches were replayed from. Null once a real provider
+    #: produces them, which is the only honest value for a run that called one.
+    fixture_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    batches: list[RawCandidateBatch]
+    proposed_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_batches(self) -> RawCandidateCollection:
+        identifiers = [batch.chunk_id for batch in self.batches]
+        repeated = sorted({name for name in identifiers if identifiers.count(name) > 1})
+        if repeated:
+            raise ValueError(
+                f"more than one batch was recorded for the same chunk: {', '.join(repeated)}"
+            )
+
+        # One execution, one model. The field above is what every artifact and
+        # the manifest record as the executor, so a batch naming another model
+        # would file its candidates under something that did not produce them.
+        # A run that really used two would be two runs.
+        disagreeing = sorted({batch.model for batch in self.batches if batch.model != self.model})
+        if disagreeing:
+            raise ValueError(
+                f"the collection records model {self.model!r} but a batch names "
+                f"{', '.join(repr(name) for name in disagreeing)}"
+            )
+
+        total = sum(len(batch.candidates) for batch in self.batches)
+        if self.proposed_count != total:
+            raise ValueError(
+                f"proposed_count is {self.proposed_count} for {total} candidates across "
+                f"{len(self.batches)} batches"
+            )
+        return self
+
+
+class AnalysisStageConfig(_Artifact):
+    """``analysis/config.effective.json``: what the analysis stage really ran.
+
+    The run-level ``config.effective.json`` records the configuration the
+    experiment was created with. This one records what happened, which differs
+    whenever ``analyze --config`` names another profile, and — the part that
+    matters most in this pull request — it names the analyzer that actually
+    produced the candidates rather than the provider the configuration would
+    have used. A run analysed from a fixture must never leave behind a record
+    that reads as though Gemini had been called.
+
+    It carries no credential, no key name and no path from the machine it ran
+    on, so it is comparable across machines and safe to attach to a report.
+    """
+
+    schema_version: int = ANALYSIS_STAGE_CONFIG_SCHEMA_VERSION
+
+    #: The executor. Real identity, resolved at run time.
+    analyzer: str = Field(min_length=1)
+    analyzer_version: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    #: What the configuration asked for, kept beside what ran so the difference
+    #: between "configured for Gemini" and "analysed from a fixture" is visible
+    #: in the artifact rather than inferred from its absence.
+    provider_configured: str = Field(min_length=1)
+    model_configured: str = Field(min_length=1)
+
+    prompt_version: str = Field(min_length=1)
+    prompt_sha256: str = Field(min_length=64, max_length=64)
+    fixture_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+
+    window_seconds: int = Field(gt=0)
+    overlap_seconds: int = Field(ge=0)
+
+    min_duration_seconds: float = Field(gt=0)
+    max_duration_seconds: float = Field(gt=0)
+    min_score: float = Field(ge=0, le=100)
+    target_candidates: int = Field(gt=0)
+    max_candidates: int = Field(gt=0)
+    dedupe_iou: float = Field(ge=0, le=1)
+    boundary_snap_seconds: float = Field(gt=0)
+
+    chunking_rules_version: int
+    validation_rules_version: int
+    boundary_rules_version: int
+    dedupe_rules_version: int
+    ranking_rules_version: int
+    candidate_id_version: int
+    score_formula_version: int
+
+    chunks_schema_version: int
+    raw_schema_version: int
+    candidates_schema_version: int
 
 
 class RawCandidate(_Artifact):

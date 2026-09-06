@@ -19,11 +19,19 @@ uv run content-engine doctor
 uv run content-engine inspect sample.mp4
 uv run content-engine run sample.mp4 --config configs/fast.toml
 uv run content-engine transcribe RUN_ID --config configs/fast.toml
+uv run content-engine analyze RUN_ID --fixture fixture.json
 ```
 
 `doctor --require-ai` convierte las credenciales y el modelo de análisis en
-requisitos obligatorios; por defecto son advertencias, porque la etapa de
-análisis todavía no existe.
+requisitos obligatorios; por defecto son advertencias, porque todavía no hay
+adaptador de proveedor.
+
+`analyze` exige `--fixture` en esta versión. La mitad determinista del motor de
+candidatos —validación, ajuste de límites, puntuación, deduplicación y
+ranking— está terminada; el adaptador de Gemini no. El analizador de fixture
+reproduce respuestas grabadas en un archivo, sin red, sin SDK y sin credencial,
+y se identifica como `fixture` en el manifiesto para que ninguna ejecución
+afirme una llamada que nunca ocurrió.
 
 ## Configuración
 
@@ -74,6 +82,8 @@ Cada ejecución vive en `workspace/runs/RUN_ID` y es un experimento:
 - `media/probe.json`, `audio/source.wav`
 - `transcript/` — `transcript.json`, `.txt`, `.srt`, `metrics.json` y
   `config.effective.json`
+- `analysis/` — `chunks.json`, `candidates.raw.json`, `candidates.json` y
+  `config.effective.json`
 
 ### Dos niveles de configuración
 
@@ -83,6 +93,7 @@ Un run guarda dos configuraciones, deliberadamente:
 |---|---|
 | `config.effective.json` (raíz) | La configuración con la que se creó el experimento |
 | `transcript/config.effective.json` | Lo que la etapa de transcripción ejecutó realmente |
+| `analysis/config.effective.json` | Lo que la etapa de análisis ejecutó realmente |
 
 Difieren siempre que `transcribe --config` apunta a otro perfil, algo legítimo
 —es como se compara un modelo contra otro sobre el mismo audio— pero nunca
@@ -101,6 +112,26 @@ es idéntico entre máquinas. `transcribe` reutiliza un transcript solamente cua
 su fingerprint coincide con el audio y las opciones actuales, incluido el hardware
 realmente resuelto; si no coincide, lo rechaza y explica por qué en lugar de
 mezclar artefactos incompatibles. `--force` regenera.
+
+`analyze` sigue la misma disciplina con cuatro artefactos en lugar de uno: los
+recalcula todos en memoria antes de escribir nada, y para reutilizarlos exige que
+los cuatro estén presentes, se lean y validen contra su propio esquema, que
+concuerden entre sí y con el transcript actual, que los chunks en disco sean los
+que este transcript y esta configuración producen, que el fingerprint se
+reconstruya desde los cuatro más el transcript, y que la configuración pedida
+ahora sea la registrada. Editar cualquier campo de cualquiera de los cuatro
+—un `topic`, un intervalo, una puntuación, el orden del ranking— se rechaza con
+código 3 sin tocar nada.
+
+Si el run había quedado en `FAILED_ANALYSIS` por un `--force` fallido y los
+artefactos anteriores siguen coincidiendo con todas las entradas, la
+verificación demuestra que la etapa está completa: el run vuelve a `ANALYZED` y
+el fallo se limpia. Un rechazo no recupera nada.
+
+`analysis/config.effective.json` registra qué analizador ejecutó de verdad junto
+al proveedor que la configuración nombraba, y `manifest.versions.analysis_provider`
+guarda el ejecutor real. Un run analizado desde un fixture no puede quedar con un
+manifiesto que diga `gemini`.
 
 Una ejecución que falla conserva su directorio, su estado `FAILED_*` y el motivo,
 para poder diagnosticarla.
