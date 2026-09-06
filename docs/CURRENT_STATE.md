@@ -20,7 +20,7 @@ FFmpeg 9.0.1:
 | `uv run mypy src` | passed, 30 files, strict |
 | `uv run pytest` | 595 passed |
 | `uv run pytest` from a working directory outside the repository | 595 passed, no stray files |
-| `uv run pytest -m integration` | 13 passed with real FFmpeg |
+| `uv run pytest -m integration --no-cov` | 13 passed with real FFmpeg |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
 | Stage configuration coherent with the manifest | fingerprint rebuilt from the artifact matches the recorded one |
 | `uv build` | wheel and sdist built; the wheel ships `content_engine/resources/default.toml` |
@@ -60,7 +60,13 @@ Coverage:
 | CLI | 98% |
 | faster-whisper adapter | 79% |
 
-`--cov-fail-under=80` is enabled.
+`--cov-fail-under=80` is enabled and measures the whole suite.
+
+The focused integration run needs `--no-cov`. The gate applies to whatever
+selection pytest was given, and 13 integration tests exercise about 68% of the
+package on their own, so `uv run pytest -m integration` fails on coverage even
+when all 13 pass. Lowering the threshold would weaken the gate where it actually
+means something, so the focused command opts out of measurement instead.
 
 Files with meaningful uncovered lines:
 

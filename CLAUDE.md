@@ -5,7 +5,8 @@
 - Repository name: AutoEditor.
 - Product and Python package name: Content Engine.
 - Current stage: V0 technical core.
-- Current objective: stabilize V0.1–V0.3 before implementing CE-023–CE-033.
+- Current objective: merge the V0.1–V0.3 stabilization, then implement
+  CE-023–CE-033.
 - Interface: local CLI.
 - Language: Python 3.12.
 - Package manager: uv.
@@ -34,21 +35,26 @@ Do not silently choose one version.
 
 ## Current implementation status
 
-- V0.1 Foundation: implemented but requires stabilization.
-- V0.2 Media: main functionality implemented; real integration tests incomplete.
-- V0.3 Transcription: main functionality implemented; real-model validation and
-  metrics incomplete.
-- V0.4 CE-023–CE-033: not implemented.
+- V0.1 Foundation: stabilized on `chore/stabilize-v0-1-v0-3`, pending merge.
+- V0.2 Media: stabilized, with integration tests against real FFmpeg.
+- V0.3 Transcription: stabilized, validated against a real model and real
+  Spanish technical speech.
+- V0.4 CE-023–CE-033: not implemented, and not started until the stabilization
+  is merged.
 - V0.5 and later: not implemented.
 
-Read `docs/CURRENT_STATE.md` for the detailed status.
+Stabilization is implemented but not yet merged. Until PR #3 lands, `main` still
+carries the unstabilized code, so read `docs/CURRENT_STATE.md` for what is true
+on the branch rather than assuming either state.
 
 ## Current execution order
 
-1. Stabilize V0.1–V0.3 in a dedicated pull request.
-2. Verify the stabilization PR.
-3. Merge stabilization only after all required checks pass.
-4. Start CE-023–CE-033 in a separate branch and pull request.
+1. Stabilization of V0.1–V0.3: **implemented**, on `chore/stabilize-v0-1-v0-3`,
+   open as PR #3.
+2. Verify the stabilization PR. All required checks must pass.
+3. Merge it. Do not merge without explicit authorization.
+4. Only after the merge, start CE-023–CE-033 in a separate branch and pull
+   request. Do not begin that work on this branch.
 5. Keep yt-dlp outside the Content Engine core until the Candidate Intelligence
    Engine has demonstrated useful candidate quality.
 
@@ -108,7 +114,20 @@ uv run pytest
 Run `uv build` and install the wheel in a clean environment when packaging or
 configuration loading changes.
 
-Run integration tests with real FFmpeg when media behaviour changes.
+Run integration tests with real FFmpeg when media behaviour changes:
+
+```bash
+uv run pytest -m integration --no-cov
+```
+
+`--no-cov` is required for the focused run. `--cov-fail-under=80` measures
+whatever selection pytest was given, and the 13 integration tests cover about
+68% of the package on their own, so the command fails on coverage even when all
+13 pass. Never lower the threshold to make a focused run green: the gate exists
+for `uv run pytest`.
+
+The same commands run in CI on Ubuntu (`.github/workflows/ci.yml`) with real
+FFmpeg, no secrets and no AI provider.
 
 ## Required evidence
 

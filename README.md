@@ -131,8 +131,13 @@ con `lavfi`; no descargan nada ni tocan la red. Se omiten con un motivo explíci
 si FFmpeg no está instalado:
 
 ```console
-uv run pytest -m integration
+uv run pytest -m integration --no-cov
 ```
+
+`--no-cov` es obligatorio en la ejecución enfocada. La puerta de cobertura
+(`--cov-fail-under=80`) mide la suite completa; aplicada solo a las 13 pruebas de
+integración da ~68% y haría fallar el comando aunque las 13 pasen. La puerta se
+mantiene intacta para `uv run pytest`, que es donde significa algo.
 
 `faster-whisper` es opcional durante el desarrollo. Se instala mediante el extra
 `transcription`; `doctor` informa claramente si no está disponible.
