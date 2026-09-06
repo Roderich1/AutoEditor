@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -257,15 +258,28 @@ def write_fixture(path: Path, fixture: AnalysisFixture) -> Path:
     return path
 
 
-def cli_output(result: object) -> str:
-    """CLI output with newlines and runs of spaces collapsed to single spaces.
+#: Every SGR/CSI sequence rich may emit. Matched rather than assumed absent,
+#: because colour is decided by the environment and not by this suite.
+ANSI = re.compile(r"\[[0-9;]*[A-Za-z]")
 
-    Rich wraps to the console width, and that width differs between a developer
-    terminal and a CI runner, so a phrase that fits on one line locally can be
-    split mid-sentence elsewhere. Asserting on the raw text makes a test depend
-    on terminal geometry rather than on what the command said.
+
+def cli_output(result: object) -> str:
+    """CLI output with styling removed and whitespace collapsed.
+
+    Two things vary between a developer terminal and a CI runner, and neither is
+    anything a test means to assert on.
+
+    Rich wraps to the console width, so a phrase that fits on one line locally is
+    split mid-sentence elsewhere. Hence the whitespace collapse.
+
+    Rich also emits colour when the environment asks for it, and it styles parts
+    of a token independently: an option renders as `-` `-fixture` with an escape
+    sequence between the two dashes, so a plain `"--fixture" in output` is true
+    without colour and false with it. That is exactly the kind of failure that
+    only appears in CI, and it did. Stripping the escapes first makes the
+    assertion about what the command said rather than about how it was painted.
     """
-    return " ".join(str(getattr(result, "output", result)).split())
+    return " ".join(ANSI.sub("", str(getattr(result, "output", result))).split())
 
 
 # --- the analyze harness -----------------------------------------------------
