@@ -23,9 +23,9 @@ Python 3.12.10, FFmpeg 9.0.1:
 | Check | Result |
 |---|---|
 | `uv run ruff check .` | passed |
-| `uv run ruff format --check .` | passed, 92 files |
+| `uv run ruff format --check .` | passed, 94 files |
 | `uv run mypy src` | passed, 43 files, strict |
-| `uv run pytest` | 1219 passed, 1 skipped, 133 more than the 1086 on `main` |
+| `uv run pytest` | 1246 passed, 1 skipped, 160 more than the 1086 on `main` |
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
@@ -46,6 +46,8 @@ Python 3.12.10, FFmpeg 9.0.1:
 | `analyze --fixture` without a credential, from the wheel | exit 0, recorded as `fixture` with prompt `fake-fixture/v1`, never as Gemini |
 | Fixture artifacts offered to the provider, and the reverse | exit 3 both ways, nothing written; no special case, the stage configuration digest decides |
 | Credential or credential name anywhere under a run directory | none; searched recursively as bytes |
+| Provider reuse with the credential removed, from the wheel | exit 0, reuse reported, no client built, the variable never read, all four artifacts and the manifest byte-identical |
+| An unknown `analysis.prompt_version`, from the wheel | exit 2 before the run is touched, in both fixture and provider mode, with no silent reuse of the artifacts the known prompt produced |
 | Wheel in a clean venv, arbitrary working directory with spaces and non-ASCII characters | `doctor`, `inspect`, `run`, `transcribe` all work |
 | Real faster-whisper transcription | passed, model `small` on cpu/int8, 34 s of Spanish technical speech |
 | Artifacts UTF-8 without BOM, LF endings | verified byte by byte |
@@ -76,7 +78,7 @@ Coverage:
 
 | Scope | Coverage |
 |---|---|
-| Total | 99.44% (2332 statements, 13 missed) |
+| Total | 99.45% (2373 statements, 13 missed) |
 | Domain | 100% |
 | Services | 100% |
 | Adapters | 100% except the faster-whisper decode loop |
@@ -102,7 +104,7 @@ Every module added by CE-026, CE-028 and CE-029 is at 100%:
 `adapters/analysis/gemini_analyzer.py`, as are the CE-030 to CE-033 modules
 beside them. The 13 uncovered lines are the same pre-existing ones as before:
 the faster-whisper decode loop, `main()` and `__main__`, one transcription
-warning branch and two configuration lines. Coverage rose from 99.38% to 99.44%
+warning branch and two configuration lines. Coverage rose from 99.38% to 99.45%
 across the branch.
 
 This baseline must be updated after every milestone or PR.
@@ -320,6 +322,12 @@ ADR-026 the dependency decision, ADR-027 retries and exit codes.
   `importlib.resources`, so it is found from a checkout, an installed wheel and
   any working directory. Its SHA-256 is taken over the text with line endings
   normalised, so the same prompt has the same identity on Windows and on Linux.
+  `analysis.prompt_version` **selects** it: the short name a profile writes
+  (`v1`) resolves to the resource, the text sent, the identity recorded
+  (`clip_candidates/v1`), the digest, the stage configuration, the fingerprint
+  and therefore reuse. An unknown version exits 2 before the run is touched, in
+  fixture mode as well as provider mode, and is never resolved to the only one
+  that happens to exist.
   It states the safety half explicitly: the transcript is data, instructions
   inside it are never followed, nothing is executed, nothing is invented, no
   total score is returned, virality is never promised, and
@@ -346,9 +354,25 @@ ADR-026 the dependency decision, ADR-027 retries and exit codes.
   so nothing is recorded. A provider failure is exit 5 and `FAILED_ANALYSIS`.
   Retries cover transport errors, 408, 429 and 5xx only, three attempts with a
   2s/8s backoff; a 400, 401, 403 or schema violation is never retried.
+- **Identity before construction.** What a run *would* record — analyzer,
+  version, model, selected prompt — is computed with no SDK import, no
+  environment read, no client and no socket. That identity builds the plan and
+  decides reuse, so verifying four finished artifacts never needs a credential:
+  a machine that has lost its key can still be asked what a completed run
+  contains, and recovery from `FAILED_ANALYSIS` works the same way. Only once
+  candidates must actually be produced are the SDK, the model and the credential
+  validated and a client built.
+- **The manifest names the prompt that was sent.**
+  `manifest.versions.prompt_version` and `prompt_sha256` hold the selected
+  prompt for a provider run and `null` for a fixture run, and are rewritten in
+  both directions by `--force` so they never describe the previous executor.
+  That is a narrower question than the stage configuration's field of the same
+  name, which records the prompt identity of whatever ran and for which the
+  fixture's `fake-fixture/v1` is truthful.
 - **Credentials.** `GEMINI_API_KEY` is read only when the real analyzer is
-  constructed. A fixture run never consults it, and a test asserts the variable
-  is not merely unused but never looked at. Error messages are rebuilt from the
+  constructed — which is now the produce path only. A fixture run never consults
+  it, a reuse never consults it, and tests assert the variable is not merely
+  unused but never looked at. Error messages are rebuilt from the
   status code rather than copied, because the SDK's own `str()` embeds the whole
   decoded response body; the environment is read on the failure path only, to
   redact a key the provider echoed back.
@@ -375,6 +399,10 @@ machine can take it.
 | `content-engine transcribe --config configs/fast.toml` | 1346 segments, 6398 words, language `es`, 618.95 s on cpu/int8, RTF 0.2945, model `small` |
 | Chunking, at the packaged 360 s window and 30 s overlap | **7 chunks**, 125 to 392 segments each, 6323 to 16139 characters, 78074 characters in total |
 | `content-engine analyze` (provider mode) | **exit 2**: `GEMINI_API_KEY` is not set |
+
+Checked again after the identity/reuse fix, with the credential still absent
+from the process, user and machine environments and no `.env` present. The
+answer is unchanged and the reason is unchanged.
 
 The refusal was checked rather than assumed: after it, `manifest.json` was
 byte-identical to the copy taken beforehand, the run was still `TRANSCRIBED`
@@ -411,6 +439,15 @@ once.
   non-ASCII characters in a source path are replaced with U+FFFD inside
   `manifest.failure.message`. `manifest.input.path` is unaffected and remains
   exact.
+- **`model` is the identifier requested, not the revision that answered.** The
+  response carries `modelVersion`, documented only as "the model version used to
+  generate the response"; the published reference does not say whether it
+  returns the alias or a dated build, and no call has been made here to observe
+  it. The adapter accepts the requested model or a dated variant of it, refuses
+  anything else, and records the requested identifier. No schema was widened to
+  hold a resolved model, because that needs evidence from a real response that
+  this branch does not have. ADR-027 records what would change if a live run
+  showed a specific revision.
 - `analysis.model` is set to `gemini-3.5-flash-lite`, confirmed against the
   current published model list as stable and available. **It has still never been
   called.** The adapter, the prompt and the parser are complete and verified

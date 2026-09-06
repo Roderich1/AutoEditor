@@ -69,9 +69,15 @@ extra), ADR-027 (retries, exit codes, and the fact that an unparseable response
 is not persisted).
 
 `manifest.versions.prompt_version` and `prompt_sha256` remain null for a fixture
-run and are set from `clip_candidates/v1` for a provider run. The stage
-configuration records both what ran and what the configuration asked for, so the
-two are distinguishable rather than inferred.
+run and are set from the selected prompt for a provider run. Switching executor
+with `--force` rewrites them in both directions, so they never describe the
+previous run. The stage configuration separately records what ran and what the
+configuration asked for, so the two are distinguishable rather than inferred.
+
+`analysis.prompt_version` selects the prompt. It names a short version (`v1`)
+which resolves to a packaged resource and to the qualified identity
+(`clip_candidates/v1`) recorded in artifacts. An unknown version is refused with
+exit 2 before the run is touched, in both fixture and provider mode.
 
 ## What is still unmeasured
 

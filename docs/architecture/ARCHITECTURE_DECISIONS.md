@@ -448,8 +448,9 @@ one before a second stage needs it would be guessing.
 `manifest.json` carries `schema_version`. A manifest from an unknown schema is
 refused rather than guessed at. `stages` is a map so CE-047–CE-052 can add
 fingerprints for later stages without changing the domain; today only
-`transcription` is populated. `prompt_version` and `prompt_sha256` are present as
-`null` until CE-026 creates a real prompt.
+`transcription` is populated. `prompt_version` and `prompt_sha256` are `null`
+until a run sends a real prompt; CE-026 fills them for a provider run and they
+stay `null` for one replayed from a fixture.
 
 ### Consequences
 
@@ -923,10 +924,11 @@ actually ran, exactly as the transcription stage records the model that really
 produced a transcript. A run analysed from a file must never leave behind a
 manifest asserting a Gemini call that never happened.
 
-**It does not borrow CE-026's identity.** `clip_candidates/v1` does not exist,
-so `manifest.versions.prompt_version` and `prompt_sha256` stay null. Filling
-them would put a hash in the manifest for a prompt nobody has written. The
-fake's own identity goes in `analysis/config.effective.json`, where it is true.
+**It does not borrow CE-026's identity.** `manifest.versions.prompt_version`
+and `prompt_sha256` stay null for a replayed run even now that
+`clip_candidates/v1` exists, because a fixture did not send it. The fake's own
+identity goes in `analysis/config.effective.json`, where the field means "the
+prompt identity of whatever ran" and `fake-fixture/v1` is true.
 
 **`AnalysisProvider` is not touched.** It still has one member, `gemini`, and the
 packaged defaults still name it. `fixture` is a run-time fact recorded in
@@ -1179,3 +1181,19 @@ claim is not evidence of a mismatch.
 - Retry counts and backoff are module constants, not configuration. They change
   how long a failure takes, never what the artifacts contain, so they are
   deliberately outside the stage configuration and the fingerprint.
+- **`model` is the identifier that was requested, not the backend revision that
+  answered.** The response carries `modelVersion`, documented only as "the model
+  version used to generate the response"; the published reference does not say
+  whether it returns the alias (`gemini-3.5-flash-lite`) or a dated build
+  (`gemini-3.5-flash-lite-001`), and no call has been made from this repository
+  to observe which. The adapter therefore accepts a reported value that is the
+  requested model or the requested model followed by `-`, refuses anything else,
+  and records the requested identifier in every artifact.
+
+  No schema was widened to hold a resolved model, because widening one requires
+  knowing what a real response contains, and this branch does not. The reported
+  values are collected on the analyzer for the end-of-run report only. If a live
+  run shows the provider naming a specific revision, adding `model_resolved`
+  beside `model` is a schema bump with evidence behind it; until then, a run
+  records the model it asked for and this consequence says so plainly rather
+  than letting "the exact model" be assumed.

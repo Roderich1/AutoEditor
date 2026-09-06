@@ -44,6 +44,17 @@ Los artefactos producidos por un modo nunca se reutilizan en el otro: la
 configuración efectiva de la etapa nombra al analizador que realmente corrió y
 su digest es lo que decide la reutilización.
 
+Reutilizar no requiere credencial. La identidad que un run *tendría* se calcula
+sin SDK, sin cliente y sin leer el entorno, así que verificar cuatro artefactos
+ya terminados funciona en una máquina que ya no tiene la clave. Solo producir
+—primera ejecución o `--force`— valida el SDK, el modelo y la credencial.
+
+`analysis.prompt_version` selecciona el prompt: `v1` resuelve al recurso
+empaquetado y a la identidad `clip_candidates/v1` que queda registrada. Una
+versión desconocida se rechaza con código 2 antes de tocar el run, también en
+modo fixture. El manifiesto registra `prompt_version` y `prompt_sha256` reales
+en una ejecución con proveedor y `null` en una con fixture.
+
 Un fallo real del proveedor deja el run en `FAILED_ANALYSIS` (código 5) y no
 escribe ningún artefacto. Los reintentos se limitan a fallos transitorios
 —timeout, 429, 5xx— con tres intentos y espera acotada; un 400, 401 o 403 no se

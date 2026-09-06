@@ -215,7 +215,15 @@ class VersionManifest(_Model):
     transcription_model: str
     analysis_provider: str
     analysis_model: str
-    #: Populated by CE-026; null until the candidate prompt exists.
+    #: Which versioned prompt resource this run actually sent, and its digest.
+    #: Null when none was sent -- a run analysed from a fixture, or one that has
+    #: not been analysed at all.
+    #:
+    #: Narrower than the stage configuration's field of the same name, which
+    #: records the prompt identity of whatever executed and for which a
+    #: fixture's `fake-fixture/v1` is a truthful answer. Here a stand-in must
+    #: leave null, or a reader asking "which prompt produced these candidates"
+    #: gets the name of a prompt that was never sent anywhere.
     prompt_version: str | None = None
     prompt_sha256: str | None = None
 
