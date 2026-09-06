@@ -12,12 +12,6 @@ from pathlib import Path
 
 import pytest
 from click.testing import Result
-from content_engine.domain.preview_rules import (
-    PREVIEW_INDEX_FILENAME,
-    PREVIEW_STAGE_CONFIG_FILENAME,
-    preview_filename,
-)
-from content_engine.domain.previews import PREVIEW_INDEX_SCHEMA_VERSION
 from typer.testing import CliRunner
 
 from content_engine import cli
@@ -29,6 +23,12 @@ from content_engine.domain.exceptions import (
     EXIT_RENDER,
     EXIT_SUCCESS,
 )
+from content_engine.domain.preview_rules import (
+    PREVIEW_INDEX_FILENAME,
+    PREVIEW_STAGE_CONFIG_FILENAME,
+    preview_filename,
+)
+from content_engine.domain.previews import PREVIEW_INDEX_SCHEMA_VERSION
 from tests.conftest import (
     Analysed,
     FakeMedia,

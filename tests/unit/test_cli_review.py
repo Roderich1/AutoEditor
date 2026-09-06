@@ -11,9 +11,6 @@ import json
 
 import pytest
 from click.testing import Result
-from content_engine.domain.preview_rules import preview_filename
-from content_engine.domain.review import DECISIONS_SCHEMA_VERSION
-from content_engine.services.review_service import DECISIONS_FILENAME
 from typer.testing import CliRunner
 
 from content_engine import cli
@@ -23,6 +20,9 @@ from content_engine.domain.exceptions import (
     EXIT_INVALID_INPUT,
     EXIT_SUCCESS,
 )
+from content_engine.domain.preview_rules import preview_filename
+from content_engine.domain.review import DECISIONS_SCHEMA_VERSION
+from content_engine.services.review_service import DECISIONS_FILENAME
 from tests.conftest import Analysed, FakeMedia, Harness, analyse, cli_output
 
 runner = CliRunner()

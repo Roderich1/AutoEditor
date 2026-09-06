@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
+
+from content_engine.domain.candidates import CandidateCollection, ValidatedCandidate
+from content_engine.domain.enums import EditorialReason
+from content_engine.domain.exceptions import IncompatibleArtifactError
 from content_engine.domain.review import (
     DECISIONS_SCHEMA_VERSION,
     REVIEW_RULES_VERSION,
@@ -27,11 +32,6 @@ from content_engine.services.review_service import (
     read_decisions,
     write_decisions,
 )
-from pydantic import ValidationError
-
-from content_engine.domain.candidates import CandidateCollection, ValidatedCandidate
-from content_engine.domain.enums import EditorialReason
-from content_engine.domain.exceptions import IncompatibleArtifactError
 from content_engine.utils.json import write_json
 from tests.conftest import (
     chunk_of,

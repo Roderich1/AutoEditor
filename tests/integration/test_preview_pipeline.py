@@ -17,7 +17,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from content_engine.adapters.media.ffprobe import FFprobeAdapter
 from content_engine.adapters.media.preview import FFmpegPreviewRenderer
+from content_engine.domain.candidates import CandidateCollection
+from content_engine.domain.exceptions import RenderError
 from content_engine.domain.preview_rules import (
     PREVIEW_DURATION_TOLERANCE_SECONDS,
     PREVIEW_INDEX_FILENAME,
@@ -30,10 +34,6 @@ from content_engine.services.preview_service import (
     read_index,
     verify_previews,
 )
-
-from content_engine.adapters.media.ffprobe import FFprobeAdapter
-from content_engine.domain.candidates import CandidateCollection
-from content_engine.domain.exceptions import RenderError
 from tests.conftest import chunk_of, collect, raw_candidate, speech_transcript
 from tests.integration.conftest import requires_ffmpeg
 

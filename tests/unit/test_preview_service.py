@@ -13,7 +13,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
+from content_engine.adapters.media.ffprobe import FFprobeAdapter
 from content_engine.adapters.media.preview import FFmpegPreviewRenderer
+from content_engine.domain.candidates import CandidateCollection
+from content_engine.domain.exceptions import (
+    IncompatibleArtifactError,
+    RenderError,
+)
 from content_engine.domain.preview_rules import (
     PREVIEW_INDEX_FILENAME,
     PREVIEW_STAGE_CONFIG_FILENAME,
@@ -26,13 +33,6 @@ from content_engine.services.preview_service import (
     PreviewService,
     read_index,
     verify_previews,
-)
-
-from content_engine.adapters.media.ffprobe import FFprobeAdapter
-from content_engine.domain.candidates import CandidateCollection
-from content_engine.domain.exceptions import (
-    IncompatibleArtifactError,
-    RenderError,
 )
 from tests.conftest import (
     FakeMedia,
