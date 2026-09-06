@@ -249,6 +249,18 @@ class RawCandidateCollection(_Artifact):
             raise ValueError(
                 f"more than one batch was recorded for the same chunk: {', '.join(repeated)}"
             )
+
+        # One execution, one model. The field above is what every artifact and
+        # the manifest record as the executor, so a batch naming another model
+        # would file its candidates under something that did not produce them.
+        # A run that really used two would be two runs.
+        disagreeing = sorted({batch.model for batch in self.batches if batch.model != self.model})
+        if disagreeing:
+            raise ValueError(
+                f"the collection records model {self.model!r} but a batch names "
+                f"{', '.join(repr(name) for name in disagreeing)}"
+            )
+
         total = sum(len(batch.candidates) for batch in self.batches)
         if self.proposed_count != total:
             raise ValueError(

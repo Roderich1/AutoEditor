@@ -72,7 +72,7 @@ def _verify(directory: Path, outcome, plan, transcript):
         outcome.fingerprint,
         outcome.stage_config_sha256,
         transcript_sha256(transcript),
-        plan.stage_config,
+        plan,
     )
 
 
@@ -360,3 +360,50 @@ def test_the_service_refuses_an_analyzer_that_answers_with_another_model(
 
     with pytest.raises(AnalysisError, match="otro-modelo"):
         service.analyze(plan, directory, GENERATED_AT)
+
+
+# --- the readers and the guard that should never fire ------------------------
+
+
+def test_a_chunk_collection_from_another_schema_is_refused(stage) -> None:
+    directory = stage[0]
+    _edit(
+        directory.joinpath(CHUNKS_FILENAME), lambda payload: payload.update({"schema_version": 99})
+    )
+
+    _assert_refused(stage, match="declares chunk schema")
+
+
+def test_a_chunk_collection_with_impossible_content_is_refused(stage) -> None:
+    """Right schema, wrong content: a chunk whose indices do not address the
+    segments it holds."""
+    directory = stage[0]
+    _edit(
+        directory.joinpath(CHUNKS_FILENAME),
+        lambda payload: payload["chunks"][0].update({"segment_indices": [99]}),
+    )
+
+    _assert_refused(stage, match="not a valid chunk collection")
+
+
+def test_the_service_refuses_to_write_artifacts_that_disagree(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The four are built together, so this guard should never fire. It exists
+    because the alternative to checking is writing an incoherent set that a
+    later run reads back and believes, and a guard nobody exercises is a guard
+    nobody knows works.
+    """
+    monkeypatch.setattr(
+        "content_engine.services.analysis_service.coherence_problem",
+        lambda *_: "the artifacts were built wrong",
+    )
+    analyzer = FixtureAnalyzer(_fixture())
+    plan = plan_analysis(speech_transcript(), settings, analyzer.identity)
+    service = AnalysisService(analyzer, analyzer.identity)
+    directory = tmp_path.joinpath("analysis")
+
+    with pytest.raises(AnalysisError, match="built wrong"):
+        service.analyze(plan, directory, GENERATED_AT)
+
+    assert not directory.exists() or list(directory.iterdir()) == []

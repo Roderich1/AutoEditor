@@ -74,17 +74,28 @@ class _Strict(BaseModel):
 
 
 class FixtureBatch(_Strict):
-    """The recorded answer for one chunk."""
+    """The recorded answer for one chunk: candidates, or a failure, never both."""
 
     chunk_id: str = Field(min_length=1)
     #: Preserved and handed on exactly as written. The pipeline is entitled to
-    #: see whatever a provider might really have said, including nothing.
+    #: see whatever a provider might really have said, including nothing. Kept
+    #: alongside an error too, because what the provider said before it was
+    #: judged a failure is the most useful thing about the failure.
     raw_response: str = ""
     candidates: list[RawCandidate] = Field(default_factory=list)
     #: When set, replaying this chunk raises instead of returning. It is how a
     #: provider failure is exercised without a provider: the run must record
     #: FAILED_ANALYSIS and stop, not silently produce a shorter list.
     error: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> FixtureBatch:
+        if self.error is not None and self.candidates:
+            raise ValueError(
+                f"the batch for {self.chunk_id} both failed ({self.error!r}) and returned "
+                f"{len(self.candidates)} candidates; a call did one or the other"
+            )
+        return self
 
 
 class AnalysisFixture(_Strict):

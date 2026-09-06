@@ -26,7 +26,6 @@ from content_engine.adapters.analysis.fixture_analyzer import (
 from content_engine.config import Settings
 from content_engine.domain.analysis_rules import (
     analysis_fingerprint,
-    raw_batches_sha256,
     stage_config_sha256,
 )
 from content_engine.domain.candidates import (
@@ -44,6 +43,7 @@ from content_engine.services.analysis_service import (
     AnalysisService,
     plan_analysis,
     read_candidates,
+    read_chunks,
     read_raw_collection,
     read_stage_config,
     verify_analysis,
@@ -271,18 +271,37 @@ def test_the_fingerprint_rebuilds_from_what_is_on_disk(settings: Settings, tmp_p
 
     rebuilt = analysis_fingerprint(
         transcript_sha256(transcript),
-        raw_batches_sha256(read_raw_collection(directory)),
+        read_chunks(directory),
+        read_raw_collection(directory),
+        read_candidates(directory),
         read_stage_config(directory),
     )
     assert rebuilt == outcome.fingerprint
 
 
 def test_the_same_inputs_produce_the_same_fingerprint(settings: Settings, tmp_path: Path) -> None:
+    """Same inputs and the same generated_at. The fingerprint now covers the
+    artifacts, so the timestamp inside candidates.json is part of it: two runs
+    of identical inputs at different moments differ, deliberately. It identifies
+    one execution's files, not a portable experiment."""
     first = _run(settings, tmp_path.joinpath("a"))[2]
     second = _run(settings, tmp_path.joinpath("b"))[2]
 
     assert first.fingerprint == second.fingerprint
     assert first.stage_config_sha256 == second.stage_config_sha256
+
+
+def test_the_fingerprint_covers_the_moment_the_collection_was_generated(
+    settings: Settings, tmp_path: Path
+) -> None:
+    analyzer = FixtureAnalyzer(_fixture())
+    plan = plan_analysis(speech_transcript(), settings, analyzer.identity)
+    service = AnalysisService(analyzer, analyzer.identity)
+
+    first = service.analyze(plan, tmp_path.joinpath("a"), GENERATED_AT)
+    second = service.analyze(plan, tmp_path.joinpath("b"), datetime(2026, 6, 1, tzinfo=UTC))
+
+    assert first.fingerprint != second.fingerprint
 
 
 def test_a_different_fixture_produces_a_different_fingerprint(
@@ -368,11 +387,11 @@ def test_an_analyzer_answering_about_another_chunk_is_refused(
 
     analyzer = FixtureAnalyzer(_fixture())
     plan = plan_analysis(speech_transcript(), settings, analyzer.identity)
+    service = AnalysisService(Confused(), analyzer.identity)
+    directory = tmp_path.joinpath("analysis")
 
     with pytest.raises(AnalysisError, match="answered about chunk_9999"):
-        AnalysisService(Confused(), analyzer.identity).analyze(
-            plan, tmp_path.joinpath("analysis"), GENERATED_AT
-        )
+        service.analyze(plan, directory, GENERATED_AT)
 
 
 # --- verification ------------------------------------------------------------
@@ -384,7 +403,7 @@ def _verify(settings: Settings, directory: Path, outcome, plan, transcript) -> N
         outcome.fingerprint,
         outcome.stage_config_sha256,
         transcript_sha256(transcript),
-        plan.stage_config,
+        plan,
     )
 
 
@@ -398,7 +417,7 @@ def test_unchanged_artifacts_verify(settings: Settings, tmp_path: Path) -> None:
         outcome.fingerprint,
         outcome.stage_config_sha256,
         transcript_sha256(transcript),
-        plan.stage_config,
+        plan,
     )
 
     assert collection == outcome.collection
@@ -408,17 +427,15 @@ def test_unchanged_artifacts_verify(settings: Settings, tmp_path: Path) -> None:
     "name", [CHUNKS_FILENAME, RAW_CANDIDATES_FILENAME, STAGE_CONFIG_FILENAME, CANDIDATES_FILENAME]
 )
 def test_a_deleted_artifact_is_refused(settings: Settings, tmp_path: Path, name: str) -> None:
+    """All four, with no exception. chunks.json used to be excused because it
+    could be rebuilt from the transcript; a file trusted for that reason is a
+    file nobody checked, and the recorded answers beside it are answers to
+    whatever it actually said."""
     directory = tmp_path.joinpath("analysis")
     transcript = speech_transcript()
     _, plan, outcome = _run(settings, directory, transcript=transcript)
     directory.joinpath(name).unlink()
 
-    if name == CHUNKS_FILENAME:
-        # chunks.json is rebuilt from the transcript rather than read back, so
-        # its absence is not what the reuse check is looking at. Stated here so
-        # the gap is visible rather than assumed away.
-        _verify(settings, directory, outcome, plan, transcript)
-        return
     with pytest.raises(IncompatibleArtifactError):
         _verify(settings, directory, outcome, plan, transcript)
 
@@ -454,15 +471,10 @@ def test_an_edited_raw_response_is_refused(settings: Settings, tmp_path: Path) -
 def test_a_different_transcript_is_refused(settings: Settings, tmp_path: Path) -> None:
     directory = tmp_path.joinpath("analysis")
     _, plan, outcome = _run(settings, directory)
+    other = transcript_sha256(speech_transcript(count=11))
 
-    with pytest.raises(IncompatibleArtifactError, match="cannot be rebuilt"):
-        verify_analysis(
-            directory,
-            outcome.fingerprint,
-            outcome.stage_config_sha256,
-            transcript_sha256(speech_transcript(count=11)),
-            plan.stage_config,
-        )
+    with pytest.raises(IncompatibleArtifactError, match="but the run holds"):
+        verify_analysis(directory, outcome.fingerprint, outcome.stage_config_sha256, other, plan)
 
 
 def test_a_different_fixture_is_refused(settings: Settings, tmp_path: Path) -> None:
@@ -474,14 +486,11 @@ def test_a_different_fixture_is_refused(settings: Settings, tmp_path: Path) -> N
 
     other = FixtureAnalyzer(_fixture([raw_candidate(10.0, 40.0)]))
     other_plan = plan_analysis(transcript, settings, other.identity)
+    digest = transcript_sha256(transcript)
 
     with pytest.raises(IncompatibleArtifactError, match="different settings"):
         verify_analysis(
-            directory,
-            outcome.fingerprint,
-            outcome.stage_config_sha256,
-            transcript_sha256(transcript),
-            other_plan.stage_config,
+            directory, outcome.fingerprint, outcome.stage_config_sha256, digest, other_plan
         )
 
 
@@ -492,14 +501,11 @@ def test_a_different_candidate_policy_is_refused(settings: Settings, tmp_path: P
 
     settings.analysis.candidates.min_score = 10.0
     other_plan = plan_analysis(transcript, settings, analyzer.identity)
+    digest = transcript_sha256(transcript)
 
     with pytest.raises(IncompatibleArtifactError, match="different settings"):
         verify_analysis(
-            directory,
-            outcome.fingerprint,
-            outcome.stage_config_sha256,
-            transcript_sha256(transcript),
-            other_plan.stage_config,
+            directory, outcome.fingerprint, outcome.stage_config_sha256, digest, other_plan
         )
 
 

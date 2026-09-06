@@ -7,8 +7,18 @@ output they describe:
 ``stage_config_sha256``   the digest of ``analysis/config.effective.json``. Ties
                           the manifest to a file a human can open, so the run
                           explains itself without anyone reversing a hash.
-``analysis_fingerprint``  the digest of everything the stage consumed. Decides
-                          whether the candidates on disk may be reused.
+``analysis_fingerprint``  the digest of the whole stage: what it consumed and
+                          what it produced. Decides whether the candidates on
+                          disk may be reused.
+
+The second one deliberately departs from the transcription stage, where the
+fingerprint covers inputs only. Transcription writes one artifact the reuse
+check reads back and validates in full; analysis writes four, and a digest over
+inputs alone cannot tell that one of the outputs was edited. Since the decision
+this digest makes is "may these four files be reused", it has to cover the four
+files. It is an integrity digest over one execution, not a portable identity for
+an experiment — ``config_sha256`` and ``stage_config_sha256`` remain the
+portable ones.
 
 There is one payload builder for each, used both when writing the stage and when
 verifying it later. Two implementations of "the same payload" agree exactly
@@ -35,6 +45,8 @@ from content_engine.domain.candidates import (
     CHUNKS_SCHEMA_VERSION,
     RAW_CANDIDATES_SCHEMA_VERSION,
     AnalysisStageConfig,
+    CandidateCollection,
+    ChunkCollection,
     RawCandidateCollection,
 )
 from content_engine.domain.scoring import SCORE_FORMULA_VERSION
@@ -44,7 +56,12 @@ from content_engine.utils.canonical import canonical_sha256
 #: fingerprint stops matching when it does, which is the intended effect: a
 #: build that computes identity differently must not reuse artifacts produced by
 #: one that computed it another way.
-ANALYSIS_FINGERPRINT_VERSION = 1
+#:
+#: 2: the payload covers all four artifacts rather than the raw batches alone.
+ANALYSIS_FINGERPRINT_VERSION = 2
+
+#: Named here rather than imported from the service, which imports this module.
+CHUNKS_FILENAME_HINT = "chunks.json"
 
 
 @dataclass(frozen=True)
@@ -118,41 +135,128 @@ def stage_config_sha256(config: AnalysisStageConfig) -> str:
     return canonical_sha256(config.model_dump(mode="json"))
 
 
-def raw_batches_sha256(raw: RawCandidateCollection) -> str:
-    """Digest of what the analyzer returned, verbatim responses included.
-
-    Covers the batches only, not the identity fields around them: those are
-    already in the stage configuration, and hashing them twice would make the
-    fingerprint change for two different reasons that are impossible to tell
-    apart when it does.
-    """
-    return canonical_sha256({"batches": [batch.model_dump(mode="json") for batch in raw.batches]})
-
-
 def analysis_fingerprint(
     transcript_sha256: str,
-    raw_batches_digest: str,
+    chunks: ChunkCollection,
+    raw: RawCandidateCollection,
+    collection: CandidateCollection,
     config: AnalysisStageConfig,
 ) -> str:
-    """The identity of one analysis execution.
+    """The integrity of one analysis execution, artifacts included.
 
-    Three parts, and each is load-bearing. The transcript digest is the input
-    the chunks were cut from. The batch digest is what the analyzer answered,
-    which for a fixture run is the fixture and for a provider run is a
-    non-reproducible response that must still be pinned to the artifacts derived
-    from it. The stage configuration is everything else: analyzer identity,
-    prompt identity, fixture digest, chunking, the candidate policy, every rule
-    version and every schema version.
+    Five parts, each of which decides something a later stage will act on. The
+    transcript digest is the input the chunks were cut from. The chunks are the
+    exact question the analyzer was asked. The raw collection is its answer,
+    including the identity fields above the batches, because those say which
+    build interpreted them. The validated collection is the shortlist a human
+    will be shown. The stage configuration is everything else.
 
-    Deliberately not portable, in the sense of ADR-017: it identifies stage
-    inputs on this run, not a logical experiment. ``config_sha256`` is the
-    portable one.
+    The whole model is hashed in each case, not a chosen subset. Choosing a
+    subset is how the first version of this left ``candidates.json`` and the raw
+    metadata unprotected: every field left out is a field a later run trusts
+    without evidence, and choosing correctly requires knowing in advance which
+    edits matter.
+
+    ``config_sha256`` remains the portable identity of an experiment. This is not
+    portable and is not meant to be: two runs of identical inputs produce
+    different fingerprints, because ``generated_at`` differs and the artifacts
+    therefore differ.
     """
     return canonical_sha256(
         {
             "version": ANALYSIS_FINGERPRINT_VERSION,
             "transcript_sha256": transcript_sha256,
-            "raw_batches_sha256": raw_batches_digest,
+            "chunks": chunks.model_dump(mode="json"),
+            "raw": raw.model_dump(mode="json"),
+            "candidates": collection.model_dump(mode="json"),
             "config": config.model_dump(mode="json"),
         }
     )
+
+
+def coherence_problem(
+    transcript_sha256: str,
+    chunks: ChunkCollection,
+    raw: RawCandidateCollection,
+    collection: CandidateCollection,
+    config: AnalysisStageConfig,
+) -> str | None:
+    """The first way these four artifacts contradict each other, or None.
+
+    The fingerprint proves the four files are the ones that were written
+    together. It cannot prove they were coherent when they were written, and it
+    cannot prove they still describe the transcript in front of us — a set of
+    artifacts moved from another run would be internally consistent and
+    completely wrong.
+
+    Returns a description rather than raising, because the caller decides what
+    kind of failure this is: producing an incoherent set is an analysis bug,
+    finding one on disk is an incompatible artifact.
+    """
+    if chunks.transcript_sha256 != transcript_sha256:
+        return (
+            f"{CHUNKS_FILENAME_HINT} was cut from transcript "
+            f"{chunks.transcript_sha256[:12]}, but the run holds {transcript_sha256[:12]}"
+        )
+    if raw.transcript_sha256 != chunks.transcript_sha256:
+        return (
+            f"the raw candidates name transcript {raw.transcript_sha256[:12]} and the "
+            f"chunks name {chunks.transcript_sha256[:12]}"
+        )
+
+    executor: tuple[tuple[str, object, object], ...] = (
+        ("analyzer", raw.analyzer, config.analyzer),
+        ("analyzer_version", raw.analyzer_version, config.analyzer_version),
+        ("model", raw.model, config.model),
+        ("prompt_version", raw.prompt_version, config.prompt_version),
+        ("prompt_sha256", raw.prompt_sha256, config.prompt_sha256),
+        ("fixture_sha256", raw.fixture_sha256, config.fixture_sha256),
+    )
+    for field, recorded, configured in executor:
+        if recorded != configured:
+            return (
+                f"the raw candidates and the stage configuration disagree on {field}: "
+                f"{recorded!r} against {configured!r}"
+            )
+
+    answered = [batch.chunk_id for batch in raw.batches]
+    expected = [chunk.id for chunk in chunks.chunks]
+    if sorted(answered) != sorted(expected):
+        return f"the raw candidates answer {sorted(answered)} but the chunks are {sorted(expected)}"
+
+    if raw.proposed_count != collection.counts.proposed:
+        return (
+            f"the raw candidates hold {raw.proposed_count} proposals and the funnel "
+            f"counts {collection.counts.proposed}"
+        )
+
+    if collection.source_duration_seconds != chunks.source_duration_seconds:
+        return (
+            f"the candidates describe {collection.source_duration_seconds} seconds of "
+            f"source and the chunks {chunks.source_duration_seconds}"
+        )
+    if collection.rules_version != chunks.rules_version:
+        return (
+            f"the candidates were built under chunking rules {collection.rules_version} "
+            f"and the chunks under {chunks.rules_version}"
+        )
+
+    policy: tuple[tuple[str, object, object], ...] = (
+        ("score_formula_version", collection.score_formula_version, config.score_formula_version),
+        ("target_candidates", collection.target_candidates, config.target_candidates),
+        ("max_candidates", collection.max_candidates, config.max_candidates),
+        ("min_score", collection.min_score, config.min_score),
+        ("dedupe_iou", collection.dedupe_iou, config.dedupe_iou),
+        (
+            "boundary_snap_seconds",
+            collection.boundary_snap_seconds,
+            config.boundary_snap_seconds,
+        ),
+    )
+    for field, recorded, configured in policy:
+        if recorded != configured:
+            return (
+                f"the candidates and the stage configuration disagree on {field}: "
+                f"{recorded!r} against {configured!r}"
+            )
+    return None

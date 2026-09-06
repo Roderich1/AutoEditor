@@ -399,7 +399,7 @@ def _refuse_or_reuse_analysis(
         record.fingerprint,
         record.stage_config_sha256,
         transcript_sha256(transcript),
-        plan.stage_config,
+        plan,
     )
 
 

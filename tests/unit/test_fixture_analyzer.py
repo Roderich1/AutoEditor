@@ -135,9 +135,10 @@ def test_the_run_target_is_not_treated_as_a_quota_for_this_call() -> None:
 def test_an_unanswered_chunk_is_refused_rather_than_answered_emptily() -> None:
     analyzer = FixtureAnalyzer(_fixture())
     other = chunk_of(speech_transcript(), chunk_id="chunk_0007")
+    context = _context()
 
     with pytest.raises(IncompatibleArtifactError, match="no answer for chunk_0007"):
-        analyzer.find_candidates(other, _context())
+        analyzer.find_candidates(other, context)
 
 
 def test_a_recorded_failure_is_raised_as_an_analysis_failure() -> None:
@@ -145,9 +146,10 @@ def test_a_recorded_failure_is_raised_as_an_analysis_failure() -> None:
     analyzer = FixtureAnalyzer(
         _fixture(batches=[FixtureBatch(chunk_id="chunk_0000", error="provider exploded")])
     )
+    context = _context()
 
     with pytest.raises(AnalysisError, match="provider exploded"):
-        analyzer.find_candidates(CHUNK, _context())
+        analyzer.find_candidates(CHUNK, context)
 
 
 # --- identity ----------------------------------------------------------------
@@ -217,8 +219,10 @@ def test_a_fixture_round_trips_through_a_file(tmp_path: Path) -> None:
 
 
 def test_a_missing_fixture_is_an_expected_failure(tmp_path: Path) -> None:
+    absent = tmp_path.joinpath("absent.json")
+
     with pytest.raises(CorruptArtifactError, match="does not exist"):
-        load_fixture(tmp_path.joinpath("absent.json"))
+        load_fixture(absent)
 
 
 def test_a_fixture_that_is_not_json_is_an_expected_failure(tmp_path: Path) -> None:
@@ -375,11 +379,13 @@ def test_a_batch_cannot_both_fail_and_return_candidates() -> None:
     carrying both describes two outcomes, and whichever the replay honours, the
     other half is a silent instruction nobody reads.
     """
+    candidates = [raw_candidate(10.0, 39.0)]
+
     with pytest.raises(ValidationError, match="failed"):
         FixtureBatch(
             chunk_id="chunk_0000",
             raw_response="",
-            candidates=[raw_candidate(10.0, 39.0)],
+            candidates=candidates,
             error="provider exploded",
         )
 

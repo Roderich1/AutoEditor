@@ -14,10 +14,12 @@ in memory first. A stage that fails leaves no partial artifact behind that a
 later run could mistake for a completed one, and the manifest is only advanced
 by the caller once all four files exist.
 
-**Reuse is proved, never assumed.** The verification path recomputes both digests
-from what is actually on disk and rebuilds the fingerprint from the transcript
-and the recorded batches. A digest that still looks right proves nothing if the
-artifact it addresses was edited or replaced.
+**Reuse is proved, never assumed.** The verification path reads back all four
+artifacts, validates each against its schema, rebuilds both digests from what is
+actually on disk, checks the four against each other, and checks the chunks
+against the ones the current transcript and settings produce. A digest that
+still looks right proves nothing if the artifact it addresses was edited, and an
+artifact nobody reads is trusted by everything downstream.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from content_engine.domain.analysis_rules import (
     AnalyzerIdentity,
     analysis_fingerprint,
     analysis_stage_config,
-    raw_batches_sha256,
+    coherence_problem,
     stage_config_sha256,
 )
 from content_engine.domain.candidate_rules import (
@@ -46,6 +48,7 @@ from content_engine.domain.candidates import (
     ANALYSIS_STAGE_CONFIG_SCHEMA_VERSION,
     CANDIDATES_SCHEMA_VERSION,
     CHUNKING_RULES_VERSION,
+    CHUNKS_SCHEMA_VERSION,
     RAW_CANDIDATES_SCHEMA_VERSION,
     AnalysisStageConfig,
     CandidateCollection,
@@ -165,6 +168,14 @@ class AnalysisService:
                 raise AnalysisError(
                     f"The analyzer was asked about {chunk.id} and answered about {batch.chunk_id}."
                 )
+            # Every artifact and the manifest record self.identity as the
+            # executor. A batch answering under another model would file its
+            # candidates against something that did not produce them.
+            if batch.model != self.identity.model:
+                raise AnalysisError(
+                    f"The analyzer is recorded as {self.identity.model} but answered about "
+                    f"{chunk.id} as {batch.model}."
+                )
             batches.append(
                 RawCandidateBatch(
                     chunk_id=batch.chunk_id,
@@ -209,9 +220,18 @@ class AnalysisService:
             CHUNKING_RULES_VERSION,
             generated_at,
         )
+        # Built together, so this should be impossible; checked anyway, because
+        # the alternative to checking is writing an incoherent set of artifacts
+        # that a later run will read back and believe.
+        problem = coherence_problem(
+            plan.chunks.transcript_sha256, plan.chunks, raw, collection, plan.stage_config
+        )
+        if problem is not None:
+            raise AnalysisError(f"The analysis produced artifacts that disagree: {problem}.")
+
         digest = stage_config_sha256(plan.stage_config)
         fingerprint = analysis_fingerprint(
-            plan.chunks.transcript_sha256, raw_batches_sha256(raw), plan.stage_config
+            plan.chunks.transcript_sha256, plan.chunks, raw, collection, plan.stage_config
         )
 
         output_directory.mkdir(parents=True, exist_ok=True)
@@ -271,6 +291,30 @@ def read_stage_config(directory: Path) -> AnalysisStageConfig:
         ) from error
 
 
+def read_chunks(directory: Path) -> ChunkCollection:
+    """Load the chunks the stage recorded, or refuse them.
+
+    Read back rather than rebuilt. The chunks are the exact question the
+    analyzer was asked, so trusting them because they *could* be regenerated
+    would be trusting a file nobody looked at — and the recorded answers beside
+    them are answers to whatever this file actually says.
+    """
+    path = directory.joinpath(CHUNKS_FILENAME)
+    payload = _load(path, "the chunks the analyzer was asked about")
+    declared = payload.get("schema_version")
+    if declared != CHUNKS_SCHEMA_VERSION:
+        raise IncompatibleArtifactError(
+            f"{path} declares chunk schema {declared!r}; this build understands "
+            f"{CHUNKS_SCHEMA_VERSION}. Rerun with --force."
+        )
+    try:
+        return ChunkCollection.model_validate(payload)
+    except ValidationError as error:
+        raise IncompatibleArtifactError(
+            f"{path} is not a valid chunk collection: {error}. Rerun with --force."
+        ) from error
+
+
 def read_raw_collection(directory: Path) -> RawCandidateCollection:
     path = directory.joinpath(RAW_CANDIDATES_FILENAME)
     payload = _load(path, "the raw candidates the analyzer returned")
@@ -310,26 +354,32 @@ def verify_analysis(
     recorded_fingerprint: str,
     recorded_stage_config_sha256: str,
     transcript_sha256: str,
-    expected: AnalysisStageConfig,
+    plan: AnalysisPlan,
 ) -> CandidateCollection:
-    """Prove the artifacts on disk still describe the run being asked for.
+    """Prove the four artifacts on disk still describe the run being asked for.
 
-    Four separate claims, checked in the order that gives the most specific
-    message first:
+    Six claims, checked in the order that gives the most specific message first:
 
-    1. the stage configuration on disk is the one the manifest recorded;
-    2. the raw batches are readable and the fingerprint rebuilds from them, the
-       transcript and that configuration;
-    3. the configuration the caller is asking for now is that same one, which is
-       what catches a different fixture, a different profile or a rule version
-       this build changed;
-    4. the validated candidates themselves are readable and still satisfy every
-       invariant of the collection.
+    1. all four artifacts are present, readable and valid under their own
+       schemas — nothing is skipped because it could be regenerated;
+    2. the stage configuration on disk is the one the manifest recorded;
+    3. the four agree with each other and with the current transcript;
+    4. the chunks on disk are the ones this transcript and these settings
+       produce, so the recorded answers are answers to the question that would
+       be asked again;
+    5. the fingerprint rebuilds from all four plus the transcript;
+    6. the configuration the caller is asking for now is the one recorded, which
+       is what catches a different fixture, a different profile or a rule
+       version this build changed.
 
     Nothing is written. Every refusal leaves all four artifacts and the manifest
     exactly as they were.
     """
+    chunks = read_chunks(directory)
     config = read_stage_config(directory)
+    raw = read_raw_collection(directory)
+    collection = read_candidates(directory)
+
     recomputed = stage_config_sha256(config)
     if recomputed != recorded_stage_config_sha256:
         raise IncompatibleArtifactError(
@@ -339,17 +389,28 @@ def verify_analysis(
             "Rerun with --force."
         )
 
-    raw = read_raw_collection(directory)
-    rebuilt = analysis_fingerprint(transcript_sha256, raw_batches_sha256(raw), config)
-    if rebuilt != recorded_fingerprint:
+    problem = coherence_problem(transcript_sha256, chunks, raw, collection, config)
+    if problem is not None:
         raise IncompatibleArtifactError(
-            f"The recorded fingerprint cannot be rebuilt from the transcript, "
-            f"{RAW_CANDIDATES_FILENAME} and {STAGE_CONFIG_FILENAME} (recorded "
-            f"{recorded_fingerprint[:12]}, rebuilt {rebuilt[:12]}). The candidates, their "
-            "inputs and the manifest no longer describe one execution. Rerun with --force."
+            f"The analysis artifacts in {directory} disagree: {problem}. Rerun with --force."
         )
 
-    wanted = stage_config_sha256(expected)
+    if chunks != plan.chunks:
+        raise IncompatibleArtifactError(
+            f"{directory.joinpath(CHUNKS_FILENAME)} is not what this transcript and these "
+            "chunking settings produce, so the recorded answers are answers to a "
+            "different question. Rerun with --force."
+        )
+
+    rebuilt = analysis_fingerprint(transcript_sha256, chunks, raw, collection, config)
+    if rebuilt != recorded_fingerprint:
+        raise IncompatibleArtifactError(
+            f"The recorded fingerprint cannot be rebuilt from the transcript and the four "
+            f"artifacts in {directory} (recorded {recorded_fingerprint[:12]}, rebuilt "
+            f"{rebuilt[:12]}). One of them was edited after the run. Rerun with --force."
+        )
+
+    wanted = stage_config_sha256(plan.stage_config)
     if wanted != recorded_stage_config_sha256:
         raise IncompatibleArtifactError(
             f"The existing candidates were produced under different settings "
@@ -357,4 +418,4 @@ def verify_analysis(
             "analyzer, the fixture, the candidate policy or a rule version differs. "
             "They will not be reused. Rerun with --force."
         )
-    return read_candidates(directory)
+    return collection
