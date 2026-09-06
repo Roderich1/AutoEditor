@@ -25,15 +25,17 @@ FFmpeg 9.0.1:
 | Check | Result |
 |---|---|
 | `uv run ruff check .` | passed |
-| `uv run ruff format --check .` | passed, 110 files |
+| `uv run ruff format --check .` | passed, 111 files |
 | `uv run mypy src` | passed, 50 files, strict |
-| `uv run pytest` | 1673 passed, 1 skipped, 421 more than the 1252 on `main`; 99.59% over 3209 statements, 13 missed — the same 13 `main` already had |
+| `uv run pytest` | 1725 passed, 1 skipped, 473 more than the 1252 on `main`; 99.60% over 3247 statements, 13 missed — the same 13 `main` already had |
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
 | Re-run with every cache disabled | `ruff --no-cache`, `mypy --no-incremental`, `pytest -p no:cacheprovider`: all green |
 | Every test import available in the CI environment | asserted against the `uv.lock` closure of the main dependencies and the dev group, per test module |
+| Publication failure injected at each step, shortlist same, grown and shrunk | 39 cases; the previous set stays byte-identical and still passes `verify_previews` |
+| Diff against `main` | 26 files, +6861/−46 |
 | SonarCloud quality gate | passes; Reliability and Security both A |
 | `uv run pytest -m integration --no-cov` | 22 passed with real FFmpeg; 9 of them are the new preview pipeline |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
@@ -57,6 +59,7 @@ FFmpeg 9.0.1:
 | Artifacts UTF-8 without BOM, LF endings | verified byte by byte |
 | Secrets or media tracked in Git | none |
 | `preview` on the real analysed run | 15 previews in 26 s, every one verified independently with ffprobe |
+| `preview --force` on the real run after the transactional publish | 15 regenerated in 26 s, all verified, no `.rollback`, `.staging` or `.tmp` left, third invocation reused |
 | Second `preview` on the same run | reuse in 0.49 s, no encode, all 16 files and the manifest byte-identical |
 | The four analysis artifacts after previewing | SHA-256 unchanged; analysis fingerprint still `b6f2c48acd57` |
 | Wheel in a clean Python 3.12 venv, working directory with a space and `ñ` | `preview --force` produced all 15, a second call reused them, a full `review` session reached REVIEWED |
@@ -620,12 +623,15 @@ that work has not been done.
   stranding previews and decisions built on the old shortlist. Cascading
   invalidation is CE-052; until then the workaround is a new run. ADR-030
   records the trade-off.
-- **A preview is not byte-reproducible across machines.** x264 embeds its own
-  build identity and the encode is not deterministic across versions, so the
-  reuse guarantee is "an unchanged run rewrites nothing", not "two machines
-  produce identical previews". Every other artifact in the engine remains
-  byte-comparable; these are the first that are not, and they are the only ones
-  that are disposable.
+- **A preview is not byte-reproducible across FFmpeg builds.** Measured on the
+  real run, two `--force` regenerations on the same machine produced
+  byte-identical MP4s for all 15 candidates, so x264 is deterministic given the
+  same build, source and arguments. What is not guaranteed is the same output
+  from a different build or version, and x264 embeds its own build identity. So
+  the reuse guarantee is "an unchanged run rewrites nothing", not "two machines
+  produce identical previews". Every other artifact in the engine is
+  byte-comparable across platforms by contract; the previews are the only ones
+  that are not, and the only ones that are disposable.
 - **The duration tolerance is 1.0 s and is a stage constant.** The 15 real
   previews drifted at most 0.040 s, so the tolerance has a wide margin over
   what a correct encode actually costs. It is wide enough that a badly wrong
@@ -654,6 +660,85 @@ that work has not been done.
   exist and the run is READY_FOR_REVIEW; the decisions are the operator's to
   make, and inventing them would fabricate exactly the measurement CE-053 to
   CE-059 are built to read. Full sessions are exercised only against fixtures.
+
+### Four defects found in review, and what they cost
+
+All four were fixed on the branch after the first review pass, each preceded by
+failing tests. They are recorded because three of them were failures of the same
+kind: a guarantee that was stated in a docstring and not enforced anywhere.
+
+**A reopened review stranded the run.** `review --force` moves a REVIEWED run
+back to READY_FOR_REVIEW before asking anything, and writes no decisions until
+the first answer. Quitting immediately therefore left a complete set of
+decisions beside a status saying the review was open, and every later session
+reported "already reviewed" while the status never moved again. `review` now
+settles that case: the decisions have already been proved coherent against this
+analysis and shortlist, so the status is the only thing that disagrees and it is
+corrected, recording the stage with the same fingerprint the completing session
+produced. Recovery is narrow on purpose -- a removed, partial or incoherent set
+leaves the run open, the last by refusal.
+
+**Publishing a preview set was not transactional.** Generation always was:
+everything is encoded and probed in `.staging`. Publication was not -- stale
+previews were unlinked, files were replaced one at a time, then the artifacts
+were written, so a failure after the first move left a mixture of two runs with
+`index.json` describing neither. The previous set was reusable and became
+unverifiable, which is the one outcome a failed `--force` was supposed to be
+unable to produce. The whole published set is now moved into `.rollback` first
+and restored byte for byte on any failure.
+
+Two attempts at the fix were themselves wrong, and both were caught by the
+tests rather than by reading: moving the old set aside outside the guard
+reproduced the same defect one step earlier, and inferring what to undo from the
+directory contents destroyed previous previews that had not been moved aside
+yet. The undo now works from a recorded list of what was moved and what was
+placed, because names alone cannot tell them apart when an unchanged shortlist
+is regenerated.
+
+**The audio codec was never checked.** `_measure` compared the video codec and
+refused a missing audio track, but accepted any codec that existed, so a preview
+whose audio was stream-copied or transcoded to mp3, opus, vorbis or PCM passed
+verification and was recorded in the index as AAC.
+
+**An over-long rejection detail crashed the session.** The 2000-character cap
+lives on the model, so a longer detail raised ValidationError out of the prompt
+loop and exited 1 as an unexpected internal error -- after earlier decisions had
+been saved, so a reviewer who pasted too much text saw a crash and no sign that
+their work had survived. The limit is now named once, shown in the prompt, and a
+violation prints the model's own message and asks again.
+
+### SonarCloud: why the gate passes while the UI shows 0.0% coverage
+
+Measured through the SonarCloud API rather than inferred.
+
+**Coverage on new code is 0.0% because Sonar has no coverage data at all.** The
+`coverage` and `new_coverage` measures come back empty and `new_lines_to_cover`
+is 0. There is no scanner step in `.github/workflows/ci.yml` and no
+`sonar-project.properties`: the project uses SonarCloud Automatic Analysis,
+which reads the repository and never receives a coverage report. With zero lines
+known to be coverable, the ratio is displayed as 0.0%.
+
+**The gate passes because it has no coverage condition.** Its five conditions
+are `new_reliability_rating`, `new_security_rating`,
+`new_maintainability_rating`, `new_duplicated_lines_density` and
+`new_security_hotspots_reviewed`, and `ignoredConditions` is false. Coverage is
+neither measured nor gated there. The coverage gate for this project is
+`--cov-fail-under=80` in `pyproject.toml`, and the real figure is 99.60%.
+
+Importing coverage would mean adding the scanner with a `SONAR_TOKEN` secret,
+which CI deliberately does not have -- "no secrets" is a stated property of the
+workflow. That trade is a decision to take explicitly rather than as a side
+effect of this pull request.
+
+**The 29 new issues were all MAJOR code smells**, 28 of one rule
+(`python:S5778`, a `pytest.raises` block containing more than one call that
+could throw) and one of another (`python:S7632`, a malformed suppression
+comment). The gate condition is `new_maintainability_rating ≤ A`, which is a
+technical-debt ratio rather than an issue count, so 29 smells over ~6700 new
+lines still rate A. Both rules were fixed anyway: S5778 was a real precision
+problem, since those tests could pass because the wrong call failed, and fixing
+`test_preview_rules` also split tests that had conflated a `PreviewRecord`
+refusal with a `PreviewIndex` one.
 
 ### Two blind spots CI found, and the guards added for them
 

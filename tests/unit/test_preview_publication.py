@@ -55,10 +55,16 @@ SOURCE_SHA = "c" * 64
 class WritingRenderer:
     """Always succeeds, and never twice with the same bytes.
 
-    The generation marker matters. Real x264 output is not reproducible between
-    runs, and a fake that re-encoded an unchanged interval to identical bytes
-    would make a half-finished publication invisible to a byte comparison --
-    which is exactly the defect these tests exist to catch.
+    The generation marker is what makes a half-finished publication visible. A
+    fake that re-encoded an unchanged interval to identical bytes would leave a
+    partly replaced set looking exactly like a successful one, and every test
+    below would pass over the defect they exist to catch.
+
+    It is not a claim about x264. Measured on the real run, two encodes of the
+    same source and arguments with the same FFmpeg build produced byte-identical
+    output; what varies between them is only the `generated_at` in the index.
+    The marker stands in for "these are different files", which is the property
+    under test, rather than for encoder nondeterminism.
     """
 
     def __init__(self, generation: str = "first") -> None:
