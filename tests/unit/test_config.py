@@ -70,9 +70,14 @@ def test_profile_is_merged_over_packaged_defaults(tmp_path: Path) -> None:
     assert settings.workspace.root.is_absolute()
 
 
+#: Anchored to this file, never to the working directory: the suite must pass
+#: from anywhere, exactly as the CLI does.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
 @pytest.mark.parametrize("profile", ["fast.toml", "quality.toml"])
 def test_shipped_profiles_remain_valid_overlays(profile: str) -> None:
-    settings = load_settings(Path("configs").joinpath(profile))
+    settings = load_settings(REPOSITORY_ROOT.joinpath("configs", profile))
 
     assert settings.transcription.model
     assert settings.analysis.candidates.boundary_snap_seconds == 2.5

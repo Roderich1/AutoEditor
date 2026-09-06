@@ -18,19 +18,37 @@ FFmpeg 9.0.1:
 | `uv run ruff check .` | passed |
 | `uv run ruff format --check .` | passed, 59 files |
 | `uv run mypy src` | passed, 30 files, strict |
-| `uv run pytest` | 278 passed |
+| `uv run pytest` | 285 passed |
+| `uv run pytest` from a working directory outside the repository | 285 passed |
 | `uv run pytest -m integration` | 13 passed with real FFmpeg |
-| `uv build` | wheel and sdist built |
-| Wheel in a clean venv, arbitrary working directory | `doctor`, `inspect`, `run`, `transcribe` all work |
-| Real faster-whisper transcription | passed, model `tiny`, 3 s lavfi fixture |
+| `uv build` | wheel and sdist built; the wheel ships `content_engine/resources/default.toml` |
+| Wheel in a clean venv, arbitrary working directory with spaces and non-ASCII characters | `doctor`, `inspect`, `run`, `transcribe` all work |
+| Real faster-whisper transcription | passed, model `small` on cpu/int8, 34 s of Spanish technical speech |
 | Artifacts UTF-8 without BOM, LF endings | verified byte by byte |
 | Secrets or media tracked in Git | none; tracked tree is 710 KB |
+
+### Real-speech smoke test
+
+`samples-local/smoke-spanish-technical.mp4` (34.2 s, git-ignored, never
+committed), transcribed from the installed wheel with `configs/fast.toml`:
+language `es` at 0.96, 4 segments, 54 words, contiguous SRT numbering, every
+word inside its segment, last timestamp 32.31 s against a 34.23 s audio
+duration, RTF 0.27 once the model is cached. A second invocation reused the
+transcript; changing `beam_size` was refused as incompatible; `--force`
+regenerated it and updated the fingerprint.
+
+Accuracy is usable but not clean on technical vocabulary: the `small` model
+rendered *systemctl* as "el sistema CETELE" and *compruebo* as "comprego".
+General Spanish ("configurando un servidor Ubuntu", "el servicio SSH está
+activo", "revisar el firewall") was correct. This is evidence for CE-016–CE-022
+plumbing, not evidence that `small` is an adequate production model for
+technical content.
 
 Coverage:
 
 | Scope | Coverage |
 |---|---|
-| Total | 99% (1084 statements, 14 missed) |
+| Total | 99% (1097 statements, 14 missed) |
 | Domain | 100% |
 | Services | 100% |
 | CLI | 98% |
@@ -83,10 +101,34 @@ This baseline must be updated after every milestone or PR.
 - CE-022 metrics are written to `transcript/metrics.json`.
 - `transcribe --force`: hardware is resolved before the reuse decision, and a
   transcript is reused only when its fingerprint matches.
+- A `--config` profile that differs from the one the run was created under is
+  reported rather than applied silently, and
+  `manifest.versions.transcription_model` names the model that actually produced
+  the transcript.
+- A faster-whisper failure exits with the transcription code, not the analysis
+  one.
+- Every run artifact, `transcript.txt` and `transcript.srt` included, is written
+  atomically; a failed write leaves no partial file and no `.tmp`.
 
 ### V0.4 Candidate Intelligence Engine
 
 Status: not started. Scope: CE-023 through CE-033.
+
+## Known limitations
+
+- `metrics.processing_seconds`, and therefore the RTF, measure the whole
+  transcriber call: model resolution, download on first use and load are
+  included. The first run of a new model reported RTF 1.91 and the next 0.21 on
+  the same audio. RTF is comparable only between runs with a warm model cache.
+  Separating load from decode requires a change to `TranscriberPort` and is left
+  for when the metric is actually used to choose a model.
+- On Windows, ffprobe writes its diagnostics in the console codepage, so
+  non-ASCII characters in a source path are replaced with U+FFFD inside
+  `manifest.failure.message`. `manifest.input.path` is unaffected and remains
+  exact.
+- `configs/quality.toml` restates the packaged defaults verbatim, so it is a
+  no-op overlay. The profiles are not shipped inside the wheel either, so a
+  wheel-only installation has no `--config` profile to point at.
 
 ## Current priority
 
