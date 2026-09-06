@@ -542,3 +542,252 @@ Not an ADR, but binding on every artifact the engine writes under `workspace/`:
 The point is that a run produced on Windows and the same run produced on Ubuntu
 are byte-comparable. This contract governs generated artifacts only — repository
 text files are normalized by Git.
+
+---
+
+## ADR-019 — Gemini as the initial analysis provider
+
+**Status:** Accepted for V0 experimentation, not permanent lock-in
+
+### Context
+
+ADR-003 and ADR-008 fix what the LLM is allowed to do: interpret semantics and
+rate six dimensions. They say nothing about whose model does it. The earlier
+documents named OpenAI as the first adapter, chosen before any candidate had
+been generated, and `analysis.provider` had exactly one member.
+
+V0.4 needs a provider that is available now, returns structured output against a
+declared schema rather than free text a parser has to guess at, and can absorb
+the volume of a candidate-quality experiment without the cost of the experiment
+becoming the reason not to run it. Candidate quality is the project's main risk;
+anything that discourages iterating on prompts works against measuring it.
+
+### Decision
+
+Gemini is the initial analysis provider for V0.
+
+```text
+provider     gemini
+model        gemini-3.5-flash-lite
+SDK          google-genai
+adapter      GeminiContentAnalyzer
+credential   GEMINI_API_KEY
+```
+
+The OpenAI compatibility layer Gemini offers is **not** used. It would put a
+translation shim between the domain and the provider whose failure modes belong
+to neither, and it would make the adapter pretend to be something it is not. The
+native SDK is used directly, behind the port.
+
+`ContentAnalyzerPort` stays provider-neutral. It is a Protocol over domain types
+only, and nothing above the adapter boundary may import `google.genai` or name
+Gemini. Adding OpenAI later is a second adapter and a configuration value, not a
+change to the domain.
+
+faster-whisper remains the transcription system. This decision concerns the
+analysis stage alone.
+
+### Consequences
+
+- The domain does not depend on Google. `ContentAnalyzerPort` is written against
+  `TranscriptChunk` and `RawCandidate`, and the SDK types stay inside
+  `adapters/analysis/`, the same boundary ADR-006 draws around faster-whisper.
+- Changing provider changes **nothing** about scoring, timestamp validation,
+  boundary snapping, deduplication or ranking. Those are deterministic code by
+  ADR-003 and ADR-008, they consume `CandidateScores` and intervals, and they
+  cannot tell which model produced them. That is the property that makes a
+  provider swap an experiment rather than a rewrite.
+- Reproducibility is not a promise that a given call returns identical bytes. No
+  generation parameters are pinned in V0: default sampling is kept, so two calls
+  with the same prompt may differ. What is reproducible is everything around the
+  call — the exact model, the prompt version and hash, the effective
+  configuration, the input transcript hash, the raw responses stored per chunk,
+  and every deterministic rule applied afterwards. An experiment is comparable
+  because its inputs and its rules are recorded, not because the model is
+  assumed to be a pure function.
+- `GEMINI_API_KEY` is read from the environment and nowhere else. It never
+  reaches `manifest.json`, `config.effective.json`, any stage configuration, any
+  artifact, any log line or the repository. `doctor` reports only whether it is
+  present, never its value, and `.env` stays ignored while `.env.example` carries
+  the name with an empty value.
+- The free tier is a shared-quota service. Do not send confidential or sensitive
+  recordings through it. This is a policy about which material may be analysed,
+  not a claim about the provider.
+- Nothing here is implemented yet. This ADR records the decision so the port,
+  the configuration and the schemas can be built against it; the adapter, the
+  SDK dependency and the prompt arrive in a later pull request.
+
+---
+
+## ADR-020 — Candidate records describe the phase they reached
+
+**Status:** Accepted
+
+### Context
+
+The first shape of the candidate models had a single `ValidatedCandidate` with a
+required interval, a required `BoundaryAdjustment` and a required total score,
+and a `RawCandidate` whose Pydantic constraints refused a negative start or a
+non-positive end.
+
+Both were wrong in the same direction. A proposal refused by CE-030 for having
+an inverted interval never gets a boundary or a score, so the only way to record
+it in that model is to invent values for fields it never earned. And the raw
+model refused exactly the timestamps CE-030 exists to reject, so an impossible
+proposal became a parse error with nothing written down — replacing a
+measurement of how often the prompt fails with an exception.
+
+The pipeline has phases, and a record has to be able to say which one it reached.
+
+### Decision
+
+**Untrusted output is preserved, not policed.** `RawCandidate.start` and `.end`
+carry no ordering or sign constraint. Negative, zero-length and inverted
+intervals are accepted and kept unaltered. `NaN` and the infinities remain
+refused: an impossible timestamp is data about the prompt, a non-number is not a
+timestamp at all.
+
+"Verbatim" belongs to one field only: `CandidateBatch.raw_response`, which the
+port keeps exactly as the provider sent it, so a parse failure still leaves
+evidence. `InvalidCandidate.proposed` is the *parsed* proposal, preserved
+without alteration but structured — the distinction matters when the disagreement
+under investigation is between what the provider said and what the domain made
+of it.
+
+**Two record types, split by phase reached**, rather than one type with optional
+fields:
+
+```text
+InvalidCandidate     refused by CE-030, before snapping or scoring.
+                     Holds the parsed proposal and the reasons. No interval, no
+                     boundary, no deterministic total - it never earned them.
+                     `proposed.scores` still carries the six ratings the
+                     provider supplied: those arrived with the proposal rather
+                     than being computed from it.
+
+ValidatedCandidate   reached scoring. Interval, boundary and total are all real.
+                     Status is SUGGESTED, REJECTED or DEDUPLICATED.
+```
+
+Optional fields were the alternative and were rejected: they would let a caller
+ask a question that has no answer, and every consumer in CE-030–CE-033 would
+carry a `if x is not None` that the type system could not check. Two types make
+the phase a fact the compiler knows.
+
+`CandidateCollection` therefore holds three lists — `candidates`, `rejected`,
+`invalid` — split by how far a proposal got rather than by how good it was.
+
+**`BoundaryAdjustment` may be absent, but only by being on the other type.** It
+exists exactly when snapping ran, which is exactly when the record is a
+`ValidatedCandidate`. It is never optional within a type.
+
+**A reason belongs to the phase that could have decided it.** `enums.py` names
+the sets: `PRE_SCORING_REASONS` for what CE-030 can reach, and one named
+constant each for `BELOW_SCORE_REASON`, `DEDUPE_REASON` and `TOP_N_REASON`.
+`TERMINAL_REASONS` maps a status to the reasons it may carry.
+
+```text
+InvalidCandidate     one or more PRE_SCORING_REASONS. Several are allowed: a
+                     single CE-030 pass can find more than one defect.
+SUGGESTED            no reasons at all.
+REJECTED             exactly one, BELOW_MIN_SCORE or NOT_IN_TOP_N.
+DEDUPLICATED         exactly [DUPLICATE], and never a rank.
+```
+
+Reasons from different phases cannot be mixed. Without this a duplicate could be
+filed as a plain rejection and counted as a score failure, and every total in the
+funnel would still add up.
+
+**`CandidateCounts` are terminal outcomes, mutually exclusive by construction.**
+Every proposal reaches exactly one of `invalid`, `below_min_score`,
+`deduplicated`, `not_in_top_n` or `selected`, so they sum to `proposed` and the
+model enforces it. `not_in_top_n` was added because a candidate that survived
+every rule and was still cut by `max_candidates` is a real outcome that
+previously had nowhere to go, which would have made the identity false. The
+exclusivity comes from the pipeline order: the minimum-score filter runs before
+deduplication, and the top-N cut runs last.
+
+**Every counter is read off the records, not merely required to balance.** Each
+of the five is counted from the list that holds it. The weaker check —
+`below_min_score + deduplicated + not_in_top_n == len(rejected)` — accepts any
+permutation of those three, and the difference between "the prompt scores badly"
+and "the cap is too tight" is exactly what the funnel exists to report.
+`counts.deduplicated == len(deduplication_events)` needs no separate check: the
+event rules below already make the two the same number.
+
+**A deduplication event is evidence, so it is held to the records it names.** It
+restates facts that live on both candidates, which is what makes it an audit
+trail and also what lets it disagree with them. For each event:
+
+```text
+kept_id != dropped_id             a candidate cannot deduplicate itself
+dropped_id                        is recorded DEDUPLICATED, and dropped once
+every DEDUPLICATED candidate      appears as dropped_id exactly once
+kept_id                           survived deduplication: never DEDUPLICATED,
+                                  never BELOW_MIN_SCORE
+kept_score, dropped_score         equal the totals on the two records
+kept_score >= dropped_score       deduplication keeps the better one
+iou                               recomputed from both intervals, and >= dedupe_iou
+```
+
+The pipeline order decides who may appear on which side. The minimum-score
+filter runs first, so a keeper was never removed by it; the top-N cut runs last,
+so a keeper may still end up `NOT_IN_TOP_N` rather than `SUGGESTED`.
+
+**Equal scores are broken deterministically**: the earlier `start` is kept, and
+if the starts are equal too, the smaller identifier. A rule is needed because
+without one the same input can produce two different shortlists, and the
+identifier is a stable last resort because it is derived from the proposed
+interval before snapping (D-3).
+
+Float comparisons in all of this use an explicit tolerance: a microsecond for
+timestamps, `1e-6` for totals and for the overlap ratio. These are binary
+floats, so equality between a value and the arithmetic that produced it is only
+ever equality to within representation error.
+
+### Consequences
+
+- CE-030–CE-033 can be written against invariants the models enforce rather than
+  against convention: the interval matches the boundary, the deltas describe the
+  movement, the counts match the lists, identifiers are unique, and a
+  deduplication event cannot name a candidate that does not exist.
+- A refused proposal is still fully diagnosable, which is what makes the failure
+  modes in the candidate engine specification measurable rather than anecdotal.
+- Adding a sixth terminal outcome later means adding a counter and updating the
+  identity, which will fail loudly rather than silently unbalancing the funnel.
+
+---
+
+## ADR-021 — `target_candidates` is a run objective, never a per-chunk quota
+
+**Status:** Accepted
+
+### Context
+
+`CandidateCollection.target_candidates` documented the objective for the whole
+run, while `AnalysisContext.target_candidates` — passed into a call about a
+single chunk — documented it as the objective per chunk. Same name, two
+meanings, on both sides of the port. A ten-chunk recording would have produced
+either ten candidates or a hundred depending on which reading an adapter
+believed.
+
+### Decision
+
+There is one semantics. `target_candidates` is the objective for the whole run.
+It is not a number of candidates requested from each chunk, and `max_candidates`
+remains the hard ceiling CE-033 applies once, over every chunk's output together.
+
+The field on `AnalysisContext` is renamed `run_target_candidates`, because the
+ambiguity was created by the name: a field called `target_candidates` on a
+per-chunk call reads as "return this many for this chunk" no matter what the
+docstring says.
+
+If an adapter ever needs a per-chunk budget, it is a separate field with its own
+name, computed explicitly from the run objective and the chunk count. It is never
+this field reinterpreted.
+
+### Consequences
+
+- An adapter cannot silently multiply the run objective by the chunk count.
+- The two sides of the port can be read independently without the reader having
+  to hold the distinction in their head.

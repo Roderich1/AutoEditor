@@ -59,7 +59,7 @@ Variables de entorno:
 |---|---|
 | `CONTENT_ENGINE_WORKSPACE` | Raíz del workspace; tiene prioridad sobre el TOML |
 | `CONTENT_ENGINE_ANALYSIS_MODEL` | Modelo de análisis |
-| `OPENAI_API_KEY` | Credenciales de análisis (todavía sin uso en V0.1–V0.3) |
+| `GEMINI_API_KEY` | Credencial de análisis (ADR-019; todavía sin uso: el adaptador no existe) |
 
 Un `workspace.root` relativo se resuelve contra el directorio actual, nunca
 contra el directorio de instalación. `doctor` y `run` imprimen siempre la ruta

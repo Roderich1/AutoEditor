@@ -13,6 +13,8 @@ from content_engine.domain.exceptions import ContentEngineError
 from content_engine.utils.subprocess import run_command
 
 ANALYSIS_MODEL_PLACEHOLDER = "SET_MODEL_HERE"
+#: ADR-019. Presence is checked; the value is never read, printed or stored.
+ANALYSIS_CREDENTIAL_ENV_VAR = "GEMINI_API_KEY"
 
 
 @dataclass(frozen=True)
@@ -84,11 +86,16 @@ class DoctorService:
         return Check("Configuration", True, " + ".join(config_sources(self.config_path)))
 
     def _credentials_check(self) -> Check:
-        present = bool(os.getenv("OPENAI_API_KEY"))
+        """Report only whether the credential exists.
+
+        ``bool()`` is the whole interaction with it: the value is never read into
+        a variable, printed, logged or written to an artifact.
+        """
+        present = bool(os.getenv(ANALYSIS_CREDENTIAL_ENV_VAR))
         return Check(
-            "OpenAI credentials",
+            "Analysis credentials",
             present,
-            "configured" if present else "OPENAI_API_KEY is missing",
+            "configured" if present else f"{ANALYSIS_CREDENTIAL_ENV_VAR} is missing",
             required=self.require_ai,
         )
 

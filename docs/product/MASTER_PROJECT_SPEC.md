@@ -720,7 +720,7 @@ Key adapters:
 - ffprobe;
 - FFmpeg;
 - faster-whisper;
-- OpenAI initial analyzer;
+- Gemini initial analyzer (ADR-019);
 - filesystem persistence.
 
 The domain must not import provider-specific SDKs.

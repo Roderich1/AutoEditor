@@ -4,27 +4,30 @@
 
 - Repository: `Roderich1/AutoEditor`
 - Default branch: `main`
-- Merged pull requests: `#1 Proyecto base`, `#2 documentacion del proyecto base`
-- Active branch: `chore/stabilize-v0-1-v0-3` (not yet pushed)
+- Merged pull requests: `#1 Proyecto base`, `#2 documentacion del proyecto base`,
+  `#3 Stabilize Content Engine V0.1-V0.3` (merge commit `d047479`)
+- Active branch: `feat/candidate-engine-foundation`
 - Current package version: `0.1.0`
 
 ## Verification baseline
 
-Last verification, on `chore/stabilize-v0-1-v0-3`, Windows 11, Python 3.12.10,
-FFmpeg 9.0.1:
+Last verification, on `feat/candidate-engine-foundation`, Windows 11,
+Python 3.12.10, FFmpeg 9.0.1:
 
 | Check | Result |
 |---|---|
 | `uv run ruff check .` | passed |
-| `uv run ruff format --check .` | passed, 61 files |
+| `uv run ruff format --check .` | passed, 66 files |
 | `uv run mypy src` | passed, 30 files, strict |
-| `uv run pytest` | 608 passed |
-| `uv run pytest` from a working directory outside the repository | 608 passed, no stray files |
-| `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | 608 passed at both; no assertion depends on the console width |
+| `uv run pytest` | 804 passed |
+| `uv run pytest` from a working directory outside the repository | 804 passed, no stray files |
+| `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | 804 passed at both; no assertion depends on the console width |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
 | SonarCloud quality gate | passes; Reliability and Security both A |
 | `uv run pytest -m integration --no-cov` | 13 passed with real FFmpeg |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
+| Transcription digests unchanged by the canonical extraction | pinned to `main` at `d047479` and asserted |
+| Provider SDK imported anywhere in `src/` | none; asserted by an AST sweep |
 | Stage configuration coherent with the manifest | fingerprint rebuilt from the artifact matches the recorded one |
 | `uv build` | wheel and sdist built; the wheel ships `content_engine/resources/default.toml` |
 | Wheel in a clean venv, arbitrary working directory with spaces and non-ASCII characters | `doctor`, `inspect`, `run`, `transcribe` all work |
@@ -57,7 +60,7 @@ Coverage:
 
 | Scope | Coverage |
 |---|---|
-| Total | 99% (1182 statements, 14 missed) |
+| Total | 99% (1485 statements, 13 missed) |
 | Domain | 100% |
 | Services | 100% |
 | CLI | 98% |
@@ -139,9 +142,69 @@ This baseline must be updated after every milestone or PR.
 - `manifest.json` is at schema 2. A manifest written by an earlier build is
   refused rather than reinterpreted, which is the documented behaviour.
 
-### V0.4 Candidate Intelligence Engine
+### V0.4 Candidate Intelligence Engine — in progress
 
-Status: not started. Scope: CE-023 through CE-033.
+Scope: CE-023 through CE-033, in three pull requests. The first is the
+deterministic foundation and adds no provider call.
+
+Implemented in PR #4, pending merge:
+
+- CE-023 transcript chunker. 360 s windows, 30 s overlap, 330 s stride. Segments
+  are atomic and are included whole in every window they overlap, so the segments
+  in the overlap appear in two consecutive chunks. Timestamps stay absolute
+  everywhere; nothing is rebased. An empty transcript produces no chunks rather
+  than an error, and a trailing window already covered by its predecessor is not
+  emitted. `analysis/chunks.json` carries `schema_version`, the rules version,
+  the window settings and the digest of the transcript it was cut from.
+- CE-024 candidate schemas in `domain/candidates.py`. `CandidateScores` has no
+  total and forbids extra keys. `RawCandidate` accepts any finite pair of
+  timestamps, including negative, zero-length and inverted ones, so CE-030 can
+  refuse them with a recorded reason instead of a parse error; `NaN` and the
+  infinities stay refused.
+- A proposal refused before scoring is an `InvalidCandidate`: the parsed
+  proposal plus its reasons, with no interval, no boundary and no deterministic
+  total, because it never earned them. `proposed.scores` still holds the six
+  ratings the provider supplied. The verbatim response stays on
+  `CandidateBatch.raw_response`. Anything that reached scoring is a
+  `ValidatedCandidate` where every field is real. `CandidateCollection`
+  therefore keeps three lists — `candidates`, `rejected`, `invalid` — split by
+  how far a proposal got.
+- A reason belongs to the phase that could have decided it. `InvalidCandidate`
+  may cite only `PRE_SCORING_REASONS`, and may cite several. A scored record
+  carries exactly one terminal reason: `BELOW_MIN_SCORE` or `NOT_IN_TOP_N` when
+  rejected, `DUPLICATE` when deduplicated.
+- `BoundaryAdjustment` checks that its deltas describe the movement they claim,
+  and that a reverted adjustment really restored the proposal with zero deltas
+  and unchanged anchors. `ValidatedCandidate` must agree with its own boundary.
+- `CandidateCounts` are terminal outcomes, mutually exclusive by construction:
+  `invalid`, `below_min_score`, `deduplicated`, `not_in_top_n` and `selected`
+  sum to `proposed`. Each one is counted from the records that hold it, not
+  merely balanced against the others, so two categories cannot be swapped while
+  the total still adds up.
+- Every `DeduplicationEvent` is checked against the two candidates it names: the
+  dropped one is recorded as deduplicated and dropped exactly once, the keeper
+  is one that neither deduplication nor the score filter had already removed,
+  both scores are the totals on record, and the overlap is recomputed from the
+  intervals and must reach `dedupe_iou`. Equal scores are broken by the earlier
+  start and then by the identifier.
+- CE-025 deterministic score, ADR-008 weights, `Decimal` with `ROUND_HALF_UP`.
+- CE-027 `ContentAnalyzerPort` as a Protocol only. No implementation, no SDK.
+  `AnalysisContext.run_target_candidates` is named for its scope: the objective
+  belongs to the whole run and is never a per-call quota. A per-chunk budget, if
+  one is ever needed, is a separate computed field rather than a reinterpretation
+  of this one.
+- `utils/canonical.py`, the single serialization behind every digest.
+- ADR-019: Gemini is the initial analysis provider.
+
+Not implemented yet: CE-026 prompt, CE-028 Gemini adapter, CE-029 structured
+output, CE-030 to CE-033, and the `analyze` command.
+
+### Configuration levels for the analysis stage
+
+`analysis/config.effective.json` and `manifest.stages["analysis"]` will follow
+the pattern the transcription stage already uses. Neither exists yet; the shape
+they need does, because `manifest.stages` is a map and `StageRecord` already
+carries `stage_config_sha256`.
 
 ## Known limitations
 
@@ -155,14 +218,19 @@ Status: not started. Scope: CE-023 through CE-033.
   non-ASCII characters in a source path are replaced with U+FFFD inside
   `manifest.failure.message`. `manifest.input.path` is unaffected and remains
   exact.
+- `analysis.model` is set to `gemini-3.5-flash-lite`, the model ADR-019 plans to
+  use. It has not been exercised against a live API, because this change adds no
+  adapter and makes no call.
 - `configs/quality.toml` restates the packaged defaults verbatim, so it is a
   no-op overlay. The profiles are not shipped inside the wheel either, so a
   wheel-only installation has no `--config` profile to point at.
 
 ## Current priority
 
-Review and merge the stabilization PR. Then begin CE-023–CE-033 in a separate
-branch and PR.
+V0.4, the Candidate Intelligence Engine (CE-023–CE-033). The foundation is on
+`feat/candidate-engine-foundation`. Next is the deterministic pipeline
+(CE-030–CE-033) with the `analyze` command driven by a fake analyzer, then the
+prompt and the Gemini adapter.
 
 ## Deferred to V0.7 (CE-047 to CE-052)
 

@@ -209,7 +209,7 @@ Scoring arithmetic, validation, deduplication, ranking rules and media execution
 
 ## NFR-003 — Provider independence
 
-Domain logic shall not depend directly on faster-whisper/OpenAI/FFmpeg SDK-specific types beyond adapter boundaries.
+Domain logic shall not depend directly on faster-whisper/Gemini/FFmpeg SDK-specific types beyond adapter boundaries.
 
 ## NFR-004 — Security
 

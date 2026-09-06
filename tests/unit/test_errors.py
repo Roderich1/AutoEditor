@@ -152,7 +152,7 @@ def _manifest_payload(run_id: str) -> dict[str, Any]:
             "python": "3.12.0",
             "ffmpeg": "ffmpeg version test",
             "transcription_model": "large-v3",
-            "analysis_provider": "openai",
+            "analysis_provider": "gemini",
             "analysis_model": "SET_MODEL_HERE",
             "prompt_version": None,
             "prompt_sha256": None,

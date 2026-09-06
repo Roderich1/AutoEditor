@@ -102,7 +102,7 @@ Autoscaling/GPU pools/distributed queue/cloud orchestration/Kubernetes only when
 - **CE-025** deterministic score engine.
 - **CE-026** prompt `clip_candidates/v1`.
 - **CE-027** `ContentAnalyzerPort`.
-- **CE-028** initial OpenAI adapter.
+- **CE-028** initial Gemini adapter (ADR-019).
 - **CE-029** structured-output parsing/validation.
 - **CE-030** timestamp/duration validator.
 - **CE-031** boundary snapper.

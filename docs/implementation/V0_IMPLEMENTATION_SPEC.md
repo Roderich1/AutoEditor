@@ -9,7 +9,7 @@
 **Project tooling:** `uv`, `pyproject.toml`.  
 **Media:** ffprobe + FFmpeg.  
 **Transcription:** faster-whisper behind an abstraction.  
-**AI:** provider abstraction; initial OpenAI adapter.  
+**AI:** provider abstraction; initial Gemini adapter (ADR-019).\
 **Validation:** Pydantic + domain rules.  
 **Frontend/DB/Redis/n8n/social publishing/Kubernetes:** explicitly excluded.
 
@@ -111,7 +111,7 @@ content-engine/
 │       │   ├── transcription/
 │       │   │   └── faster_whisper.py
 │       │   ├── analysis/
-│       │   │   └── openai_analyzer.py
+│       │   │   └── gemini_analyzer.py
 │       │   └── persistence/
 │       │       └── filesystem.py
 │       ├── services/
@@ -173,7 +173,7 @@ typer
 rich
 structlog
 faster-whisper
-openai
+google-genai
 tenacity
 ```
 
@@ -567,7 +567,9 @@ class ContentAnalyzerPort(Protocol):
         ...
 ```
 
-The initial adapter can use OpenAI, but the domain cannot depend on the OpenAI SDK.
+The initial adapter uses Gemini (ADR-019), but the domain cannot depend on any
+provider SDK. Swapping the provider must not change scoring, validation,
+boundary snapping, deduplication or ranking.
 
 ---
 
@@ -1258,7 +1260,7 @@ word_timestamps = true
 vad_filter = true
 
 [analysis]
-provider = "openai"
+provider = "gemini"
 model = "SET_MODEL_HERE"
 prompt_version = "v1"
 
@@ -1336,7 +1338,7 @@ Store the resolved/effective config in the run.
 25. deterministic score;
 26. prompt v1;
 27. AnalyzerPort;
-28. OpenAI adapter;
+28. Gemini adapter;
 29. structured validation;
 30. timestamp validator;
 31. boundary snapper;

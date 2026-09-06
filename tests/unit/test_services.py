@@ -6,10 +6,14 @@ from typing import Any
 
 import pytest
 
-from content_engine.config import Settings
+from content_engine.config import ANALYSIS_MODEL_ENV_VAR, Settings, load_settings
 from content_engine.domain.exceptions import ExternalToolNotFoundError
 from content_engine.domain.models import MediaInfo
-from content_engine.services.doctor_service import DoctorService
+from content_engine.services.doctor_service import (
+    ANALYSIS_CREDENTIAL_ENV_VAR,
+    ANALYSIS_MODEL_PLACEHOLDER,
+    DoctorService,
+)
 from content_engine.services.media_service import MediaService
 from tests.conftest import fake_process
 
@@ -87,7 +91,7 @@ def test_doctor_reports_ready_required_environment(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _healthy_environment(monkeypatch)
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv(ANALYSIS_CREDENTIAL_ENV_VAR, "present-for-the-check")
 
     checks = DoctorService(settings).run()
 
@@ -156,25 +160,67 @@ def test_ai_configuration_is_optional_by_default(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _healthy_environment(monkeypatch)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv(ANALYSIS_CREDENTIAL_ENV_VAR, raising=False)
 
     checks = {check.name: check for check in DoctorService(settings).run()}
 
-    assert not checks["OpenAI credentials"].required
+    assert not checks["Analysis credentials"].required
     assert not checks["Analysis model"].required
     assert all(check.ok for check in checks.values() if check.required)
 
 
-def test_require_ai_makes_credentials_and_model_mandatory(
+def test_require_ai_makes_the_credential_mandatory(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _healthy_environment(monkeypatch)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv(ANALYSIS_CREDENTIAL_ENV_VAR, raising=False)
 
     checks = {check.name: check for check in DoctorService(settings, require_ai=True).run()}
 
-    assert checks["OpenAI credentials"].required
-    assert not checks["OpenAI credentials"].ok
+    assert checks["Analysis credentials"].required
+    assert not checks["Analysis credentials"].ok
+    assert ANALYSIS_CREDENTIAL_ENV_VAR in checks["Analysis credentials"].detail
+
+
+def test_the_credential_check_never_reveals_the_value(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-019: presence is reported, the secret itself never leaves the environment."""
+    _healthy_environment(monkeypatch)
+    secret = "not-a-real-key-0123456789"
+    monkeypatch.setenv(ANALYSIS_CREDENTIAL_ENV_VAR, secret)
+
+    checks = DoctorService(settings, require_ai=True).run()
+    credential = next(check for check in checks if check.name == "Analysis credentials")
+
+    assert credential.ok
+    assert credential.detail == "configured"
+    assert all(secret not in check.detail for check in checks)
+
+
+def test_the_packaged_analysis_model_is_configured_not_a_placeholder(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _healthy_environment(monkeypatch)
+
+    checks = {check.name: check for check in DoctorService(settings, require_ai=True).run()}
+
+    assert checks["Analysis model"].ok
+    assert checks["Analysis model"].detail == settings.analysis.model
+
+
+def test_a_placeholder_analysis_model_is_still_refused(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The placeholder path stays reachable for anyone who blanks the model."""
+    _healthy_environment(monkeypatch)
+    monkeypatch.setenv(ANALYSIS_MODEL_ENV_VAR, ANALYSIS_MODEL_PLACEHOLDER)
+    placeholder_settings = load_settings()
+
+    checks = {
+        check.name: check for check in DoctorService(placeholder_settings, require_ai=True).run()
+    }
+
     assert checks["Analysis model"].required
     assert not checks["Analysis model"].ok
     assert "placeholder" in checks["Analysis model"].detail
