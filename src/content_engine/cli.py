@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from math import isfinite
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
@@ -21,12 +23,23 @@ from content_engine.adapters.analysis.gemini_analyzer import (
 from content_engine.adapters.analysis.prompt import Prompt, select_prompt
 from content_engine.adapters.media.ffmpeg import FFmpegAdapter
 from content_engine.adapters.media.ffprobe import FFprobeAdapter
+from content_engine.adapters.media.preview import FFmpegPreviewRenderer
 from content_engine.adapters.persistence.filesystem import RunWorkspace
 from content_engine.adapters.transcription.faster_whisper import FasterWhisperTranscriber
 from content_engine.config import Settings, config_sha256, load_settings
 from content_engine.domain.analysis_rules import AnalyzerIdentity
-from content_engine.domain.candidates import CANDIDATES_SCHEMA_VERSION, CandidateCollection
-from content_engine.domain.enums import AnalysisProvider, RunStage, RunStatus
+from content_engine.domain.candidates import (
+    CANDIDATES_SCHEMA_VERSION,
+    CandidateCollection,
+    ValidatedCandidate,
+)
+from content_engine.domain.enums import (
+    REASON_REQUIRING_DETAIL,
+    AnalysisProvider,
+    EditorialReason,
+    RunStage,
+    RunStatus,
+)
 from content_engine.domain.exceptions import (
     EXIT_CONFIGURATION,
     EXIT_UNKNOWN,
@@ -40,6 +53,19 @@ from content_engine.domain.models import (
     RunManifest,
     Transcript,
 )
+from content_engine.domain.preview_rules import (
+    PREVIEW_INDEX_FILENAME,
+    preview_filename,
+    preview_stage_config,
+)
+from content_engine.domain.previews import PREVIEW_INDEX_SCHEMA_VERSION, PreviewIndex
+from content_engine.domain.review import (
+    DECISIONS_SCHEMA_VERSION,
+    ApprovedDecision,
+    EditedDecision,
+    RejectedDecision,
+    ReviewDecisionCollection,
+)
 from content_engine.domain.run_state import validate_transition
 from content_engine.domain.transcript_rules import stage_config, transcription_fingerprint
 from content_engine.services.analysis_service import (
@@ -48,11 +74,26 @@ from content_engine.services.analysis_service import (
     AnalysisPlan,
     AnalysisService,
     plan_analysis,
+    read_candidates,
     verify_analysis,
 )
 from content_engine.services.chunking_service import transcript_sha256
 from content_engine.services.doctor_service import Check, DoctorService
 from content_engine.services.media_service import MediaService
+from content_engine.services.preview_service import (
+    PreviewPlan,
+    PreviewService,
+    require_previews,
+    verify_previews,
+)
+from content_engine.services.review_service import (
+    DECISIONS_FILENAME,
+    Decision,
+    ReviewPlan,
+    ReviewSession,
+    empty_collection,
+    require_decisions,
+)
 from content_engine.services.run_service import RunService
 from content_engine.services.transcription_service import (
     TranscriptionService,
@@ -575,6 +616,648 @@ def _refuse_or_skip(
             f"(recorded {record.fingerprint[:12]}, current {fingerprint[:12]} on "
             f"{device}/{compute_type}). It will not be reused. Rerun with --force."
         )
+
+
+@app.command()
+def preview(
+    run_id: Annotated[str, typer.Argument(help="Existing run identifier")],
+    config: ConfigOption = None,
+    force: Annotated[bool, typer.Option("--force", help="Replace existing previews")] = False,
+) -> None:
+    """Cut one low-cost vertical proxy per selected candidate (CE-034).
+
+    Previews exist so a person can watch what the analyzer proposed before
+    anything expensive is rendered. They are 540x960 by default, encoded fast
+    and lossy, with the whole source frame fitted inside the vertical frame and
+    padded rather than cropped or stretched: a technical recording usually has
+    the point of the clip in a corner of a terminal, and cropping would remove
+    it. No subtitles and no final styling -- those belong to CE-040 to CE-045.
+
+    Nothing reaches the previews directory until every proxy has been encoded
+    and read back with ffprobe, so a failure leaves the previous set intact and
+    the run never claims READY_FOR_REVIEW on the strength of files that were
+    not produced.
+    """
+
+    def action() -> str:
+        settings: Settings = load_settings(config)
+        workspace = RunWorkspace(settings.workspace.root)
+        run_service = RunService(settings, workspace)
+        run_path = workspace.require(run_id)
+        manifest = workspace.read_manifest(run_path)
+
+        # Refused before anything is read, hashed or encoded, so a run that
+        # cannot reach READY_FOR_REVIEW says so instead of failing at the end.
+        validate_transition(manifest.status, RunStatus.READY_FOR_REVIEW)
+
+        if not settings.preview.enabled:
+            # Advancing here would put a run in READY_FOR_REVIEW with an empty
+            # previews directory, and every later stage reads the status rather
+            # than the directory.
+            raise ConfigurationError(
+                "preview.enabled is false, so no preview can be produced and this run cannot "
+                "become READY_FOR_REVIEW. Enable it in the profile, or omit --config to use "
+                "the packaged defaults."
+            )
+
+        _warn_about_configuration_drift(manifest, config_sha256(settings))
+        plan = _plan_previews(run_path, manifest, settings)
+
+        previews_directory = run_path.joinpath("previews")
+        # Whether this stage has run is a question for the manifest and for the
+        # index together. Either signal sends the invocation through
+        # verification, which refuses whatever is inconsistent and leaves the
+        # decision to --force.
+        already_previewed = (
+            RunStage.PREVIEW.value in manifest.stages
+            or previews_directory.joinpath(PREVIEW_INDEX_FILENAME).is_file()
+        )
+        if already_previewed and not force:
+            return _reuse_or_recover_previews(
+                run_service, run_path, manifest, previews_directory, plan
+            )
+
+        if force:
+            _warn_about_stale(run_path, ("review", "clips"), "previews")
+
+        try:
+            outcome = PreviewService(FFmpegPreviewRenderer(), FFprobeAdapter()).generate(
+                plan, previews_directory, datetime.now(UTC)
+            )
+        except ContentEngineError as error:
+            run_service.fail(run_path, manifest, RunStage.PREVIEW, error)
+            _report_run_context(run_path, manifest)
+            raise
+
+        manifest = run_service.advance(run_path, manifest, RunStatus.READY_FOR_REVIEW)
+        run_service.record_stage(
+            run_path,
+            manifest,
+            RunStage.PREVIEW,
+            outcome.fingerprint,
+            outcome.stage_config_sha256,
+            PREVIEW_INDEX_SCHEMA_VERSION,
+        )
+        return _describe_previews(outcome.index, outcome.fingerprint, previews_directory)
+
+    _execute(action)
+
+
+def _plan_previews(run_path: Path, manifest: RunManifest, settings: Settings) -> PreviewPlan:
+    """Everything the preview stage needs, resolved before an encoder starts.
+
+    The source is hashed rather than merely checked for existence. A file at the
+    recorded path that is not the recorded file would produce previews of the
+    wrong video, and every check downstream -- the index, the fingerprint, the
+    reviewer's judgement -- would be about material this run never analysed.
+    """
+    collection = read_candidates(run_path.joinpath("analysis"))
+    source = manifest.input.path
+    if not source.is_file():
+        raise InvalidMediaError(
+            f"The run source is missing, so no preview can be cut from it: {source}"
+        )
+    digest = sha256_file(source)
+    if digest != manifest.input.sha256:
+        raise InvalidMediaError(
+            f"The file at the run source path is not the one this run was created from "
+            f"(recorded {manifest.input.sha256[:12]}, on disk {digest[:12]}): {source}"
+        )
+    return PreviewPlan(
+        candidates=tuple(collection.candidates),
+        config=preview_stage_config(width=settings.preview.width, height=settings.preview.height),
+        analysis_fingerprint=_analysis_fingerprint(manifest),
+        source_path=source,
+        source_sha256=digest,
+        source_duration_seconds=collection.source_duration_seconds,
+    )
+
+
+def _analysis_fingerprint(manifest: RunManifest) -> str:
+    """The analysis execution a downstream stage is being asked to build on."""
+    record = manifest.stages.get(RunStage.ANALYSIS.value)
+    if record is None:
+        raise IncompatibleArtifactError(
+            "This run has no recorded analysis, so there is no shortlist to work from. "
+            f"Run `content-engine analyze {manifest.run_id}` first."
+        )
+    if record.schema_version != CANDIDATES_SCHEMA_VERSION:
+        raise IncompatibleArtifactError(
+            f"The existing candidates use schema {record.schema_version}; this build produces "
+            f"{CANDIDATES_SCHEMA_VERSION}. Rerun the analysis with --force."
+        )
+    return record.fingerprint
+
+
+def _describe_previews(index: PreviewIndex, fingerprint: str, directory: Path) -> str:
+    if not index.previews:
+        console.print(
+            "[yellow]Warning:[/yellow] the analysis selected no candidates, so there was "
+            "nothing to preview and there will be nothing to review."
+        )
+    return (
+        f"[green]Previews ready:[/green] {len(index.previews)} previews at "
+        f"{index.width}x{index.height} in {directory}, fingerprint {fingerprint[:12]}"
+    )
+
+
+def _reuse_or_recover_previews(
+    run_service: RunService,
+    run_path: Path,
+    manifest: RunManifest,
+    previews_directory: Path,
+    plan: PreviewPlan,
+) -> str:
+    """Report a proved reuse, settling the run's status if it was left failed.
+
+    The same shape the analysis stage uses, for the same reason: everything
+    before this decides what to run, and this decides what an already-complete
+    stage means.
+    """
+    record = manifest.stages.get(RunStage.PREVIEW.value)
+    if record is None:
+        raise IncompatibleArtifactError(
+            "Previews exist but no fingerprint was recorded for them, so they cannot be "
+            "shown to match the current candidates and settings. Rerun with --force."
+        )
+    if record.schema_version != PREVIEW_INDEX_SCHEMA_VERSION:
+        raise IncompatibleArtifactError(
+            f"The existing previews use index schema {record.schema_version}; this build "
+            f"produces {PREVIEW_INDEX_SCHEMA_VERSION}. Rerun with --force."
+        )
+    index = verify_previews(
+        previews_directory, record.fingerprint, record.stage_config_sha256, plan
+    )
+    summary = f"{len(index.previews)} previews at {index.width}x{index.height}"
+    if manifest.status in {RunStatus.READY_FOR_REVIEW, RunStatus.REVIEWED}:
+        # Already settled: reuse must not touch a single byte, so the manifest
+        # is not rewritten either.
+        return f"[green]Previews reused:[/green] {summary}. Use --force to regenerate."
+    previous = manifest.status
+    run_service.advance(run_path, manifest, RunStatus.READY_FOR_REVIEW)
+    return (
+        f"[green]Previews recovered:[/green] {summary}. The files still match the current "
+        f"candidates, source and settings, so the run moves from {previous} to "
+        f"{RunStatus.READY_FOR_REVIEW}. Use --force to regenerate."
+    )
+
+
+class _SessionOver(Exception):  # noqa: N818 - control flow, not a failure
+    """The reviewer stopped. Carries how, so the report can say which it was.
+
+    Not a ``ContentEngineError``: quitting, reaching the end of input and
+    pressing Ctrl+C are all ordinary ways to finish a review session, and none
+    of them is a failure of the run. Modelling them as an exception rather than
+    a sentinel return keeps the prompt helpers able to end the session from
+    wherever they are, which is what makes EOF handling uniform across the
+    action, reason, detail and boundary prompts.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _read_line(prompt: str) -> str:
+    """Ask one question. Raises EOFError at end of input, as ``input`` does.
+
+    Extracted so the suite can drive a session, and so an interrupt can be
+    placed at an exact question. ``input`` is used rather than ``click.prompt``
+    because click collapses EOF and Ctrl+C into one ``Abort``, and these two
+    have to be told apart in the message the session ends with.
+    """
+    console.print(prompt, end="")
+    return input()
+
+
+def _ask(prompt: str) -> str:
+    """Read one answer, or end the session the way the reviewer ended it."""
+    try:
+        return _read_line(prompt).strip()
+    except EOFError as error:
+        raise _SessionOver("input ended") from error
+    except KeyboardInterrupt as error:
+        raise _SessionOver("interrupted") from error
+
+
+@app.command()
+def review(
+    run_id: Annotated[str, typer.Argument(help="Existing run identifier")],
+    config: ConfigOption = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Discard existing decisions and review again")
+    ] = False,
+) -> None:
+    """Approve, reject or retime each candidate (CE-035 to CE-039).
+
+    One candidate at a time, with its preview path, and five keys: approve,
+    reject, edit the range, skip, or quit. Every explicit decision is written
+    to ``review/decisions.json`` before the next candidate is shown, so a
+    closed terminal costs nothing that was already decided.
+
+    Skipping records nothing, which is what makes it different from rejecting:
+    a skipped candidate is still pending and comes back in the next session.
+    The run reaches REVIEWED only once every selected candidate has an explicit
+    decision.
+    """
+
+    def action() -> str:
+        settings: Settings = load_settings(config)
+        workspace = RunWorkspace(settings.workspace.root)
+        run_service = RunService(settings, workspace)
+        run_path = workspace.require(run_id)
+        manifest = workspace.read_manifest(run_path)
+
+        if manifest.status not in {RunStatus.READY_FOR_REVIEW, RunStatus.REVIEWED}:
+            raise IncompatibleArtifactError(
+                f"This run is {manifest.status}, so there are no previews to review. "
+                f"Run `content-engine preview {run_id}` first."
+            )
+
+        collection = read_candidates(run_path.joinpath("analysis"))
+        plan = ReviewPlan(
+            candidates=tuple(collection.candidates),
+            analysis_fingerprint=_analysis_fingerprint(manifest),
+            source_duration_seconds=collection.source_duration_seconds,
+        )
+        previews_directory = run_path.joinpath("previews")
+        _require_reviewable_previews(manifest, previews_directory, plan)
+
+        review_directory = run_path.joinpath("review")
+        session = ReviewSession(
+            review_directory,
+            plan,
+            _existing_or_new_decisions(review_directory, plan, force, datetime.now(UTC)),
+        )
+        return _run_review_session(
+            run_service, run_path, manifest, session, previews_directory, force
+        )
+
+    _execute(action)
+
+
+def _require_reviewable_previews(
+    manifest: RunManifest, previews_directory: Path, plan: ReviewPlan
+) -> None:
+    """Every candidate must have an intact preview before anyone is asked about it.
+
+    Checked with the recorded stage configuration rather than the one this
+    invocation would use. Whether the previews are the size a profile asks for
+    today is a question for ``preview``; the only thing review needs is that
+    the file the reviewer is about to watch is the one that was produced for
+    this candidate.
+    """
+    record = manifest.stages.get(RunStage.PREVIEW.value)
+    if record is None:
+        raise IncompatibleArtifactError(
+            "This run has no recorded previews, so there is nothing to watch. Run "
+            f"`content-engine preview {manifest.run_id}` first."
+        )
+    if record.schema_version != PREVIEW_INDEX_SCHEMA_VERSION:
+        raise IncompatibleArtifactError(
+            f"The existing previews use index schema {record.schema_version}; this build "
+            f"produces {PREVIEW_INDEX_SCHEMA_VERSION}. Regenerate them with "
+            f"`content-engine preview {manifest.run_id} --force`."
+        )
+    require_previews(
+        previews_directory,
+        record.fingerprint,
+        record.stage_config_sha256,
+        plan.candidates,
+        plan.analysis_fingerprint,
+        manifest.input.sha256,
+    )
+
+
+def _existing_or_new_decisions(
+    review_directory: Path,
+    plan: ReviewPlan,
+    force: bool,
+    now: datetime,
+) -> ReviewDecisionCollection:
+    """Resume the decisions on disk, or start over because --force said so.
+
+    ``--force`` does not delete anything here. The replacement collection is
+    only written when the first new decision is taken, or when a session with
+    nothing to decide is opened, and that write is atomic -- so a forced session
+    that fails before deciding anything leaves the previous decisions exactly
+    where they were.
+    """
+    path = review_directory.joinpath(DECISIONS_FILENAME)
+    if not path.is_file():
+        return empty_collection(plan, now)
+    if force:
+        _warn_about_discarding(review_directory, plan)
+        return empty_collection(plan, now)
+    return require_decisions(review_directory, plan)
+
+
+def _warn_about_discarding(review_directory: Path, plan: ReviewPlan) -> None:
+    """Say exactly how much human judgement --force is about to throw away.
+
+    Read defensively: a file too damaged to interpret is exactly the case
+    ``--force`` exists for, so failing to count its decisions must not stop the
+    reviewer from starting again.
+    """
+    try:
+        existing = require_decisions(review_directory, plan)
+    except ContentEngineError:
+        console.print(
+            "[yellow]Warning:[/yellow] the existing decisions cannot be read, and --force "
+            "will replace them with a new review. They are not recoverable afterwards."
+        )
+        return
+    counts = existing.counts
+    console.print(
+        f"[yellow]Warning:[/yellow] --force will discard {len(existing.decisions)} decision(s) "
+        f"({counts['approved']} approved, {counts['rejected']} rejected, "
+        f"{counts['edited']} edited) and ask about every candidate again. Human decisions "
+        "cannot be regenerated."
+    )
+
+
+def _run_review_session(
+    run_service: RunService,
+    run_path: Path,
+    manifest: RunManifest,
+    session: ReviewSession,
+    previews_directory: Path,
+    force: bool,
+) -> str:
+    """Drive the prompt loop, then settle the run's status against what was decided."""
+    total = len(session.plan.candidates)
+    if force and manifest.status is RunStatus.REVIEWED:
+        # ADR-030. The decisions are about to be replaced, so the run must stop
+        # claiming a finished review while the reviewer works through the list.
+        manifest = run_service.advance(run_path, manifest, RunStatus.READY_FOR_REVIEW)
+
+    if not session.plan.candidates:
+        session.open(datetime.now(UTC))
+        console.print(
+            "[yellow]Warning:[/yellow] the analysis selected no candidates, so there is "
+            "nothing to decide."
+        )
+        return _complete_review(run_service, run_path, manifest, session, total)
+
+    if session.complete:
+        counts = session.collection.counts
+        return (
+            f"[green]Already reviewed:[/green] all {total} candidates have a decision "
+            f"({counts['approved']} approved, {counts['rejected']} rejected, "
+            f"{counts['edited']} edited). Use --force to review them again."
+        )
+
+    console.print(
+        f"Reviewing {len(session.pending)} of {total} candidates. "
+        "Watch each preview, then choose an action."
+    )
+    ended: str | None = None
+    try:
+        _prompt_for_every_pending(session, previews_directory, total)
+    except _SessionOver as over:
+        ended = over.reason
+
+    counts = session.collection.counts
+    decided = (
+        f"{len(session.collection.decisions)} of {total} decided "
+        f"({counts['approved']} approved, {counts['rejected']} rejected, "
+        f"{counts['edited']} edited)"
+    )
+    if session.complete:
+        return _complete_review(run_service, run_path, manifest, session, total)
+    # Nothing is written to the manifest. The run stays READY_FOR_REVIEW, which
+    # is the truth: some candidates still have no decision.
+    stopped = f" Session ended: {ended}." if ended else ""
+    return (
+        f"[green]Decisions saved:[/green] {decided}.{stopped} "
+        f"Run the same command again to continue with the {len(session.pending)} left."
+    )
+
+
+def _complete_review(
+    run_service: RunService,
+    run_path: Path,
+    manifest: RunManifest,
+    session: ReviewSession,
+    total: int,
+) -> str:
+    fingerprint, stage_config_digest = session.stage_record()
+    manifest = run_service.advance(run_path, manifest, RunStatus.REVIEWED)
+    run_service.record_stage(
+        run_path,
+        manifest,
+        RunStage.REVIEW,
+        fingerprint,
+        stage_config_digest,
+        DECISIONS_SCHEMA_VERSION,
+    )
+    counts = session.collection.counts
+    return (
+        f"[green]Review complete:[/green] {total} candidates decided — "
+        f"{counts['approved']} approved, {counts['rejected']} rejected, "
+        f"{counts['edited']} edited. Fingerprint {fingerprint[:12]}."
+    )
+
+
+def _prompt_for_every_pending(session: ReviewSession, previews_directory: Path, total: int) -> None:
+    """Ask about each pending candidate once, in rank order.
+
+    The pending list is recomputed from the collection each time round, so a
+    decision taken in this session removes its candidate and a skip leaves it
+    for the next one. Skips are tracked here rather than in the file, which is
+    what keeps "no decision" and "decided to do nothing" different things.
+    """
+    skipped: set[str] = set()
+    while True:
+        remaining = [candidate for candidate in session.pending if candidate.id not in skipped]
+        if not remaining:
+            return
+        candidate = remaining[0]
+        position = total - len(session.pending) + 1
+        _show_candidate(candidate, position, total, previews_directory)
+        decision = _ask_for_decision(candidate, session.plan.source_duration_seconds)
+        if decision is None:
+            skipped.add(candidate.id)
+            console.print("[yellow]Skipped.[/yellow] It stays pending for the next session.\n")
+            continue
+        session.record(decision, datetime.now(UTC))
+        console.print(f"[green]Saved:[/green] {candidate.id} {decision.decision}.\n")
+
+
+def _show_candidate(
+    candidate: ValidatedCandidate, position: int, total: int, previews_directory: Path
+) -> None:
+    """Everything CE-035 requires be on screen before a decision is asked for."""
+    scores = candidate.scores
+    console.print(f"[bold]({position}/{total}) {candidate.id}[/bold]  rank {candidate.rank}")
+    console.print(f"  topic:     {candidate.topic}")
+    console.print(f"  category:  {candidate.category}")
+    console.print(
+        f"  interval:  {candidate.start:.2f}s to {candidate.end:.2f}s ({candidate.duration:.2f}s)"
+    )
+    console.print(f"  score:     {candidate.total_score:.2f}")
+    console.print(
+        f"  parts:     hook {scores.hook}, value {scores.value}, "
+        f"context {scores.context_independence}, clarity {scores.clarity}, "
+        f"engagement {scores.engagement_potential}, relevance {scores.relevance}"
+    )
+    console.print(f"  hook:      {candidate.hook}")
+    console.print(f"  summary:   {candidate.summary}")
+    console.print(f"  reason:    {candidate.reason}")
+    # soft_wrap keeps the path on one line. A path broken across two lines is a
+    # path nobody can copy into a player, which is the only thing this line is
+    # for, and rich wraps to the console width by default.
+    console.print(
+        f"  preview:   {previews_directory.joinpath(preview_filename(candidate.id))}",
+        soft_wrap=True,
+    )
+
+
+def _ask_for_decision(
+    candidate: ValidatedCandidate, source_duration_seconds: float
+) -> Decision | None:
+    """One answer for one candidate, or None for a skip.
+
+    Loops until an action is understood. An unrecognised key is a typo, and
+    treating it as anything other than "ask again" would either record a
+    decision the reviewer did not make or lose their place in the list.
+    """
+    while True:
+        answer = _ask(
+            "[A] Approve  [R] Reject  [E] Edit range  [S] Skip  [Q] Quit/save\nAction: "
+        ).lower()
+        if answer == "a":
+            return ApprovedDecision(
+                candidate_id=candidate.id,
+                original_start=candidate.start,
+                original_end=candidate.end,
+                final_start=candidate.start,
+                final_end=candidate.end,
+                reviewed_at=datetime.now(UTC),
+            )
+        if answer == "r":
+            return _ask_for_rejection(candidate)
+        if answer == "e":
+            return _ask_for_edit(candidate, source_duration_seconds)
+        if answer == "s":
+            return None
+        if answer == "q":
+            raise _SessionOver("quit at the reviewer's request")
+        console.print(f"[yellow]{answer!r} is not one of A, R, E, S or Q.[/yellow]")
+
+
+def _ask_for_rejection(candidate: ValidatedCandidate) -> RejectedDecision:
+    """CE-037. A structured reason, optionally, and a detail when it is needed."""
+    reasons = list(EditorialReason)
+    listing = "  ".join(f"{number}:{reason}" for number, reason in enumerate(reasons, start=1))
+    while True:
+        answer = _ask(f"Reason ({listing})\nReason [none]: ")
+        if not answer:
+            return _rejection(candidate, None, None)
+        reason = _match_reason(answer, reasons)
+        if reason is None:
+            console.print(f"[yellow]{answer!r} is not one of the listed reasons.[/yellow]")
+            continue
+        if reason is not REASON_REQUIRING_DETAIL:
+            return _rejection(candidate, reason, None)
+        while True:
+            detail = _ask(f"Detail (required for {REASON_REQUIRING_DETAIL}): ")
+            if detail:
+                return _rejection(candidate, reason, detail)
+            console.print(
+                f"[yellow]{REASON_REQUIRING_DETAIL} carries no meaning on its own; "
+                "a detail is required.[/yellow]"
+            )
+
+
+def _match_reason(answer: str, reasons: list[EditorialReason]) -> EditorialReason | None:
+    """Accept either the number shown beside a reason or the reason itself."""
+    if answer.isdigit() and 1 <= int(answer) <= len(reasons):
+        return reasons[int(answer) - 1]
+    for reason in reasons:
+        if answer == reason.value:
+            return reason
+    return None
+
+
+def _rejection(
+    candidate: ValidatedCandidate, reason: EditorialReason | None, detail: str | None
+) -> RejectedDecision:
+    return RejectedDecision(
+        candidate_id=candidate.id,
+        original_start=candidate.start,
+        original_end=candidate.end,
+        reason=reason,
+        detail=detail,
+        reviewed_at=datetime.now(UTC),
+    )
+
+
+def _ask_for_edit(candidate: ValidatedCandidate, source_duration_seconds: float) -> EditedDecision:
+    """CE-038. Both bounds, re-asked from the top whenever the pair is unusable.
+
+    Any rejected answer restarts the pair rather than re-asking one field. An
+    edit is one act with two numbers, and the errors that matter -- inverted,
+    unchanged, outside the source -- are properties of the pair, so a reviewer
+    correcting one field would keep being told the same thing about the other.
+    """
+    while True:
+        start = _ask_for_bound("start", candidate.start, source_duration_seconds)
+        if start is None:
+            continue
+        end = _ask_for_bound("end", candidate.end, source_duration_seconds)
+        if end is None:
+            continue
+        if end <= start:
+            console.print(
+                f"[yellow]An end of {end:.2f}s is at or before the start ({start:.2f}s).[/yellow]"
+            )
+            continue
+        try:
+            return EditedDecision(
+                candidate_id=candidate.id,
+                original_start=candidate.start,
+                original_end=candidate.end,
+                final_start=start,
+                final_end=end,
+                reviewed_at=datetime.now(UTC),
+            )
+        except ValidationError as error:
+            # The model owns the invariants; the loop only re-asks. Duplicating
+            # "must differ from the original" here would let the two drift.
+            console.print(f"[yellow]{_first_message(error)}[/yellow]")
+
+
+def _ask_for_bound(name: str, current: float, source_duration_seconds: float) -> float | None:
+    """One boundary in seconds, blank to keep it, or None to start the pair again."""
+    answer = _ask(f"New {name} in seconds [{current:.2f}] (blank keeps it): ")
+    if not answer:
+        return current
+    try:
+        value = float(answer)
+    except ValueError:
+        console.print(f"[yellow]{answer!r} is not a number of seconds.[/yellow]")
+        return None
+    if not isfinite(value):
+        console.print(f"[yellow]{answer!r} is not a position in the source.[/yellow]")
+        return None
+    if value < 0:
+        console.print("[yellow]A boundary cannot be negative.[/yellow]")
+        return None
+    if value > source_duration_seconds:
+        console.print(
+            f"[yellow]{value:.2f}s is past the end of the source "
+            f"({source_duration_seconds:.2f}s).[/yellow]"
+        )
+        return None
+    return value
+
+
+def _first_message(error: ValidationError) -> str:
+    """The one validation message worth showing a person mid-session."""
+    issues = error.errors()
+    detail = str(issues[0]["msg"]) if issues else str(error)
+    return detail.removeprefix("Value error, ")
 
 
 def _warn_about_configuration_drift(manifest: RunManifest, current: str) -> None:
