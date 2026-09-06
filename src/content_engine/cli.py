@@ -14,12 +14,17 @@ from content_engine.adapters.analysis.fixture_analyzer import (
     load_fixture,
     require_fixture_covers,
 )
-from content_engine.adapters.analysis.gemini_analyzer import build_gemini_analyzer
+from content_engine.adapters.analysis.gemini_analyzer import (
+    build_gemini_analyzer,
+    gemini_identity,
+)
+from content_engine.adapters.analysis.prompt import Prompt, select_prompt
 from content_engine.adapters.media.ffmpeg import FFmpegAdapter
 from content_engine.adapters.media.ffprobe import FFprobeAdapter
 from content_engine.adapters.persistence.filesystem import RunWorkspace
 from content_engine.adapters.transcription.faster_whisper import FasterWhisperTranscriber
 from content_engine.config import Settings, config_sha256, load_settings
+from content_engine.domain.analysis_rules import AnalyzerIdentity
 from content_engine.domain.candidates import CANDIDATES_SCHEMA_VERSION, CandidateCollection
 from content_engine.domain.enums import AnalysisProvider, RunStage, RunStatus
 from content_engine.domain.exceptions import (
@@ -37,7 +42,6 @@ from content_engine.domain.models import (
 )
 from content_engine.domain.run_state import validate_transition
 from content_engine.domain.transcript_rules import stage_config, transcription_fingerprint
-from content_engine.ports.analyzer import ContentAnalyzerPort
 from content_engine.services.analysis_service import (
     CANDIDATES_FILENAME,
     AnalysisPlan,
@@ -312,12 +316,18 @@ def analyze(
         transcript = read_transcript(run_path.joinpath("transcript"))
         _warn_about_configuration_drift(manifest, config_sha256(settings))
 
-        # Built before anything is read back, so a machine that cannot run this
-        # stage at all says so before a single artifact is opened.
-        analyzer = _build_analyzer(settings, fixture)
-        plan = plan_analysis(transcript, settings, analyzer.identity)
-        if isinstance(analyzer, FixtureAnalyzer):
-            require_fixture_covers(analyzer, [chunk.id for chunk in plan.chunks.chunks])
+        # Resolved before anything else, so a profile naming a prompt this
+        # build does not have is refused rather than silently given another one.
+        prompt = select_prompt(settings.analysis.prompt_version)
+
+        # The identity a run *would* have, computed without a credential, an SDK
+        # or a client. Reuse compares this against what is recorded on disk, and
+        # verifying four finished artifacts must not require a key the machine
+        # may no longer have. Only producing needs one.
+        replay, identity = _expected_identity(settings, fixture, prompt)
+        plan = plan_analysis(transcript, settings, identity)
+        if replay is not None:
+            require_fixture_covers(replay, [chunk.id for chunk in plan.chunks.chunks])
 
         analysis_directory = run_path.joinpath("analysis")
         # Whether this stage has run is a question for the manifest, not for the
@@ -338,8 +348,11 @@ def analyze(
         if force:
             _warn_about_stale(run_path, ANALYSIS_DOWNSTREAM_DIRECTORIES, "candidates")
 
+        # Now, and only now: candidates must actually be produced, so the SDK,
+        # the model and the credential are validated and a client is built.
+        analyzer = replay if replay is not None else build_gemini_analyzer(settings, prompt)
         try:
-            outcome = AnalysisService(analyzer, analyzer.identity).analyze(
+            outcome = AnalysisService(analyzer, identity).analyze(
                 plan, analysis_directory, datetime.now(UTC)
             )
         except ContentEngineError as error:
@@ -347,12 +360,23 @@ def analyze(
             _report_run_context(run_path, manifest)
             raise
 
+        sent = identity.uses_packaged_prompt
         manifest = run_service.advance(run_path, manifest, RunStatus.ANALYZED)
         # The manifest must name what actually produced the candidates. While the
         # executor is a fixture it says so, rather than leaving the configured
         # provider in place and asserting a call that never happened.
         manifest.versions.analysis_provider = outcome.stage_config.analyzer
         manifest.versions.analysis_model = outcome.stage_config.model
+        # Which versioned prompt this run sent, or null because it sent none.
+        # Assigned unconditionally rather than only when there is a value, so
+        # that forcing from Gemini back to a fixture clears the fields instead
+        # of leaving the fixture's artifacts described by Gemini's prompt.
+        #
+        # Not the same question as the stage configuration's prompt_version,
+        # which records the identity of whatever ran and for which a fixture's
+        # `fake-fixture/v1` is a truthful answer.
+        manifest.versions.prompt_version = identity.prompt.version if sent else None
+        manifest.versions.prompt_sha256 = identity.prompt.sha256 if sent else None
         run_service.record_stage(
             run_path,
             manifest,
@@ -421,19 +445,31 @@ def _reuse_or_recover(
     )
 
 
-def _build_analyzer(settings: Settings, fixture: Path | None) -> ContentAnalyzerPort:
-    """Choose the executor: a recorded file, or the configured provider.
+def _expected_identity(
+    settings: Settings, fixture: Path | None, prompt: Prompt
+) -> tuple[FixtureAnalyzer | None, AnalyzerIdentity]:
+    """Who would produce this run's candidates, without building anything heavy.
 
-    ``--fixture`` wins over the configuration on purpose. It is the explicit
-    instruction on the command line, and the configuration naming Gemini is the
-    default state of every profile in the repository; a run asked to replay must
-    not consult a credential, so the branch is taken before anything reads the
-    environment.
+    Returns the fixture analyzer when one is named -- it is already fully built
+    by reading the file, so there is nothing to defer and no credential involved
+    -- and otherwise only an identity, leaving the client, the SDK and the
+    environment untouched.
+
+    That asymmetry is the fix for a real defect. The analyzer used to be
+    constructed before the reuse decision, which meant verifying four finished
+    artifacts demanded an API key and an SDK client. Nothing about reading four
+    files back needs either, and a machine that has lost its key can still be
+    asked what a completed run contains.
+
+    ``--fixture`` wins over the configuration on purpose: it is the explicit
+    instruction on the command line, and every profile in this repository names
+    Gemini by default.
     """
     if fixture is not None:
-        return FixtureAnalyzer(load_fixture(fixture))
+        analyzer = FixtureAnalyzer(load_fixture(fixture))
+        return analyzer, analyzer.identity
     if settings.analysis.provider is AnalysisProvider.GEMINI:
-        return build_gemini_analyzer(settings)
+        return None, gemini_identity(settings, prompt)
     # Unreachable while AnalysisProvider has one member, and deliberately not
     # written as an else on the branch above: a provider added to the enum
     # without an adapter must fail here by name rather than silently become

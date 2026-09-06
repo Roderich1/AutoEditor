@@ -28,6 +28,9 @@ import pytest
 from typer.testing import CliRunner
 
 from content_engine import cli
+from content_engine.adapters.analysis.gemini_analyzer import (
+    build_gemini_analyzer as real_build_gemini_analyzer,
+)
 from content_engine.adapters.analysis.prompt import PROMPT_SHA256, PROMPT_VERSION
 from content_engine.domain.enums import RunStatus
 from content_engine.domain.exceptions import (
@@ -210,7 +213,9 @@ def test_forcing_without_a_credential_refuses_and_keeps_the_artifacts(
     assert analyze(harness).exit_code == EXIT_SUCCESS
     before = harness.snapshot()
 
-    monkeypatch.setattr(cli, "build_gemini_analyzer", cli.build_gemini_analyzer)
+    # The real factory, named directly: reading cli.build_gemini_analyzer here
+    # would only put the stand-in back, and the test would prove nothing.
+    monkeypatch.setattr(cli, "build_gemini_analyzer", real_build_gemini_analyzer)
     monkeypatch.delenv(CREDENTIAL, raising=False)
     result = analyze(harness, "--force")
 

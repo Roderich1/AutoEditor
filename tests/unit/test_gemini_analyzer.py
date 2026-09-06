@@ -27,7 +27,12 @@ from content_engine.adapters.analysis.gemini_analyzer import (
     GeminiContentAnalyzer,
     build_gemini_analyzer,
 )
-from content_engine.adapters.analysis.prompt import PROMPT_SHA256, PROMPT_TEXT, PROMPT_VERSION
+from content_engine.adapters.analysis.prompt import (
+    PROMPT_SHA256,
+    PROMPT_TEXT,
+    PROMPT_VERSION,
+    select_prompt,
+)
 from content_engine.config import ChunkingSettings, Settings
 from content_engine.domain.candidates import TranscriptChunk
 from content_engine.domain.exceptions import (
@@ -120,9 +125,16 @@ def client_returning(*outcomes: Any) -> FakeClient:
     return FakeClient(models=FakeModels(outcomes=list(outcomes)))
 
 
+#: The prompt every test here sends: the real selection, so a change to the
+#: selector is caught rather than routed around by a hand-made stand-in.
+PROMPT = select_prompt("v1")
+
+
 def analyzer_for(client: FakeClient, model: str = MODEL) -> GeminiContentAnalyzer:
     """Sleep is replaced so a retry test does not actually wait."""
-    return GeminiContentAnalyzer(model=model, client=client, sleep=lambda _seconds: None)
+    return GeminiContentAnalyzer(
+        model=model, client=client, prompt=PROMPT, sleep=lambda _seconds: None
+    )
 
 
 @pytest.fixture
@@ -466,7 +478,7 @@ def test_building_the_analyzer_without_a_credential_is_a_configuration_error(
 ) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(ConfigurationError) as caught:
-        build_gemini_analyzer(settings)
+        build_gemini_analyzer(settings, PROMPT)
     assert caught.value.exit_code == EXIT_CONFIGURATION
     assert "GEMINI_API_KEY" in str(caught.value)
 
@@ -476,7 +488,7 @@ def test_a_blank_credential_is_treated_as_missing(
 ) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "   ")
     with pytest.raises(ConfigurationError, match="GEMINI_API_KEY"):
-        build_gemini_analyzer(settings)
+        build_gemini_analyzer(settings, PROMPT)
 
 
 def test_a_placeholder_model_is_a_configuration_error(
@@ -486,7 +498,7 @@ def test_a_placeholder_model_is_a_configuration_error(
     placeholder = settings.model_copy(deep=True)
     placeholder.analysis.model = "SET_MODEL_HERE"
     with pytest.raises(ConfigurationError, match="model"):
-        build_gemini_analyzer(placeholder)
+        build_gemini_analyzer(placeholder, PROMPT)
 
 
 def test_the_credential_is_not_read_when_it_is_not_needed(
@@ -554,7 +566,7 @@ def test_building_the_analyzer_hands_the_credential_to_the_sdk_and_keeps_it_ther
     monkeypatch.setenv("GEMINI_API_KEY", SECRET)
     monkeypatch.setattr(genai, "Client", RecordingClient)
 
-    analyzer = build_gemini_analyzer(settings)
+    analyzer = build_gemini_analyzer(settings, PROMPT)
 
     assert captured["api_key"] == SECRET
     assert analyzer.model == settings.analysis.model

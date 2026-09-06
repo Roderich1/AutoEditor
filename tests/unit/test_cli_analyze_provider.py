@@ -24,7 +24,11 @@ import pytest
 from typer.testing import CliRunner
 
 from content_engine import cli
-from content_engine.adapters.analysis.prompt import PROMPT_SHA256, PROMPT_VERSION
+from content_engine.adapters.analysis.prompt import (
+    PROMPT_SHA256,
+    PROMPT_VERSION,
+    select_prompt,
+)
 from content_engine.domain.analysis_rules import AnalyzerIdentity
 from content_engine.domain.candidate_rules import PromptIdentity
 from content_engine.domain.candidates import TranscriptChunk
@@ -88,7 +92,7 @@ class RecordingAnalyzer:
 def provider(monkeypatch: pytest.MonkeyPatch) -> RecordingAnalyzer:
     """Replace the CLI's factory, so no client and no credential are needed."""
     analyzer = RecordingAnalyzer()
-    monkeypatch.setattr(cli, "build_gemini_analyzer", lambda settings: analyzer)
+    monkeypatch.setattr(cli, "build_gemini_analyzer", lambda settings, prompt: analyzer)
     return analyzer
 
 
@@ -236,7 +240,9 @@ def test_the_stage_configuration_records_the_real_prompt_and_no_fixture(
 def test_a_provider_failure_ends_the_run_as_failed_analysis(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(cli, "build_gemini_analyzer", lambda settings: RecordingAnalyzer(fail=True))
+    monkeypatch.setattr(
+        cli, "build_gemini_analyzer", lambda settings, prompt: RecordingAnalyzer(fail=True)
+    )
 
     result = analyze(harness)
 
@@ -247,7 +253,9 @@ def test_a_provider_failure_ends_the_run_as_failed_analysis(
 def test_a_provider_failure_writes_no_artifact(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(cli, "build_gemini_analyzer", lambda settings: RecordingAnalyzer(fail=True))
+    monkeypatch.setattr(
+        cli, "build_gemini_analyzer", lambda settings, prompt: RecordingAnalyzer(fail=True)
+    )
 
     analyze(harness)
 
@@ -378,7 +386,7 @@ def test_an_unknown_run_is_refused_before_any_provider_is_built(
 ) -> None:
     """Nothing is constructed for a run that does not exist."""
 
-    def explode(settings: Any) -> Any:
+    def explode(settings: Any, prompt: Any) -> Any:
         raise AssertionError("a provider was built for a run that does not exist")
 
     monkeypatch.setattr(cli, "build_gemini_analyzer", explode)
@@ -399,7 +407,7 @@ def test_a_provider_with_no_adapter_is_refused_by_name(settings: Any) -> None:
     settings.analysis.provider = "openai"
 
     with pytest.raises(ConfigurationError) as caught:
-        cli._build_analyzer(settings, None)
+        cli._expected_identity(settings, None, select_prompt("v1"))
 
     assert "openai" in str(caught.value)
     assert "--fixture" in str(caught.value)

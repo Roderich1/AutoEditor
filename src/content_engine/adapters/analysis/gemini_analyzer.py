@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
 
-from content_engine.adapters.analysis.prompt import PROMPT_IDENTITY, PROMPT_TEXT
+from content_engine.adapters.analysis.prompt import Prompt
 from content_engine.adapters.analysis.structured_output import (
     RESPONSE_SCHEMA_VERSION,
     ProviderResponse,
@@ -117,13 +117,13 @@ def load_sdk() -> _Sdk:
     return _SDK
 
 
-def build_gemini_analyzer(settings: Settings) -> GeminiContentAnalyzer:
-    """Construct the real analyzer, refusing anything unrunnable first.
+def configured_model(settings: Settings) -> str:
+    """The model a run would ask for, or a configuration error.
 
-    Every refusal here is a configuration error, exit 2, and happens before the
-    run is touched. That distinction matters: a missing key is a machine that is
-    not set up, and marking a run FAILED_ANALYSIS for it would record a provider
-    failure that never happened.
+    Split out because the model is part of the analyzer's identity, and the
+    identity has to be computable without a credential, an SDK or a client. A
+    placeholder model is refused here rather than later: it makes the identity
+    itself meaningless, so there is nothing to verify reuse against.
     """
     model = settings.analysis.model.strip()
     if not model or model == ANALYSIS_MODEL_PLACEHOLDER:
@@ -131,6 +131,48 @@ def build_gemini_analyzer(settings: Settings) -> GeminiContentAnalyzer:
             f"analysis.model is {settings.analysis.model!r}, which is not a model that "
             "can be called. Set it in a profile or via CONTENT_ENGINE_ANALYSIS_MODEL."
         )
+    return model
+
+
+def gemini_identity(settings: Settings, prompt: Prompt) -> AnalyzerIdentity:
+    """What a Gemini run would record, computed without touching anything.
+
+    No SDK import, no environment read, no client, no socket. That is the whole
+    point of this function: reuse is decided by comparing the identity a run
+    *would* have against the one recorded on disk, and verifying four finished
+    artifacts must not require a credential the machine may no longer have.
+
+    It is deliberately the same construction the analyzer returns, rather than a
+    parallel one that happens to agree today.
+    """
+    return _identity(configured_model(settings), prompt)
+
+
+def _identity(model: str, prompt: Prompt) -> AnalyzerIdentity:
+    return AnalyzerIdentity(
+        analyzer=ANALYZER_NAME,
+        analyzer_version=ADAPTER_VERSION,
+        model=model,
+        prompt=prompt.identity,
+        # Null, and it has to be: this run called a provider. A digest here
+        # would claim the answers were replayed from a file.
+        fixture_sha256=None,
+        # A real, versioned, packaged prompt was sent, so the manifest may say
+        # which one.
+        uses_packaged_prompt=True,
+    )
+
+
+def build_gemini_analyzer(settings: Settings, prompt: Prompt) -> GeminiContentAnalyzer:
+    """Construct the real analyzer, refusing anything unrunnable first.
+
+    Called only once it is known that candidates must actually be produced.
+    Every refusal here is a configuration error, exit 2, and happens before the
+    run is touched. That distinction matters: a missing key is a machine that is
+    not set up, and marking a run FAILED_ANALYSIS for it would record a provider
+    failure that never happened.
+    """
+    model = configured_model(settings)
     sdk = load_sdk()
     # Read here and nowhere else, and only once it is known that a real provider
     # is about to be built. The fixture path never reaches this function.
@@ -142,7 +184,7 @@ def build_gemini_analyzer(settings: Settings) -> GeminiContentAnalyzer:
             "--fixture. Run `content-engine doctor --require-ai` to check."
         )
     client = sdk.genai.Client(api_key=credential)
-    return GeminiContentAnalyzer(model=model, client=client)
+    return GeminiContentAnalyzer(model=model, client=client, prompt=prompt)
 
 
 class GeminiContentAnalyzer:
@@ -152,10 +194,12 @@ class GeminiContentAnalyzer:
         self,
         model: str,
         client: Any,
+        prompt: Prompt,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.model = model
         self._client = client
+        self._prompt = prompt
         self._sleep = sleep
         # Resolved at construction so a broken installation fails before the
         # stage starts, and so no import happens inside the request path.
@@ -163,18 +207,15 @@ class GeminiContentAnalyzer:
         self.calls = 0
         self.prompt_tokens = 0
         self.response_tokens = 0
+        #: Every distinct `model_version` the provider reported, for the report
+        #: at the end of a run. Diagnostics only: it is not persisted, because
+        #: no artifact schema should grow a field before a real response has
+        #: been seen to populate it. See ADR-027.
+        self.reported_models: set[str] = set()
 
     @property
     def identity(self) -> AnalyzerIdentity:
-        return AnalyzerIdentity(
-            analyzer=ANALYZER_NAME,
-            analyzer_version=ADAPTER_VERSION,
-            model=self.model,
-            prompt=PROMPT_IDENTITY,
-            # Null, and it has to be: this run called a provider. A digest here
-            # would claim the answers were replayed from a file.
-            fixture_sha256=None,
-        )
+        return _identity(self.model, self._prompt)
 
     def find_candidates(self, chunk: TranscriptChunk, context: AnalysisContext) -> CandidateBatch:
         response = self._call(chunk, context)
@@ -197,8 +238,10 @@ class GeminiContentAnalyzer:
     def _request_config(self) -> Any:
         types = self._sdk.types
         return types.GenerateContentConfig(
-            # The trusted half: the hashed prompt, and nothing from the video.
-            system_instruction=PROMPT_TEXT,
+            # The trusted half: the selected, hashed prompt, and nothing from
+            # the video. It comes from the selection rather than from a module
+            # constant, so `analysis.prompt_version` really decides what is sent.
+            system_instruction=self._prompt.text,
             response_mime_type="application/json",
             response_schema=ProviderResponse,
             # The transcript is untrusted, so the model is handed nothing it
@@ -318,6 +361,7 @@ class GeminiContentAnalyzer:
         reported = getattr(response, "model_version", None)
         if not reported:
             return
+        self.reported_models.add(str(reported))
         if reported == self.model or reported.startswith(f"{self.model}-"):
             return
         raise AnalysisError(
