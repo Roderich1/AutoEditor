@@ -405,9 +405,10 @@ def test_a_provider_with_no_adapter_is_refused_by_name(settings: Any) -> None:
     wrong API with the wrong prompt.
     """
     settings.analysis.provider = "openai"
+    prompt = select_prompt("v1")
 
     with pytest.raises(ConfigurationError) as caught:
-        cli._expected_identity(settings, None, select_prompt("v1"))
+        cli._expected_identity(settings, None, prompt)
 
     assert "openai" in str(caught.value)
     assert "--fixture" in str(caught.value)

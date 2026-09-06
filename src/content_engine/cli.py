@@ -44,6 +44,7 @@ from content_engine.domain.run_state import validate_transition
 from content_engine.domain.transcript_rules import stage_config, transcription_fingerprint
 from content_engine.services.analysis_service import (
     CANDIDATES_FILENAME,
+    AnalysisOutcome,
     AnalysisPlan,
     AnalysisService,
     plan_analysis,
@@ -360,53 +361,68 @@ def analyze(
             _report_run_context(run_path, manifest)
             raise
 
-        sent = identity.uses_packaged_prompt
-        manifest = run_service.advance(run_path, manifest, RunStatus.ANALYZED)
-        # The manifest must name what actually produced the candidates. While the
-        # executor is a fixture it says so, rather than leaving the configured
-        # provider in place and asserting a call that never happened.
-        manifest.versions.analysis_provider = outcome.stage_config.analyzer
-        manifest.versions.analysis_model = outcome.stage_config.model
-        # Which versioned prompt this run sent, or null because it sent none.
-        # Assigned unconditionally rather than only when there is a value, so
-        # that forcing from Gemini back to a fixture clears the fields instead
-        # of leaving the fixture's artifacts described by Gemini's prompt.
-        #
-        # Not the same question as the stage configuration's prompt_version,
-        # which records the identity of whatever ran and for which a fixture's
-        # `fake-fixture/v1` is a truthful answer.
-        manifest.versions.prompt_version = identity.prompt.version if sent else None
-        manifest.versions.prompt_sha256 = identity.prompt.sha256 if sent else None
-        run_service.record_stage(
-            run_path,
-            manifest,
-            RunStage.ANALYSIS,
-            outcome.fingerprint,
-            outcome.stage_config_sha256,
-            CANDIDATES_SCHEMA_VERSION,
-        )
-
-        counts = outcome.collection.counts
-        if counts.proposed == 0:
-            console.print(
-                "[yellow]Warning:[/yellow] the analyzer proposed no candidates. "
-                "The transcript may contain no usable material."
-            )
-        if counts.invalid:
-            console.print(
-                f"[yellow]Refused[/yellow] {counts.invalid} proposals before scoring; "
-                f"see {CANDIDATES_FILENAME} for the reasons."
-            )
-        return (
-            f"[green]Candidates ready:[/green] {counts.selected} selected of "
-            f"{counts.proposed} proposed ({counts.invalid} invalid, "
-            f"{counts.below_min_score} below {plan.policy.min_score}, "
-            f"{counts.deduplicated} duplicates, {counts.not_in_top_n} beyond the cap) "
-            f"by {outcome.stage_config.analyzer}/{outcome.stage_config.model}, "
-            f"fingerprint {outcome.fingerprint[:12]}"
-        )
+        _record_analysis(run_service, run_path, manifest, outcome, identity)
+        return _describe_analysis(outcome, plan.policy.min_score)
 
     _execute(action)
+
+
+def _record_analysis(
+    run_service: RunService,
+    run_path: Path,
+    manifest: RunManifest,
+    outcome: AnalysisOutcome,
+    identity: AnalyzerIdentity,
+) -> None:
+    """Advance the run and write down what produced its candidates."""
+    manifest = run_service.advance(run_path, manifest, RunStatus.ANALYZED)
+    # The manifest must name what actually produced the candidates. When the
+    # executor is a fixture it says so, rather than leaving the configured
+    # provider in place and asserting a call that never happened.
+    manifest.versions.analysis_provider = outcome.stage_config.analyzer
+    manifest.versions.analysis_model = outcome.stage_config.model
+    # Which versioned prompt this run sent, or null because it sent none.
+    # Assigned unconditionally rather than only when there is a value, so that
+    # forcing from Gemini back to a fixture clears the fields instead of leaving
+    # the fixture's artifacts described by Gemini's prompt.
+    #
+    # Not the same question as the stage configuration's prompt_version, which
+    # records the identity of whatever ran and for which a fixture's
+    # `fake-fixture/v1` is a truthful answer.
+    sent = identity.uses_packaged_prompt
+    manifest.versions.prompt_version = identity.prompt.version if sent else None
+    manifest.versions.prompt_sha256 = identity.prompt.sha256 if sent else None
+    run_service.record_stage(
+        run_path,
+        manifest,
+        RunStage.ANALYSIS,
+        outcome.fingerprint,
+        outcome.stage_config_sha256,
+        CANDIDATES_SCHEMA_VERSION,
+    )
+
+
+def _describe_analysis(outcome: AnalysisOutcome, min_score: float) -> str:
+    """Report the funnel, warning about the two outcomes worth interrupting for."""
+    counts = outcome.collection.counts
+    if counts.proposed == 0:
+        console.print(
+            "[yellow]Warning:[/yellow] the analyzer proposed no candidates. "
+            "The transcript may contain no usable material."
+        )
+    if counts.invalid:
+        console.print(
+            f"[yellow]Refused[/yellow] {counts.invalid} proposals before scoring; "
+            f"see {CANDIDATES_FILENAME} for the reasons."
+        )
+    return (
+        f"[green]Candidates ready:[/green] {counts.selected} selected of "
+        f"{counts.proposed} proposed ({counts.invalid} invalid, "
+        f"{counts.below_min_score} below {min_score}, "
+        f"{counts.deduplicated} duplicates, {counts.not_in_top_n} beyond the cap) "
+        f"by {outcome.stage_config.analyzer}/{outcome.stage_config.model}, "
+        f"fingerprint {outcome.fingerprint[:12]}"
+    )
 
 
 def _reuse_or_recover(
