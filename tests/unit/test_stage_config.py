@@ -30,13 +30,12 @@ from content_engine.domain.models import (
 )
 from content_engine.domain.transcript_rules import (
     NORMALIZATION_RULES_VERSION,
+    stage_config,
+    stage_config_sha256,
     transcription_fingerprint,
 )
 from content_engine.services.run_service import RunService
-from content_engine.services.transcription_service import (
-    STAGE_CONFIG_FILENAME,
-    stage_config_sha256,
-)
+from content_engine.services.transcription_service import STAGE_CONFIG_FILENAME
 from content_engine.utils.hashing import sha256_file
 from tests.conftest import FakeTranscriber, fake_process, raw_segment, raw_transcription
 
@@ -155,7 +154,10 @@ def _assert_coherent(harness: Harness, expected_model: str) -> None:
     audio_sha256 = sha256_file(harness.run_path.joinpath("audio", "source.wav"))
     options = harness.transcriber.calls[-1]
     assert options.model == stage.model
-    assert record["fingerprint"] == transcription_fingerprint(audio_sha256, options, HARDWARE)
+    assert record["fingerprint"] == transcription_fingerprint(audio_sha256, stage)
+    assert record["fingerprint"] == transcription_fingerprint(
+        audio_sha256, stage_config(options, HARDWARE)
+    )
 
 
 def test_run_default_then_transcribe_default(harness: Harness, tmp_path: Path) -> None:
@@ -310,3 +312,197 @@ def test_the_stage_configuration_hash_ignores_layout_but_not_content() -> None:
     assert stage_config_sha256(
         base.model_copy(update={"device_resolved": "cuda"})
     ) != stage_config_sha256(base)
+
+
+# --------------------------------------------------------------------------
+# Reuse verifies the artifact, not only the manifest.
+#
+# A digest in the manifest proves nothing about a file that is gone or was
+# edited. Each case below tampers with exactly one thing and asserts that the
+# transcript, the stage configuration and the manifest all survive untouched.
+# --------------------------------------------------------------------------
+
+EXIT_INVALID_INPUT = 3
+
+
+@dataclass
+class Snapshot:
+    transcript: bytes
+    stage_config: bytes
+    manifest: bytes
+
+
+def _snapshot(harness: Harness) -> Snapshot:
+    return Snapshot(
+        transcript=harness.run_path.joinpath("transcript", "transcript.json").read_bytes(),
+        stage_config=_stage_config_path(harness).read_bytes(),
+        manifest=harness.run_path.joinpath("manifest.json").read_bytes(),
+    )
+
+
+def _assert_untouched(harness: Harness, before: Snapshot) -> None:
+    after = _snapshot(harness)
+
+    assert after.transcript == before.transcript
+    assert after.stage_config == before.stage_config
+    assert after.manifest == before.manifest
+
+
+@pytest.fixture
+def transcribed(harness: Harness, tmp_path: Path) -> Harness:
+    prepared = _create_run(harness, tmp_path)
+    assert _transcribe(prepared).exit_code == 0
+    return prepared
+
+
+def test_a_valid_stage_configuration_is_reused(transcribed: Harness) -> None:
+    before = _snapshot(transcribed)
+
+    result = _transcribe(transcribed)
+
+    assert result.exit_code == 0
+    assert "Transcript reused" in result.output
+    assert len(transcribed.transcriber.calls) == 1
+    _assert_untouched(transcribed, before)
+
+
+def test_a_missing_stage_configuration_refuses_reuse(transcribed: Harness) -> None:
+    """The manifest still holds both digests; the file they describe is gone."""
+    before = _snapshot(transcribed)
+    _stage_config_path(transcribed).unlink()
+
+    result = _transcribe(transcribed)
+
+    assert result.exit_code == EXIT_INVALID_INPUT
+    assert "Incompatible artifact" in result.output
+    assert "missing" in result.output
+    assert len(transcribed.transcriber.calls) == 1
+    assert transcribed.run_path.joinpath("manifest.json").read_bytes() == before.manifest
+
+
+def test_a_corrupt_stage_configuration_refuses_reuse(transcribed: Harness) -> None:
+    before = _snapshot(transcribed)
+    _stage_config_path(transcribed).write_text('{"model": ', encoding="utf-8")
+
+    result = _transcribe(transcribed)
+
+    assert result.exit_code == EXIT_INVALID_INPUT
+    assert "Incompatible artifact" in result.output
+    assert transcribed.run_path.joinpath("manifest.json").read_bytes() == before.manifest
+    assert (
+        transcribed.run_path.joinpath("transcript", "transcript.json").read_bytes()
+        == before.transcript
+    )
+
+
+def test_a_stage_configuration_that_is_not_an_object_refuses_reuse(transcribed: Harness) -> None:
+    _stage_config_path(transcribed).write_text("[1, 2, 3]", encoding="utf-8")
+
+    result = _transcribe(transcribed)
+
+    assert result.exit_code == EXIT_INVALID_INPUT
+    assert "does not contain a stage configuration object" in result.output
+
+
+def test_an_unknown_stage_configuration_schema_refuses_reuse(transcribed: Harness) -> None:
+    payload = json.loads(_stage_config_path(transcribed).read_text(encoding="utf-8"))
+    payload["schema_version"] = TRANSCRIPTION_STAGE_CONFIG_SCHEMA_VERSION + 99
+    _stage_config_path(transcribed).write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _transcribe(transcribed)
+
+    assert result.exit_code == EXIT_INVALID_INPUT
+    assert "schema" in result.output
+
+
+def test_a_stage_configuration_with_a_missing_field_refuses_reuse(transcribed: Harness) -> None:
+    payload = json.loads(_stage_config_path(transcribed).read_text(encoding="utf-8"))
+    del payload["beam_size"]
+    _stage_config_path(transcribed).write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _transcribe(transcribed)
+
+    assert result.exit_code == EXIT_INVALID_INPUT
+    assert "not a valid stage configuration" in result.output
+
+
+def test_a_stage_configuration_that_no_longer_hashes_to_the_manifest_refuses_reuse(
+    transcribed: Harness,
+) -> None:
+    before = _snapshot(transcribed)
+    payload = json.loads(_stage_config_path(transcribed).read_text(encoding="utf-8"))
+    payload["beam_size"] = 1
+    _stage_config_path(transcribed).write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _transcribe(transcribed)
+
+    assert result.exit_code == EXIT_INVALID_INPUT
+    assert "does not match the manifest" in result.output
+    assert transcribed.run_path.joinpath("manifest.json").read_bytes() == before.manifest
+
+
+def test_a_repaired_hash_does_not_rescue_an_edited_stage_configuration(
+    transcribed: Harness,
+) -> None:
+    """The hardest case: edit the artifact and fix the manifest digest to match.
+
+    The stage hash then agrees with itself, so only rebuilding the fingerprint
+    from the audio and the artifact catches that the run no longer describes one
+    execution.
+    """
+    stage_path = _stage_config_path(transcribed)
+    payload = json.loads(stage_path.read_text(encoding="utf-8"))
+    payload["beam_size"] = 1
+    stage_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    edited = TranscriptionStageConfig.model_validate(payload)
+    manifest_path = transcribed.run_path.joinpath("manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["stages"][RunStage.TRANSCRIPTION.value]["stage_config_sha256"] = stage_config_sha256(
+        edited
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    before = _snapshot(transcribed)
+
+    result = _transcribe(transcribed)
+
+    assert result.exit_code == EXIT_INVALID_INPUT
+    assert "cannot be rebuilt" in result.output
+    _assert_untouched(transcribed, before)
+
+
+def test_force_regenerates_after_the_stage_configuration_was_destroyed(
+    transcribed: Harness,
+) -> None:
+    """--force is the documented way out of every refusal above."""
+    _stage_config_path(transcribed).unlink()
+
+    result = _transcribe(transcribed, None, "--force")
+
+    assert result.exit_code == 0
+    assert "Transcript ready" in result.output
+    assert len(transcribed.transcriber.calls) == 2
+    _assert_coherent(transcribed, DEFAULT_MODEL)
+
+
+def test_force_regenerates_after_the_stage_configuration_was_corrupted(
+    transcribed: Harness,
+) -> None:
+    _stage_config_path(transcribed).write_text("not json at all", encoding="utf-8")
+
+    result = _transcribe(transcribed, None, "--force")
+
+    assert result.exit_code == 0
+    _assert_coherent(transcribed, DEFAULT_MODEL)
+
+
+def test_a_transcript_without_a_stage_record_refuses_reuse(transcribed: Harness) -> None:
+    manifest_path = transcribed.run_path.joinpath("manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["stages"] = {}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = _transcribe(transcribed)
+
+    assert result.exit_code == EXIT_INVALID_INPUT
+    assert "no fingerprint was recorded" in result.output

@@ -23,6 +23,7 @@ from content_engine.domain.models import (
     ResolvedHardware,
     Transcript,
     TranscriptionOptions,
+    TranscriptionStageConfig,
     TranscriptSegment,
     TranscriptWord,
 )
@@ -211,11 +212,51 @@ def normalize_transcription(
     return transcript, report.to_model()
 
 
-def transcription_fingerprint(
-    audio_sha256: str,
-    options: TranscriptionOptions,
-    hardware: ResolvedHardware,
-) -> str:
+def stage_config(
+    options: TranscriptionOptions, hardware: ResolvedHardware
+) -> TranscriptionStageConfig:
+    """Convert a request plus the hardware it resolved to into the stage record.
+
+    This is the only conversion from ``TranscriptionOptions`` and
+    ``ResolvedHardware`` into the shape that both identifies and explains a
+    transcription, so the artifact on disk and the fingerprint cannot be built
+    from different pictures of the same run.
+    """
+    return TranscriptionStageConfig(
+        provider=options.provider,
+        model=options.model,
+        beam_size=options.beam_size,
+        word_timestamps=options.word_timestamps,
+        vad_filter=options.vad_filter,
+        device_requested=options.device,
+        device_resolved=hardware.device,
+        compute_type_requested=options.compute_type,
+        compute_type_resolved=hardware.compute_type,
+        normalization_version=NORMALIZATION_RULES_VERSION,
+    )
+
+
+def _canonical(payload: dict[str, object]) -> str:
+    """One serialization for every hash in this module: sorted, compact, strict."""
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def stage_config_sha256(config: TranscriptionStageConfig) -> str:
+    """Hash the stage configuration so a manifest can address that exact artifact.
+
+    Independent of how the artifact is laid out on disk, so reformatting the JSON
+    does not invalidate a run.
+    """
+    return sha256_bytes(_canonical(config.model_dump(mode="json")).encode("utf-8"))
+
+
+def transcription_fingerprint(audio_sha256: str, config: TranscriptionStageConfig) -> str:
     """Identify the real inputs and conditions of one transcription.
 
     This is not ``config_sha256``. The configuration hash is portable: the same
@@ -224,20 +265,13 @@ def transcription_fingerprint(
     on one machine and CUDA/float16 on another, and those two runs do not
     produce the same transcript. Two executions with different resolved hardware
     must not be treated as interchangeable.
+
+    It is derived from ``TranscriptionStageConfig`` and nothing else, so the
+    readable artifact a run keeps on disk and the digest that decides reuse are
+    the same statement twice. Recomputing this from the stored artifact is what
+    lets the reuse path prove the two still agree.
     """
-    payload = {
-        "audio_sha256": audio_sha256,
-        "provider": options.provider,
-        "model": options.model,
-        "beam_size": options.beam_size,
-        "word_timestamps": options.word_timestamps,
-        "vad_filter": options.vad_filter,
-        "device_requested": options.device,
-        "device_resolved": hardware.device,
-        "compute_type_requested": options.compute_type,
-        "compute_type_resolved": hardware.compute_type,
-        "transcript_schema_version": TRANSCRIPT_SCHEMA_VERSION,
-        "normalization_rules_version": NORMALIZATION_RULES_VERSION,
-    }
-    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return sha256_bytes(serialized.encode("utf-8"))
+    payload: dict[str, object] = dict(config.model_dump(mode="json"))
+    payload["audio_sha256"] = audio_sha256
+    payload["transcript_schema_version"] = TRANSCRIPT_SCHEMA_VERSION
+    return sha256_bytes(_canonical(payload).encode("utf-8"))

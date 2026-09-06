@@ -7,21 +7,27 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from content_engine.config import TranscriptionSettings
+from content_engine.domain.exceptions import IncompatibleArtifactError
 from content_engine.domain.models import (
     METRICS_SCHEMA_VERSION,
+    TRANSCRIPTION_STAGE_CONFIG_SCHEMA_VERSION,
     ResolvedHardware,
+    StageRecord,
     Transcript,
     TranscriptionMetrics,
     TranscriptionOptions,
     TranscriptionStageConfig,
 )
 from content_engine.domain.transcript_rules import (
-    NORMALIZATION_RULES_VERSION,
     normalize_transcription,
+    stage_config,
+    stage_config_sha256,
+    transcription_fingerprint,
 )
 from content_engine.ports.transcriber import TranscriberPort
-from content_engine.utils.hashing import sha256_bytes
 from content_engine.utils.json import write_json, write_text
 from content_engine.utils.timestamps import srt_timestamp
 
@@ -45,38 +51,78 @@ def options_from_settings(settings: TranscriptionSettings) -> TranscriptionOptio
     )
 
 
-def stage_config(
-    options: TranscriptionOptions, hardware: ResolvedHardware
-) -> TranscriptionStageConfig:
-    """The readable record of what this stage will really run."""
-    return TranscriptionStageConfig(
-        provider=options.provider,
-        model=options.model,
-        beam_size=options.beam_size,
-        word_timestamps=options.word_timestamps,
-        vad_filter=options.vad_filter,
-        device_requested=options.device,
-        device_resolved=hardware.device,
-        compute_type_requested=options.compute_type,
-        compute_type_resolved=hardware.compute_type,
-        normalization_version=NORMALIZATION_RULES_VERSION,
-    )
+def read_stage_config(directory: Path) -> TranscriptionStageConfig:
+    """Load the stage configuration an earlier run wrote, or refuse the artifact.
 
-
-def stage_config_sha256(config: TranscriptionStageConfig) -> str:
-    """Hash the stage configuration so the manifest and the artifact can be tied.
-
-    Serialized with sorted keys and no whitespace, independently of how the
-    artifact is laid out on disk, so the hash survives a change of indentation.
+    Absence, unreadable bytes, invalid JSON, a shape this build does not
+    understand and an unknown schema all mean the same thing to the caller: what
+    is on disk cannot be shown to describe the transcript beside it. They are
+    reported as one incompatibility rather than as four different failures.
     """
-    payload = json.dumps(
-        config.model_dump(mode="json"),
-        sort_keys=True,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    return sha256_bytes(payload.encode("utf-8"))
+    path = directory.joinpath(STAGE_CONFIG_FILENAME)
+    if not path.is_file():
+        raise IncompatibleArtifactError(
+            f"A transcript exists but {STAGE_CONFIG_FILENAME} is missing from {directory}, "
+            "so there is no record of the settings that produced it. Rerun with --force."
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise IncompatibleArtifactError(
+            f"{path} cannot be read as the configuration of the transcription stage: "
+            f"{error}. Rerun with --force."
+        ) from error
+    if not isinstance(payload, dict):
+        raise IncompatibleArtifactError(
+            f"{path} does not contain a stage configuration object. Rerun with --force."
+        )
+
+    declared = payload.get("schema_version")
+    if declared != TRANSCRIPTION_STAGE_CONFIG_SCHEMA_VERSION:
+        raise IncompatibleArtifactError(
+            f"{path} declares stage configuration schema {declared!r}; this build "
+            f"understands {TRANSCRIPTION_STAGE_CONFIG_SCHEMA_VERSION}. The transcript was "
+            "produced by a different version and is not reused. Rerun with --force."
+        )
+    try:
+        return TranscriptionStageConfig.model_validate(payload)
+    except ValidationError as error:
+        raise IncompatibleArtifactError(
+            f"{path} is not a valid stage configuration: {error}. Rerun with --force."
+        ) from error
+
+
+def verify_stage_config(
+    directory: Path, record: StageRecord, audio_sha256: str
+) -> TranscriptionStageConfig:
+    """Prove the stored explanation and the recorded digests still describe one run.
+
+    The manifest carries two hashes and the run carries one readable artifact.
+    Checking only the manifest would let an edited, deleted or mismatched
+    artifact be reused behind a digest that still looks right, so both are
+    recomputed from what is actually on disk. Nothing is written here: a refusal
+    leaves the transcript, its configuration and the manifest untouched.
+    """
+    config = read_stage_config(directory)
+
+    recomputed = stage_config_sha256(config)
+    if recomputed != record.stage_config_sha256:
+        raise IncompatibleArtifactError(
+            f"{directory.joinpath(STAGE_CONFIG_FILENAME)} does not match the manifest "
+            f"(recorded {record.stage_config_sha256[:12]}, recomputed {recomputed[:12]}). "
+            "The stage configuration was changed after the transcript was produced. "
+            "Rerun with --force."
+        )
+
+    rebuilt = transcription_fingerprint(audio_sha256, config)
+    if rebuilt != record.fingerprint:
+        raise IncompatibleArtifactError(
+            f"The recorded fingerprint cannot be rebuilt from the audio and "
+            f"{STAGE_CONFIG_FILENAME} (recorded {record.fingerprint[:12]}, rebuilt "
+            f"{rebuilt[:12]}). The transcript, its configuration and the audio no longer "
+            "describe one execution. Rerun with --force."
+        )
+    return config
 
 
 @dataclass(frozen=True)

@@ -22,13 +22,14 @@ from content_engine.domain.exceptions import (
     InvalidMediaError,
 )
 from content_engine.domain.models import TRANSCRIPT_SCHEMA_VERSION, RunManifest
-from content_engine.domain.transcript_rules import transcription_fingerprint
-from content_engine.services.doctor_service import DoctorService
+from content_engine.domain.transcript_rules import stage_config, transcription_fingerprint
+from content_engine.services.doctor_service import Check, DoctorService
 from content_engine.services.media_service import MediaService
 from content_engine.services.run_service import RunService
 from content_engine.services.transcription_service import (
     TranscriptionService,
     options_from_settings,
+    verify_stage_config,
 )
 from content_engine.utils.hashing import sha256_file
 
@@ -48,7 +49,9 @@ def _execute(action: Callable[[], str]) -> None:
     except ContentEngineError as error:
         console.print(f"[red]{error.title}:[/red] {error}")
         raise typer.Exit(error.exit_code) from error
-    except Exception as error:  # noqa: BLE001 - last resort, reported without a traceback
+    # Last resort. An unexpected exception is still reported as a message with an
+    # exit code rather than a traceback, so the CLI never leaks a stack trace.
+    except Exception as error:  # noqa: BLE001
         console.print(f"[red]Unexpected error:[/red] {type(error).__name__}: {error}")
         raise typer.Exit(EXIT_UNKNOWN) from error
     console.print(message)
@@ -56,6 +59,15 @@ def _execute(action: Callable[[], str]) -> None:
 
 def _media_service() -> MediaService:
     return MediaService(FFprobeAdapter(), FFmpegAdapter())
+
+
+def _check_status(check: Check) -> str:
+    """A failed optional check is a warning, not a failure: V0 has no analysis stage."""
+    if check.ok:
+        return "[green]OK[/green]"
+    if check.required:
+        return "[red]FAIL[/red]"
+    return "[yellow]WARN[/yellow]"
 
 
 def _report_run_context(run_path: Path, manifest: RunManifest) -> None:
@@ -83,12 +95,7 @@ def doctor(
     table.add_column("Status")
     table.add_column("Detail")
     for check in checks:
-        status = (
-            "[green]OK[/green]"
-            if check.ok
-            else ("[red]FAIL[/red]" if check.required else "[yellow]WARN[/yellow]")
-        )
-        table.add_row(check.name, status, check.detail)
+        table.add_row(check.name, _check_status(check), check.detail)
     console.print(table)
 
     if not all(check.ok for check in checks if check.required):
@@ -170,11 +177,20 @@ def transcribe(
         # Hardware is resolved before the reuse decision: auto may resolve
         # differently than it did last time, and that changes the result.
         hardware = service.resolve_hardware(options)
-        fingerprint = transcription_fingerprint(sha256_file(audio_path), options, hardware)
+        audio_sha256 = sha256_file(audio_path)
+        fingerprint = transcription_fingerprint(audio_sha256, stage_config(options, hardware))
 
-        transcript_path = run_path.joinpath("transcript", "transcript.json")
+        transcript_directory = run_path.joinpath("transcript")
+        transcript_path = transcript_directory.joinpath("transcript.json")
         if transcript_path.is_file() and not force:
-            _refuse_or_skip(manifest, fingerprint, hardware.device, hardware.compute_type)
+            _refuse_or_skip(
+                manifest,
+                transcript_directory,
+                audio_sha256,
+                fingerprint,
+                hardware.device,
+                hardware.compute_type,
+            )
             return (
                 f"[green]Transcript reused:[/green] fingerprint {fingerprint[:12]} "
                 f"on {hardware.device}/{hardware.compute_type}. Use --force to rerun."
@@ -188,7 +204,7 @@ def transcribe(
             outcome = service.transcribe(
                 audio_path,
                 audio_duration,
-                run_path.joinpath("transcript"),
+                transcript_directory,
                 options,
                 hardware,
             )
@@ -234,11 +250,28 @@ def transcribe(
 
 def _refuse_or_skip(
     manifest: RunManifest,
+    transcript_directory: Path,
+    audio_sha256: str,
     fingerprint: str,
     device: str,
     compute_type: str,
 ) -> None:
-    """Reuse a transcript only when it provably matches the current inputs."""
+    """Reuse a transcript only when it provably matches the current inputs.
+
+    Four things have to hold, and they are checked in that order: the manifest
+    recorded the stage, it recorded it under a schema this build produces, the
+    stage configuration still on disk matches what the manifest says about it,
+    and the whole thing describes the settings being asked for now.
+
+    The third check is the one the manifest alone cannot make. A digest that
+    still looks right proves nothing if the artifact it addresses is gone or was
+    edited, and reusing a transcript on that basis would put the run back in the
+    state this branch exists to remove: confident about what produced an
+    artifact, and wrong.
+
+    Nothing here writes. Every refusal leaves the transcript, its configuration
+    and the manifest exactly as they were.
+    """
     record = manifest.stages.get(RunStage.TRANSCRIPTION.value)
     if record is None:
         raise IncompatibleArtifactError(
@@ -250,6 +283,7 @@ def _refuse_or_skip(
             f"The existing transcript uses schema {record.schema_version}; this build "
             f"produces {TRANSCRIPT_SCHEMA_VERSION}. Rerun with --force."
         )
+    verify_stage_config(transcript_directory, record, audio_sha256)
     if record.fingerprint != fingerprint:
         raise IncompatibleArtifactError(
             f"The existing transcript was produced from different inputs "
