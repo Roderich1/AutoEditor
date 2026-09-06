@@ -240,7 +240,7 @@ def test_every_refusal_carries_the_analysis_exit_code() -> None:
     assert caught.value.exit_code == EXIT_ANALYSIS
 
 
-# --- the schema handed to the provider ---------------------------------------
+# --- the parser's own contract, which is not what is sent ---------------------
 
 
 def test_the_response_model_forbids_unknown_fields_at_every_level() -> None:
@@ -248,9 +248,20 @@ def test_the_response_model_forbids_unknown_fields_at_every_level() -> None:
     assert ProviderResponse.model_config["allow_inf_nan"] is False
 
 
-def test_the_schema_names_the_categories_and_bounds_the_scores() -> None:
-    """What is sent to the provider, so the constraints are enforced twice."""
+def test_the_parser_contract_covers_every_category_and_refuses_a_total() -> None:
+    """The full contract this module enforces on an answer, in one place.
+
+    `model_json_schema()` is the parser's own description of itself. It is
+    explicitly **not** what travels to the provider: the transport schema is
+    built by `provider_response_schema()` and is a smaller, different thing,
+    because the wire format rejects some of what is asserted here and cannot
+    express the rest. The tests below inspect that one.
+
+    Reading this as the request is what let `additionalProperties` reach the API
+    and be rejected with a 400 while every test passed.
+    """
     schema = json.dumps(ProviderResponse.model_json_schema())
+
     for member in ClipCategory:
         assert member.value in schema
     assert "total_score" not in schema

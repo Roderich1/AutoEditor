@@ -332,14 +332,37 @@ ADR-026 the dependency decision, ADR-027 retries and exit codes.
   inside it are never followed, nothing is executed, nothing is invented, no
   total score is returned, virality is never promised, and
   `run_target_candidates` is not a per-chunk quota.
-- **CE-029, structured output.** One pair of strict Pydantic models is both the
-  schema sent to the provider and the parser applied to what returns, so the
-  constraints are stated once and enforced twice. The provider layer owns shape:
-  JSON, an object, a known category, integer scores in range, no missing field,
-  no extra field, no `total_score`. It deliberately does not own timestamps — a
-  negative or inverted interval must reach CE-030 to be measured and recorded as
-  invalid, because refusing it here would replace a measurement with a parse
-  error. `NaN` and the infinities are the exception: not a timestamp at all.
+- **CE-029, structured output.** Two related pieces, deliberately not one
+  object.
+
+  `provider_response_schema()` builds the **transport schema**: the compatible
+  subset that is actually sent to `generateContent`. It carries types, the
+  category enum, required fields and their ordering, and nothing else. It exists
+  because handing the Pydantic models to the SDK produced a request the API
+  rejects outright — `extra="forbid"` serialises to `additionalProperties`,
+  which is not in the accepted subset — and swept this project's own docstrings
+  into `description` fields, shipping internal commentary to the model inside
+  every request.
+
+  `ProviderResponse`, `ProviderCandidate` and `ProviderScores` are the **parser**,
+  and they validate strictly whatever comes back: an object, a known category,
+  integer scores within 0–100, string lengths, no missing field, no extra field,
+  no `total_score`, no `NaN` or infinity.
+
+  The two are kept in step by derivation and by tests rather than by being the
+  same object. The transport schema takes its field names from
+  `ProviderScores.model_fields` and its categories from `ClipCategory`, and a
+  test asserts it lists exactly the fields the parser expects. **The constraints
+  are therefore not stated once.** Bounds, string lengths, the rejection of extra
+  fields and the rejection of non-finite numbers are enforced *only* locally, on
+  the answer, because the wire format cannot express them or rejects them. A
+  provider that ignores the schema is caught by the parser, which is the layer
+  that has to be trusted regardless.
+
+  Timestamps are owned by neither — a negative or inverted interval must reach
+  CE-030 to be measured and recorded as invalid, because refusing it here would
+  replace a measurement with a parse error. `NaN` and the infinities are the
+  exception: not a timestamp at all.
 - **CE-028, the adapter.** `GeminiContentAnalyzer` behind the port, the one file
   in the package permitted to import a provider SDK or a network client. The
   hashed prompt travels as `system_instruction`; the operator's parameters as a

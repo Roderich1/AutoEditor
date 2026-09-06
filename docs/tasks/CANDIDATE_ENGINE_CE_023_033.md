@@ -58,7 +58,7 @@ the canonical aggregate.
 |---|---|---|---|
 | CE-026 | The `clip_candidates/v1` prompt: packaged resource, versioned, hashed over line-ending-normalised text | `resources/prompts/clip_candidates/v1.txt`, `adapters/analysis/prompt.py` | `tests/unit/test_clip_candidates_prompt.py` |
 | CE-028 | `GeminiContentAnalyzer` behind the port; system instruction separate from speech, no tools, bounded retries, sanitised errors | `adapters/analysis/gemini_analyzer.py` | `tests/unit/test_gemini_analyzer.py` |
-| CE-029 | Structured output: the schema sent to the provider and the strict parse of what returns | `adapters/analysis/structured_output.py` | `tests/unit/test_gemini_structured_output.py` |
+| CE-029 | Structured output: `provider_response_schema()` builds the compatible subset sent to `generateContent`; `ProviderResponse`/`ProviderCandidate`/`ProviderScores` strictly parse what returns. Related by derivation and tests, not the same object | `adapters/analysis/structured_output.py` | `tests/unit/test_gemini_structured_output.py` |
 | — | `analyze RUN_ID [--fixture PATH] [--config PATH] [--force]`, two modes that never share artifacts | `cli.py` | `tests/unit/test_cli_analyze_provider.py` |
 | — | Exactly one file in the package may import a provider SDK or a network client | `ports/analyzer.py`, `adapters/` | AST sweeps in `test_analyzer_port.py`, `test_fixture_analyzer.py` |
 | — | One opt-in test that really calls Gemini, off unless explicitly enabled | `tests/ai/test_gemini_live.py` | skipped unless `CONTENT_ENGINE_RUN_AI_TESTS=1` |

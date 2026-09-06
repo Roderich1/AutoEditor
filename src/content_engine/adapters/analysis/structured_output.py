@@ -27,12 +27,14 @@ request -- commentary about ``RawCandidate`` and about why ``warnings`` is
 absent, sent to Gemini, paid for by the token.
 
 So the request schema is assembled deliberately in ``provider_response_schema``
-and a test asserts it lists exactly the fields these models declare. The
-constraints are still stated twice, but only the ones the wire format supports
-travel: types, the category enum, required fields and their ordering. Score
-bounds and string lengths stay here, on the answer, which is the layer that has
-to be trusted anyway -- a provider that ignored them would be caught either way,
-and the prompt already states the 0-100 range in words.
+and a test asserts it lists exactly the fields these models declare. Only the
+constraints the wire format supports travel -- types, the category enum,
+required fields and their ordering -- and those are the only ones expressed
+twice. Score bounds, string lengths, the refusal of extra fields and the refusal
+of non-finite numbers are enforced *here alone*, on the answer, because the
+format either cannot express them or rejects them outright. That is not a
+weakness: this is the layer that has to be trusted regardless, since a provider
+free to ignore a schema is also free to ignore the half of it that was sent.
 """
 
 from __future__ import annotations
