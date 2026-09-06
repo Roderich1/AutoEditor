@@ -13,6 +13,7 @@ from content_engine.config import TranscriptionSettings
 from content_engine.domain.exceptions import IncompatibleArtifactError
 from content_engine.domain.models import (
     METRICS_SCHEMA_VERSION,
+    TRANSCRIPT_SCHEMA_VERSION,
     TRANSCRIPTION_STAGE_CONFIG_SCHEMA_VERSION,
     ResolvedHardware,
     StageRecord,
@@ -49,6 +50,42 @@ def options_from_settings(settings: TranscriptionSettings) -> TranscriptionOptio
         word_timestamps=settings.word_timestamps,
         vad_filter=settings.vad_filter,
     )
+
+
+def read_transcript(directory: Path) -> Transcript:
+    """Load a transcript a previous stage wrote, or refuse to build on it.
+
+    Analysis is the first stage that consumes an artifact it did not produce, so
+    this is where a missing, unreadable or differently versioned transcript has
+    to become one clear refusal rather than an exception from deep inside a
+    model. Nothing downstream should have to guess whether the transcript it was
+    handed is trustworthy.
+    """
+    path = directory.joinpath(TRANSCRIPT_FILENAME)
+    if not path.is_file():
+        raise IncompatibleArtifactError(
+            f"The run has no transcript at {path}. Run `transcribe` first."
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise IncompatibleArtifactError(f"{path} cannot be read as a transcript: {error}") from (
+            error
+        )
+    if not isinstance(payload, dict):
+        raise IncompatibleArtifactError(f"{path} does not contain a transcript object")
+
+    declared = payload.get("schema_version")
+    if declared != TRANSCRIPT_SCHEMA_VERSION:
+        raise IncompatibleArtifactError(
+            f"{path} declares transcript schema {declared!r}; this build understands "
+            f"{TRANSCRIPT_SCHEMA_VERSION}. The transcript was produced by a different "
+            "version and is not interpreted."
+        )
+    try:
+        return Transcript.model_validate(payload)
+    except ValidationError as error:
+        raise IncompatibleArtifactError(f"{path} is not a valid transcript: {error}") from error
 
 
 def read_stage_config(directory: Path) -> TranscriptionStageConfig:

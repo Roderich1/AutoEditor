@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -8,11 +9,17 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from content_engine.adapters.analysis.fixture_analyzer import (
+    FixtureAnalyzer,
+    load_fixture,
+    require_fixture_covers,
+)
 from content_engine.adapters.media.ffmpeg import FFmpegAdapter
 from content_engine.adapters.media.ffprobe import FFprobeAdapter
 from content_engine.adapters.persistence.filesystem import RunWorkspace
 from content_engine.adapters.transcription.faster_whisper import FasterWhisperTranscriber
 from content_engine.config import Settings, config_sha256, load_settings
+from content_engine.domain.candidates import CANDIDATES_SCHEMA_VERSION, CandidateCollection
 from content_engine.domain.enums import RunStage, RunStatus
 from content_engine.domain.exceptions import (
     EXIT_CONFIGURATION,
@@ -21,14 +28,28 @@ from content_engine.domain.exceptions import (
     IncompatibleArtifactError,
     InvalidMediaError,
 )
-from content_engine.domain.models import TRANSCRIPT_SCHEMA_VERSION, RunManifest
+from content_engine.domain.models import (
+    TRANSCRIPT_SCHEMA_VERSION,
+    RunManifest,
+    Transcript,
+)
+from content_engine.domain.run_state import validate_transition
 from content_engine.domain.transcript_rules import stage_config, transcription_fingerprint
+from content_engine.services.analysis_service import (
+    CANDIDATES_FILENAME,
+    AnalysisPlan,
+    AnalysisService,
+    plan_analysis,
+    verify_analysis,
+)
+from content_engine.services.chunking_service import transcript_sha256
 from content_engine.services.doctor_service import Check, DoctorService
 from content_engine.services.media_service import MediaService
 from content_engine.services.run_service import RunService
 from content_engine.services.transcription_service import (
     TranscriptionService,
     options_from_settings,
+    read_transcript,
     verify_stage_config,
 )
 from content_engine.utils.hashing import sha256_file
@@ -37,9 +58,12 @@ app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
 console = Console()
 ConfigOption = Annotated[Path | None, typer.Option("--config", help="TOML profile to merge")]
 
-#: Stages whose artifacts are built on top of the transcript. Nothing writes here
-#: yet; CE-052 will invalidate them automatically.
+#: Stages whose artifacts are built on top of the transcript. CE-052 will
+#: invalidate them automatically; until then rerunning a stage says which of them
+#: went stale.
 DOWNSTREAM_DIRECTORIES = ("analysis", "review", "previews", "clips")
+#: The same, for the analysis stage: everything downstream of the candidates.
+ANALYSIS_DOWNSTREAM_DIRECTORIES = ("review", "previews", "clips")
 
 
 def _execute(action: Callable[[], str]) -> None:
@@ -197,7 +221,7 @@ def transcribe(
             )
 
         if force:
-            _warn_about_downstream(run_path)
+            _warn_about_stale(run_path, DOWNSTREAM_DIRECTORIES, "transcript")
 
         audio_duration = _media_service().audio_duration(audio_path)
         try:
@@ -246,6 +270,137 @@ def transcribe(
         )
 
     _execute(action)
+
+
+@app.command()
+def analyze(
+    run_id: Annotated[str, typer.Argument(help="Existing run identifier")],
+    fixture: Annotated[
+        Path,
+        typer.Option("--fixture", help="Recorded analyzer answers to replay"),
+    ],
+    config: ConfigOption = None,
+    force: Annotated[bool, typer.Option("--force", help="Replace existing candidates")] = False,
+) -> None:
+    """Turn a transcript into a ranked candidate list, replaying a fixture.
+
+    No provider is called and no credential is read. ``--fixture`` is required
+    in this build for exactly that reason: the deterministic pipeline is
+    finished, the Gemini adapter is not, and a command that silently produced
+    nothing without one would be dishonest about which half exists.
+    """
+
+    def action() -> str:
+        settings: Settings = load_settings(config)
+        workspace = RunWorkspace(settings.workspace.root)
+        run_service = RunService(settings, workspace)
+        run_path = workspace.require(run_id)
+        manifest = workspace.read_manifest(run_path)
+
+        # Refused before anything is read or computed, so a run that cannot
+        # reach ANALYZED says so instead of failing after the work is done.
+        validate_transition(manifest.status, RunStatus.ANALYZED)
+
+        transcript = read_transcript(run_path.joinpath("transcript"))
+        _warn_about_configuration_drift(manifest, config_sha256(settings))
+
+        analyzer = FixtureAnalyzer(load_fixture(fixture))
+        plan = plan_analysis(transcript, settings, analyzer.identity)
+        require_fixture_covers(analyzer, [chunk.id for chunk in plan.chunks.chunks])
+
+        analysis_directory = run_path.joinpath("analysis")
+        if analysis_directory.joinpath(CANDIDATES_FILENAME).is_file() and not force:
+            collection = _refuse_or_reuse_analysis(manifest, analysis_directory, transcript, plan)
+            return (
+                f"[green]Candidates reused:[/green] {collection.counts.selected} selected of "
+                f"{collection.counts.proposed} proposed. Use --force to rerun."
+            )
+
+        if force:
+            _warn_about_stale(run_path, ANALYSIS_DOWNSTREAM_DIRECTORIES, "candidates")
+
+        try:
+            outcome = AnalysisService(analyzer, analyzer.identity).analyze(
+                plan, analysis_directory, datetime.now(UTC)
+            )
+        except ContentEngineError as error:
+            run_service.fail(run_path, manifest, RunStage.ANALYSIS, error)
+            _report_run_context(run_path, manifest)
+            raise
+
+        manifest = run_service.advance(run_path, manifest, RunStatus.ANALYZED)
+        # The manifest must name what actually produced the candidates. While the
+        # executor is a fixture it says so, rather than leaving the configured
+        # provider in place and asserting a call that never happened.
+        manifest.versions.analysis_provider = outcome.stage_config.analyzer
+        manifest.versions.analysis_model = outcome.stage_config.model
+        run_service.record_stage(
+            run_path,
+            manifest,
+            RunStage.ANALYSIS,
+            outcome.fingerprint,
+            outcome.stage_config_sha256,
+            CANDIDATES_SCHEMA_VERSION,
+        )
+
+        counts = outcome.collection.counts
+        if counts.proposed == 0:
+            console.print(
+                "[yellow]Warning:[/yellow] the analyzer proposed no candidates. "
+                "The transcript may contain no usable material."
+            )
+        if counts.invalid:
+            console.print(
+                f"[yellow]Refused[/yellow] {counts.invalid} proposals before scoring; "
+                f"see {CANDIDATES_FILENAME} for the reasons."
+            )
+        return (
+            f"[green]Candidates ready:[/green] {counts.selected} selected of "
+            f"{counts.proposed} proposed ({counts.invalid} invalid, "
+            f"{counts.below_min_score} below {plan.policy.min_score}, "
+            f"{counts.deduplicated} duplicates, {counts.not_in_top_n} beyond the cap) "
+            f"by {outcome.stage_config.analyzer}/{outcome.stage_config.model}, "
+            f"fingerprint {outcome.fingerprint[:12]}"
+        )
+
+    _execute(action)
+
+
+def _refuse_or_reuse_analysis(
+    manifest: RunManifest,
+    analysis_directory: Path,
+    transcript: Transcript,
+    plan: AnalysisPlan,
+) -> CandidateCollection:
+    """Reuse candidates only when they provably match the current inputs.
+
+    The same discipline the transcript reuse follows, applied to a stage with
+    four artifacts instead of one. The manifest has to have recorded the stage,
+    under a schema this build produces; the artifacts on disk have to still
+    match what the manifest says about them; and the whole thing has to describe
+    the transcript, the fixture and the settings being asked for right now.
+
+    Nothing here writes. Every refusal leaves all four artifacts and the
+    manifest exactly as they were, and says to use --force.
+    """
+    record = manifest.stages.get(RunStage.ANALYSIS.value)
+    if record is None:
+        raise IncompatibleArtifactError(
+            "Candidates exist but no fingerprint was recorded for them, so they cannot "
+            "be shown to match the current transcript and settings. Rerun with --force."
+        )
+    if record.schema_version != CANDIDATES_SCHEMA_VERSION:
+        raise IncompatibleArtifactError(
+            f"The existing candidates use schema {record.schema_version}; this build "
+            f"produces {CANDIDATES_SCHEMA_VERSION}. Rerun with --force."
+        )
+    return verify_analysis(
+        analysis_directory,
+        record.fingerprint,
+        record.stage_config_sha256,
+        transcript_sha256(transcript),
+        plan.stage_config,
+    )
 
 
 def _refuse_or_skip(
@@ -310,16 +465,17 @@ def _warn_about_configuration_drift(manifest: RunManifest, current: str) -> None
     )
 
 
-def _warn_about_downstream(run_path: Path) -> None:
+def _warn_about_stale(run_path: Path, directories: tuple[str, ...], produced: str) -> None:
+    """Name what a rerun invalidates. CE-052 will do the invalidating."""
     stale = [
         name
-        for name in DOWNSTREAM_DIRECTORIES
+        for name in directories
         if run_path.joinpath(name).is_dir() and any(run_path.joinpath(name).iterdir())
     ]
     if stale:
         console.print(
             f"[yellow]Warning:[/yellow] {', '.join(stale)} were built on the previous "
-            "transcript and are now stale. Automatic invalidation arrives with CE-052."
+            f"{produced} and are now stale. Automatic invalidation arrives with CE-052."
         )
 
 
