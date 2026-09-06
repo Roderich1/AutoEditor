@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +18,6 @@ from typer.testing import CliRunner
 
 from content_engine import cli
 from content_engine.adapters.analysis.fixture_analyzer import FixtureBatch
-from content_engine.adapters.persistence.filesystem import RunWorkspace
-from content_engine.config import WORKSPACE_ENV_VAR, load_settings
 from content_engine.domain.enums import RunStage, RunStatus
 from content_engine.domain.exceptions import (
     EXIT_ANALYSIS,
@@ -35,107 +31,17 @@ from content_engine.services.analysis_service import (
     STAGE_CONFIG_FILENAME,
 )
 from content_engine.services.chunking_service import CHUNKS_FILENAME
-from content_engine.services.run_service import RunService
 from tests.conftest import (
     FakeTranscriber,
+    Harness,
     analysis_fixture,
     cli_output,
-    fake_process,
     raw_candidate,
     write_fixture,
 )
 
 runner = CliRunner()
 AUDIO_DURATION = 119.0
-
-
-@dataclass
-class Harness:
-    run_id: str
-    run_path: Path
-    fixture_path: Path
-    tmp_path: Path
-
-    @property
-    def analysis(self) -> Path:
-        return self.run_path.joinpath("analysis")
-
-    def manifest(self) -> dict[str, Any]:
-        return json.loads(self.run_path.joinpath("manifest.json").read_text(encoding="utf-8"))
-
-    def candidates(self) -> dict[str, Any]:
-        return json.loads(self.analysis.joinpath(CANDIDATES_FILENAME).read_text(encoding="utf-8"))
-
-    def snapshot(self) -> dict[str, bytes]:
-        return {
-            name: self.analysis.joinpath(name).read_bytes()
-            for name in ARTIFACT_FILENAMES
-            if self.analysis.joinpath(name).is_file()
-        } | {"manifest.json": self.run_path.joinpath("manifest.json").read_bytes()}
-
-
-def _segments(count: int = 12) -> tuple:
-    from tests.conftest import raw_segment, raw_word
-
-    return tuple(
-        raw_segment(
-            index * 10.0,
-            index * 10.0 + 9.0,
-            f"segmento {index}",
-            (
-                raw_word("hola", index * 10.0, index * 10.0 + 0.5),
-                raw_word("mundo", index * 10.0 + 8.5, index * 10.0 + 9.0),
-            ),
-        )
-        for index in range(count)
-    )
-
-
-DEFAULT_BATCH = FixtureBatch(
-    chunk_id="chunk_0000",
-    raw_response='{"candidates": [{"start": 10.2, "end": 39.4}]}',
-    candidates=[raw_candidate(10.2, 39.4), raw_candidate(60.0, 85.0, hook=70)],
-)
-
-
-@pytest.fixture
-def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
-    from tests.conftest import raw_transcription
-
-    monkeypatch.setenv(WORKSPACE_ENV_VAR, str(tmp_path.joinpath("workspace")))
-    monkeypatch.delenv("CONTENT_ENGINE_ANALYSIS_MODEL", raising=False)
-    monkeypatch.setattr(
-        "content_engine.services.run_service.run_command",
-        lambda arguments, **_: fake_process(arguments, "ffmpeg version test\n"),
-    )
-
-    def fake_probe(arguments: Sequence[str], timeout: float | None = None) -> Any:
-        payload = {
-            "streams": [{"codec_type": "audio", "codec_name": "pcm_s16le"}],
-            "format": {"duration": str(AUDIO_DURATION), "format_name": "wav"},
-        }
-        return fake_process(arguments, json.dumps(payload))
-
-    monkeypatch.setattr("content_engine.adapters.media.ffprobe.run_command", fake_probe)
-
-    video = tmp_path.joinpath("sample.mp4")
-    video.write_bytes(b"video")
-    settings = load_settings()
-    workspace = RunWorkspace(settings.workspace.root)
-    service = RunService(settings, workspace)
-    run_path, manifest = service.create(video)
-    manifest = service.advance(run_path, manifest, RunStatus.INSPECTED)
-    run_path.joinpath("audio", "source.wav").write_bytes(b"wav-bytes")
-    service.advance(run_path, manifest, RunStatus.AUDIO_READY)
-
-    transcriber = FakeTranscriber(raw_transcription(_segments(), AUDIO_DURATION))
-    monkeypatch.setattr(cli, "FasterWhisperTranscriber", lambda: transcriber)
-    assert runner.invoke(cli.app, ["transcribe", run_path.name]).exit_code == EXIT_SUCCESS
-
-    fixture_path = write_fixture(
-        tmp_path.joinpath("fixture.json"), analysis_fixture([DEFAULT_BATCH])
-    )
-    return Harness(run_path.name, run_path, fixture_path, tmp_path)
 
 
 def _analyze(harness: Harness, *extra: str, fixture: Path | None = None) -> Any:

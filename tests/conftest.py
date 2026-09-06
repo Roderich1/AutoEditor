@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
+from content_engine import cli
 from content_engine.adapters.analysis.fixture_analyzer import AnalysisFixture, FixtureBatch
+from content_engine.adapters.persistence.filesystem import RunWorkspace
 from content_engine.config import WORKSPACE_ENV_VAR, Settings, load_settings
 from content_engine.domain.candidate_rules import (
     CandidatePolicy,
@@ -25,7 +28,8 @@ from content_engine.domain.candidates import (
     RawCandidate,
     TranscriptChunk,
 )
-from content_engine.domain.enums import ClipCategory
+from content_engine.domain.enums import ClipCategory, RunStatus
+from content_engine.domain.exceptions import EXIT_SUCCESS
 from content_engine.domain.models import (
     RawSegment,
     RawTranscription,
@@ -36,6 +40,8 @@ from content_engine.domain.models import (
     TranscriptSegment,
     TranscriptWord,
 )
+from content_engine.services.analysis_service import ARTIFACT_FILENAMES, CANDIDATES_FILENAME
+from content_engine.services.run_service import RunService
 
 
 @pytest.fixture
@@ -260,3 +266,102 @@ def cli_output(result: object) -> str:
     on terminal geometry rather than on what the command said.
     """
     return " ".join(str(getattr(result, "output", result)).split())
+
+
+# --- the analyze harness -----------------------------------------------------
+#
+# A fully transcribed run, built through the real CLI with fake FFmpeg and a
+# fake transcriber. It lives here rather than in one test module because both
+# the fixture-mode and the provider-mode command tests need the same starting
+# point, and two copies of a setup this long drift the moment one is edited.
+
+AUDIO_DURATION = 119.0
+
+
+@dataclass
+class Harness:
+    run_id: str
+    run_path: Path
+    fixture_path: Path
+    tmp_path: Path
+
+    @property
+    def analysis(self) -> Path:
+        return self.run_path.joinpath("analysis")
+
+    def manifest(self) -> dict[str, Any]:
+        return json.loads(self.run_path.joinpath("manifest.json").read_text(encoding="utf-8"))
+
+    def candidates(self) -> dict[str, Any]:
+        return json.loads(self.analysis.joinpath(CANDIDATES_FILENAME).read_text(encoding="utf-8"))
+
+    def snapshot(self) -> dict[str, bytes]:
+        return {
+            name: self.analysis.joinpath(name).read_bytes()
+            for name in ARTIFACT_FILENAMES
+            if self.analysis.joinpath(name).is_file()
+        } | {"manifest.json": self.run_path.joinpath("manifest.json").read_bytes()}
+
+
+def _segments(count: int = 12) -> tuple:
+    from tests.conftest import raw_segment, raw_word
+
+    return tuple(
+        raw_segment(
+            index * 10.0,
+            index * 10.0 + 9.0,
+            f"segmento {index}",
+            (
+                raw_word("hola", index * 10.0, index * 10.0 + 0.5),
+                raw_word("mundo", index * 10.0 + 8.5, index * 10.0 + 9.0),
+            ),
+        )
+        for index in range(count)
+    )
+
+
+DEFAULT_BATCH = FixtureBatch(
+    chunk_id="chunk_0000",
+    raw_response='{"candidates": [{"start": 10.2, "end": 39.4}]}',
+    candidates=[raw_candidate(10.2, 39.4), raw_candidate(60.0, 85.0, hook=70)],
+)
+
+
+@pytest.fixture
+def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
+    from tests.conftest import raw_transcription
+
+    monkeypatch.setenv(WORKSPACE_ENV_VAR, str(tmp_path.joinpath("workspace")))
+    monkeypatch.delenv("CONTENT_ENGINE_ANALYSIS_MODEL", raising=False)
+    monkeypatch.setattr(
+        "content_engine.services.run_service.run_command",
+        lambda arguments, **_: fake_process(arguments, "ffmpeg version test\n"),
+    )
+
+    def fake_probe(arguments: Sequence[str], timeout: float | None = None) -> Any:
+        payload = {
+            "streams": [{"codec_type": "audio", "codec_name": "pcm_s16le"}],
+            "format": {"duration": str(AUDIO_DURATION), "format_name": "wav"},
+        }
+        return fake_process(arguments, json.dumps(payload))
+
+    monkeypatch.setattr("content_engine.adapters.media.ffprobe.run_command", fake_probe)
+
+    video = tmp_path.joinpath("sample.mp4")
+    video.write_bytes(b"video")
+    settings = load_settings()
+    workspace = RunWorkspace(settings.workspace.root)
+    service = RunService(settings, workspace)
+    run_path, manifest = service.create(video)
+    manifest = service.advance(run_path, manifest, RunStatus.INSPECTED)
+    run_path.joinpath("audio", "source.wav").write_bytes(b"wav-bytes")
+    service.advance(run_path, manifest, RunStatus.AUDIO_READY)
+
+    transcriber = FakeTranscriber(raw_transcription(_segments(), AUDIO_DURATION))
+    monkeypatch.setattr(cli, "FasterWhisperTranscriber", lambda: transcriber)
+    assert CliRunner().invoke(cli.app, ["transcribe", run_path.name]).exit_code == EXIT_SUCCESS
+
+    fixture_path = write_fixture(
+        tmp_path.joinpath("fixture.json"), analysis_fixture([DEFAULT_BATCH])
+    )
+    return Harness(run_path.name, run_path, fixture_path, tmp_path)
