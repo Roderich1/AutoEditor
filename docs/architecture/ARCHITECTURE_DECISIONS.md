@@ -1475,16 +1475,35 @@ unconditional `rmtree` in `generate`'s `finally` is gone.
 backup directory that is empty *and* has no journal: it holds nothing
 recoverable, and that is checked rather than assumed.
 
-**The phase is journalled.** `previews/.rollback/rollback.json` records how far
-publication had got, because the undo for the two phases is the opposite of the
-other. In `moving_aside` the previews directory still holds part of the previous
-set, so the undo moves files back and deletes nothing. In `placing` every old
-file is already in the backup, so anything publishable left in the directory
-belongs to the failed attempt and is deleted first. Applying the wrong one
-deletes exactly the files that have no second copy — which is a defect an
-earlier version of this code actually had, when it inferred the answer from the
-directory contents instead. One flag suffices because the phases are disjoint by
-construction: nothing is placed until everything has been moved aside.
+**The phase is journalled, and there are three of them.**
+`previews/.rollback/rollback.json` records how far the operation has got,
+because each phase forbids something the previous one required:
+
+| Phase | State of `previews/` | What the undo may do |
+|---|---|---|
+| `moving_aside` | part of the previous set is still here; nothing new placed | move back only — **delete nothing** |
+| `placing` | every old file is in the backup, so anything here is new | delete those, then advance to `restoring` |
+| `restoring` | the deletion is over; files here are recovered ones | move back only — **delete nothing** |
+
+The third phase is not a refinement, it is the fix for a second data loss. With
+only two phases, a restore interrupted half-way through moving files back left
+the journal saying `placing` — and `placing` and `restoring` are
+indistinguishable from the directory contents alone, since both leave
+publishable files sitting in it. Resuming therefore re-ran the deletion and
+removed exactly the files that had just been recovered, which were no longer in
+the backup either, having already left it. Five files in, three files out.
+
+So `restoring` is written **after the last deletion and before the first move
+back**, and its undo never deletes. That single ordering is what makes a resume
+safe, and it is why the journal is a state machine rather than a flag.
+
+Two properties make resuming sound. Moving a file back is idempotent — each
+move takes one file out of the backup, so a repeated call continues with
+whatever is left, and a file is always in the backup or in the directory, never
+neither. And if writing `restoring` fails, nothing has moved yet: the phase on
+disk is still `placing`, the previous set is whole in the backup, and a resume
+re-runs the deletion (finding nothing left to delete) and retries the
+transition.
 
 A journal this build cannot read is a refusal, never a default. The phase
 decides which files get deleted, so guessing it is worse than doing nothing.
@@ -1519,7 +1538,12 @@ directory would preserve that too, and buys nothing else.
   previews are restored and still pass `verify_previews`.
 - A failed restore costs an incomplete directory and a message, not data. The
   operator is told which directory holds the files, and `preview` finishes the
-  job on the next run.
+  job on the next run — from any point, however many times it was interrupted.
+- Recovery is asserted by calling `resolve_pending_rollback` directly, never
+  through `generate`. A second `generate` publishes a fresh set that is complete
+  and verifiable whether or not anything was recovered, so it cannot tell
+  recovery from replacement; the test that did go through `generate` passed over
+  the resume defect for exactly that reason.
 - `PreviewRollbackError` exists so this is distinguishable from an ordinary
   render failure. An ordinary one can just be retried; this one means files are
   sitting somewhere other than where they belong.

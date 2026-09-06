@@ -93,10 +93,26 @@ puede completarse por decreto: lo que se garantiza es que **no se pierde nada**.
 Cada archivo del conjunto anterior queda en `previews/` o en
 `previews/.rollback/`, el respaldo no se borra mientras la restauración esté
 incompleta, el error nombra el directorio que contiene los datos, y la siguiente
-ejecución de `preview` termina la restauración a partir de la fase registrada en
-`previews/.rollback/rollback.json`. Un respaldo cuyo diario falte o no se pueda
-interpretar se rechaza sin tocarlo, porque la fase decide qué archivos se
-eliminan y adivinarla borraría los que no tienen otra copia.
+ejecución de `preview` termina la restauración.
+
+Terminarla es seguro desde cualquier punto porque `previews/.rollback/rollback.json`
+registra la fase, y son tres:
+
+| Fase | Estado de `previews/` | Qué puede hacer el deshacer |
+|---|---|---|
+| `moving_aside` | parte del conjunto anterior sigue aquí; nada nuevo colocado | solo mover de vuelta — **no borra nada** |
+| `placing` | todo lo anterior está en el respaldo; lo que hay aquí es nuevo | borrar eso y pasar a `restoring` |
+| `restoring` | el borrado terminó; lo que hay aquí ya está recuperado | solo mover de vuelta — **no borra nada** |
+
+`restoring` se escribe **después del último borrado y antes del primer archivo
+devuelto**. Sin esa tercera fase, una restauración interrumpida a mitad se
+reanudaba como si el directorio siguiera lleno de archivos nuevos y borraba
+justamente los que ya había recuperado. Mover un archivo de vuelta es
+idempotente, así que reanudar continúa con lo que quede; y si falla la escritura
+de la fase, nada se ha movido todavía y una ejecución posterior repite sin
+riesgo. Un respaldo cuyo diario falte o no se pueda interpretar se rechaza sin
+tocarlo, porque la fase decide qué archivos se eliminan y adivinarla borraría los
+que no tienen otra copia.
 
 `previews/index.json` describe cada archivo con su intervalo, su duración
 esperada y medida, sus dimensiones, sus códecs, su SHA-256 y su tamaño, junto al

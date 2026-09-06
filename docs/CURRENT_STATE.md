@@ -27,7 +27,7 @@ FFmpeg 9.0.1:
 | `uv run ruff check .` | passed |
 | `uv run ruff format --check .` | passed, 111 files |
 | `uv run mypy src` | passed, 50 files, strict |
-| `uv run pytest` | 1747 passed, 1 skipped, 495 more than the 1252 on `main`; 99.61% over 3309 statements, 13 missed — the same 13 `main` already had |
+| `uv run pytest` | 1765 passed, 1 skipped, 513 more than the 1252 on `main`; 99.61% over 3314 statements, 13 missed — the same 13 `main` already had |
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
@@ -38,8 +38,11 @@ FFmpeg 9.0.1:
 | Failure of the restore itself, on the first, a middle and the last file | the whole previous set stays reachable in `previews/` or `previews/.rollback/`, and the backup is never deleted |
 | Restore failure repeated three times | the backup is still complete after each attempt |
 | A pending backup on a later invocation | restored deterministically from its journal, or refused untouched when the journal is missing, unreadable, of another schema, or names an unknown phase |
+| A restore interrupted after 2 of 5 files, then resumed by `resolve_pending_rollback` | the previous set comes back byte-identical and `verify_previews` passes; asserted for the second, a middle and the last move, and for the shortlist unchanged, grown and shrunk |
+| Four resumes each stopping at a different position | nothing lost at any step, complete at the end |
+| The phase transition itself failing | the journal stays at `placing`, the previous set is whole in the backup, and a resume completes |
 | `preview_service.py` coverage | 100% |
-| Diff against `main` | 27 files, +7792/−46 |
+| Diff against `main` | 27 files, +8122/−46 |
 | SonarCloud quality gate | passes; Reliability and Security both A |
 | `uv run pytest -m integration --no-cov` | 22 passed with real FFmpeg; 9 of them are the new preview pipeline |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
@@ -736,12 +739,31 @@ rejected: on Windows a directory rename fails while a player holds a preview
 open, the two-rename swap is not atomic either, and same-filesystem renames are
 already guaranteed by keeping the working directories inside `previews/`.
 
-The journal carries one field, the phase, because the undo for the two phases is
-opposite: in `moving_aside` the previews directory still holds part of the
-previous set and nothing may be deleted, in `placing` everything there belongs to
-the failed attempt and must go. Inferring that from the directory contents is
-what made an earlier version of this code delete previews that had no second
-copy.
+### A sixth defect: resuming a partial restore lost what it had recovered
+
+The two-phase journal was not enough, and the gap was found by review rather
+than by the suite.
+
+`placing` means "the previews directory holds files from the failed
+publication", and its undo deletes them before moving the previous set back.
+Correct the first time; destructive the second. Once two of five files had been
+moved back, the directory no longer held only new files — but the journal still
+said `placing`, because the two states are indistinguishable from the directory
+contents alone. Resuming re-ran the deletion, removed the two recovered files,
+and moved back only the three still in the backup. Five files in, three out, and
+`verify_previews` failing.
+
+A third phase closes it. `restoring` is written **after the last deletion and
+before the first move back**, and its undo never deletes anything. Moving a file
+back is idempotent, so a resume simply continues with whatever is left in the
+backup; and if the transition write itself fails, nothing has moved, the phase
+on disk is still `placing`, and a resume re-runs a deletion that now finds
+nothing to delete before retrying.
+
+The test that had covered this went through `generate`, which publishes a fresh
+set — complete and verifiable whether or not anything was recovered. It could
+not tell recovery from replacement and passed over the defect. Recovery is now
+asserted by calling `resolve_pending_rollback` directly.
 
 ### SonarCloud: why the gate passes while the UI shows 0.0% coverage
 

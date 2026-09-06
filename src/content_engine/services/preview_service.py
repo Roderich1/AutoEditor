@@ -18,10 +18,12 @@ because the restore is itself a sequence of renames and a rename can fail for
 reasons outside this program. In that case every file of the previous set stays
 in ``previews/`` or in ``previews/.rollback/``, the backup is never deleted
 while the restore is unfinished, the error names the directory holding the data,
-and the next invocation finishes the restore. Nothing is lost; the directory is
-temporarily incomplete. ``_publish`` explains the mechanism and ADR-031 the
-reasoning, including why claiming plain atomicity here would be a promise this
-code cannot keep.
+and the next invocation finishes the restore -- from any point, however many
+times it was interrupted, because ``previews/.rollback/rollback.json`` records
+which of the three phases the operation reached and each phase constrains what
+the undo may touch. Nothing is lost; the directory is temporarily incomplete.
+``_publish`` explains the mechanism and ADR-031 the reasoning, including why
+claiming plain atomicity here would be a promise this code cannot keep.
 
 **A record is a measurement, not a request.** The dimensions, duration and
 codecs in the index come from ffprobe reading the finished file; the digest and
@@ -92,19 +94,34 @@ ROLLBACK_JOURNAL = "rollback.json"
 #: deleted.
 ROLLBACK_SCHEMA_VERSION = 1
 
-#: Publication has two phases, and the undo for each is the opposite of the
-#: other, so the phase is the one thing the journal has to carry.
+#: How far the operation has got, and therefore what undoing it may touch. The
+#: journal carries exactly this, because every phase forbids something the
+#: previous one required.
 #:
-#: In ``moving_aside`` some of the previous set may still be in the previews
-#: directory and nothing new has been placed, so the undo moves files back and
-#: deletes nothing. In ``placing`` every file of the previous set is already in
-#: the backup, so anything publishable left in the directory is new and the undo
-#: removes it first.
+#: ``moving_aside``  Part of the previous set may still be in the previews
+#:                   directory and nothing new has been placed. The undo moves
+#:                   files back out of the backup and **deletes nothing**.
 #:
-#: The phases are disjoint by construction -- no file is placed until every old
-#: file has been moved aside -- which is what makes one flag sufficient.
+#: ``placing``       Every file of the previous set is in the backup, so
+#:                   anything publishable in the directory belongs to the
+#:                   attempt that failed. The undo **deletes those first**, and
+#:                   then advances to ``restoring``.
+#:
+#: ``restoring``     The deletion is over and files are being moved back, so the
+#:                   directory now holds recovered files. The undo **must never
+#:                   delete**: it only moves back whatever is still in the
+#:                   backup.
+#:
+#: The third phase is not a refinement, it is the fix for a data loss.
+#: ``placing`` and ``restoring`` are indistinguishable from the directory
+#: contents alone -- both leave publishable files sitting in it -- so a restore
+#: interrupted half-way through moving files back used to be resumed as though
+#: the directory still held new files, and the resumed undo deleted the very
+#: files it had just recovered. They were gone from the backup too, having
+#: already left it. Recording the transition is what makes a resume safe.
 PHASE_MOVING_ASIDE = "moving_aside"
 PHASE_PLACING = "placing"
+PHASE_RESTORING = "restoring"
 
 #: Written in this order, and the order matters: the file the reuse check looks
 #: for first is written last, so an interrupted run cannot leave a directory
@@ -454,6 +471,8 @@ def _read_journal(rollback: Path) -> str:
         return PHASE_MOVING_ASIDE
     if phase == PHASE_PLACING:
         return PHASE_PLACING
+    if phase == PHASE_RESTORING:
+        return PHASE_RESTORING
     raise PreviewRollbackError(
         f"{path} names publication phase {phase!r}, which this build does not know how "
         f"to undo. The backup in {rollback} is left untouched."
@@ -463,20 +482,39 @@ def _read_journal(rollback: Path) -> str:
 def _restore(directory: Path, rollback: Path, phase: str) -> None:
     """Put a saved set back, and delete the backup only if all of it went back.
 
-    In ``placing`` every file of the previous set is already in the backup, so
-    anything publishable still in the directory belongs to the attempt that
-    failed and is removed first. In ``moving_aside`` the opposite holds -- what
-    is in the directory is the previous set, not yet moved -- so nothing is
-    deleted.
+    Safe to call again on a restore that stopped part-way, which is the whole
+    reason the phase is recorded. Two invariants do that work.
 
-    The ``rmtree`` at the end is the only place a backup is discarded on this
-    path, and it is reached only after every move has succeeded. An exception
-    from any move leaves the directory in place with everything still in it.
+    **The deletion happens once, and the journal says when it is over.** In
+    ``placing`` the publishable files in the directory belong to the attempt
+    that failed, so they are removed; the moment that finishes, ``restoring``
+    is written, *before* the first file is moved back. Every later resume reads
+    ``restoring`` and deletes nothing, so a file already recovered cannot be
+    mistaken for one the failed publication left behind -- which is precisely
+    how an earlier version of this function lost the files it had just
+    restored.
+
+    **Moving back is idempotent.** Each move takes one file out of the backup,
+    so a repeated call simply continues with whatever is left. Nothing is
+    copied and nothing is compared: a file is in the backup or it is in the
+    directory, never neither.
+
+    If writing ``restoring`` fails, the phase on disk is still ``placing`` and
+    nothing has moved: the previous set is complete in the backup, and a later
+    resume re-runs the deletion -- which now finds nothing to delete -- and
+    tries the transition again.
+
+    The ``rmtree`` is the only place a backup is discarded here, and it is
+    reached only after every move has succeeded.
     """
     if phase == PHASE_PLACING:
         for path in sorted(directory.iterdir()):
             if _is_publishable(path):
                 path.unlink()
+        # The order of these two statements is the fix. Recording the
+        # transition before the first move is what makes the next resume able
+        # to tell a recovered file from a leftover one.
+        _write_journal(rollback, PHASE_RESTORING)
     for saved in sorted(rollback.iterdir()):
         if saved.is_file() and saved.name != ROLLBACK_JOURNAL:
             saved.replace(directory.joinpath(saved.name))

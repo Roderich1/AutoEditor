@@ -1010,6 +1010,51 @@ class TestResumingAPartialRestore:
         )
         assert journal["phase"] == "restoring"
 
+    def test_a_failed_phase_transition_leaves_the_backup_complete(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The window between the last deletion and the first move back.
+
+        If writing `restoring` fails, nothing has moved yet and the previous set
+        is still whole in the backup. The phase on disk is still `placing`, so a
+        resume re-runs the deletion -- finding nothing left to delete -- and
+        tries the transition again. Repeating it has to be safe, because that is
+        the only way out.
+        """
+        directory, plan, fingerprint, digest = published
+        before = snapshot(directory)
+
+        real_write = preview_service.write_json
+
+        def refuse_the_transition(path: Path, value: Any) -> None:
+            if path.name == PREVIEW_INDEX_FILENAME:
+                raise OSError("synthetic placement failure")
+            if path.name == ROLLBACK_JOURNAL and value.get("phase") == "restoring":
+                raise OSError("synthetic phase transition failure")
+            real_write(path, value)
+
+        monkeypatch.setattr(preview_service, "write_json", refuse_the_transition)
+        engine = service("second")
+        with pytest.raises(RenderError):
+            engine.generate(plan, directory, LATER)
+        monkeypatch.undo()
+
+        rollback = directory.joinpath(ROLLBACK_DIRNAME)
+        journal = json.loads(rollback.joinpath(ROLLBACK_JOURNAL).read_text(encoding="utf-8"))
+        assert journal["phase"] == "placing", "the transition must not be recorded if it failed"
+        held = {
+            path.name: path.read_bytes()
+            for path in sorted(rollback.iterdir())
+            if path.is_file() and path.name != ROLLBACK_JOURNAL
+        }
+        assert held == before, "the previous set must still be whole in the backup"
+
+        resolve_pending_rollback(directory)
+        assert snapshot(directory) == before
+        assert verify_previews(directory, fingerprint, digest, plan).previews
+
     def test_a_resumed_restore_deletes_nothing_from_the_previews_directory(
         self,
         published: tuple[Path, PreviewPlan, str, str],
