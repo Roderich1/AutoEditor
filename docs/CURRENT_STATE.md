@@ -25,13 +25,15 @@ FFmpeg 9.0.1:
 | Check | Result |
 |---|---|
 | `uv run ruff check .` | passed |
-| `uv run ruff format --check .` | passed, 109 files |
+| `uv run ruff format --check .` | passed, 110 files |
 | `uv run mypy src` | passed, 50 files, strict |
-| `uv run pytest` | 1620 passed, 1 skipped, 368 more than the 1252 on `main`; 99.59% over 3209 statements, 13 missed — the same 13 `main` already had |
+| `uv run pytest` | 1673 passed, 1 skipped, 421 more than the 1252 on `main`; 99.59% over 3209 statements, 13 missed — the same 13 `main` already had |
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
+| Re-run with every cache disabled | `ruff --no-cache`, `mypy --no-incremental`, `pytest -p no:cacheprovider`: all green |
+| Every test import available in the CI environment | asserted against the `uv.lock` closure of the main dependencies and the dev group, per test module |
 | SonarCloud quality gate | passes; Reliability and Security both A |
 | `uv run pytest -m integration --no-cov` | 22 passed with real FFmpeg; 9 of them are the new preview pipeline |
 | Non-finite numbers refused | 88 parametrised cases for `nan`, `inf`, `-inf` |
@@ -652,6 +654,29 @@ that work has not been done.
   exist and the run is READY_FOR_REVIEW; the decisions are the operator's to
   make, and inventing them would fabricate exactly the measurement CE-053 to
   CE-059 are built to read. Full sessions are exercised only against fixtures.
+
+### Two blind spots CI found, and the guards added for them
+
+Both were environment differences rather than logic errors, and each is now
+caught locally.
+
+**An import the CI environment does not have.** Three test modules imported
+`click.testing.Result`. typer 0.27 no longer depends on click, and the only path
+by which click enters `uv.lock` is `faster-whisper`, which arrives with the
+`transcription` extra that CI does not install — so it resolved locally and
+failed there. `test_suite_portability.py` now reads every test module's imports
+with `ast` and checks each against the transitive closure of the main
+dependencies and the dev group taken from `uv.lock`, which is what
+`uv sync --frozen --group dev` really installs. Not the declared dependencies:
+`test_gemini_analyzer` legitimately imports `httpx`, which nothing declares and
+which `google-genai` brings.
+
+**A lint pass served from a cache.** `ruff check --fix` was run on the tests
+before the new domain modules existed, so ruff could not resolve
+`content_engine.domain.review` and sorted it as third-party. Later local runs
+reported a pass from the cache because the files had not changed since that
+verdict. The whole battery is now re-run with `--no-cache`, `--no-incremental`
+and `-p no:cacheprovider` before any claim of green.
 
 ## Current priority
 
