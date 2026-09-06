@@ -86,3 +86,14 @@ class FakeClock:
         current = self.value
         self.value += self.step
         return current
+
+
+def cli_output(result: object) -> str:
+    """CLI output with newlines and runs of spaces collapsed to single spaces.
+
+    Rich wraps to the console width, and that width differs between a developer
+    terminal and a CI runner, so a phrase that fits on one line locally can be
+    split mid-sentence elsewhere. Asserting on the raw text makes a test depend
+    on terminal geometry rather than on what the command said.
+    """
+    return " ".join(str(getattr(result, "output", result)).split())

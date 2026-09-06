@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 from content_engine import cli
 from content_engine.config import WORKSPACE_ENV_VAR
 from content_engine.domain.exceptions import EXIT_CONFIGURATION, EXIT_INVALID_INPUT
-from tests.conftest import fake_process
+from tests.conftest import cli_output, fake_process
 
 runner = CliRunner()
 
@@ -85,7 +85,7 @@ def test_doctor_reports_ready(workspace: Path, monkeypatch: pytest.MonkeyPatch) 
     result = runner.invoke(cli.app, ["doctor"])
 
     assert result.exit_code == 0
-    assert "System ready" in result.output
+    assert "System ready" in cli_output(result)
 
 
 def test_doctor_fails_with_the_configuration_exit_code(
@@ -98,7 +98,7 @@ def test_doctor_fails_with_the_configuration_exit_code(
     result = runner.invoke(cli.app, ["doctor"])
 
     assert result.exit_code == EXIT_CONFIGURATION
-    assert "Environment is not ready" in result.output
+    assert "Environment is not ready" in cli_output(result)
 
 
 def test_doctor_require_ai_fails_without_credentials(
@@ -117,7 +117,7 @@ def test_inspect_prints_media_information(video: Path, monkeypatch: pytest.Monke
     result = runner.invoke(cli.app, ["inspect", str(video)])
 
     assert result.exit_code == 0
-    assert '"video_codec": "h264"' in result.output
+    assert '"video_codec": "h264"' in cli_output(result)
 
 
 def test_inspect_rejects_media_without_audio(video: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,7 +130,7 @@ def test_inspect_rejects_media_without_audio(video: Path, monkeypatch: pytest.Mo
     result = runner.invoke(cli.app, ["inspect", str(video)])
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "Missing audio stream" in result.output
+    assert "Missing audio stream" in cli_output(result)
 
 
 def test_run_creates_a_run_and_reaches_audio_ready(
@@ -141,7 +141,7 @@ def test_run_creates_a_run_and_reaches_audio_ready(
     result = runner.invoke(cli.app, ["run", str(video)])
 
     assert result.exit_code == 0
-    assert "Run ready" in result.output
+    assert "Run ready" in cli_output(result)
     runs = list(workspace.joinpath("runs").iterdir())
     assert len(runs) == 1
     manifest = json.loads(runs[0].joinpath("manifest.json").read_text(encoding="utf-8"))
@@ -177,7 +177,7 @@ def test_audio_extraction_failure_is_recorded_against_the_audio_stage(
     result = runner.invoke(cli.app, ["run", str(video)])
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "kept for diagnosis" in result.output
+    assert "kept for diagnosis" in cli_output(result)
     runs = list(workspace.joinpath("runs").iterdir())
     manifest = json.loads(runs[0].joinpath("manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "FAILED_AUDIO"
@@ -198,5 +198,5 @@ def test_an_unexpected_error_is_reported_without_a_traceback(
     result = runner.invoke(cli.app, ["inspect", str(video)])
 
     assert result.exit_code == EXIT_UNKNOWN
-    assert "Unexpected error: RuntimeError" in result.output
-    assert "Traceback" not in result.output
+    assert "Unexpected error: RuntimeError" in cli_output(result)
+    assert "Traceback" not in cli_output(result)

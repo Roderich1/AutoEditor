@@ -40,7 +40,7 @@ from content_engine.domain.exceptions import (
     UnsupportedSchemaVersionError,
 )
 from content_engine.domain.models import MANIFEST_SCHEMA_VERSION
-from tests.conftest import fake_process
+from tests.conftest import cli_output, fake_process
 
 runner = CliRunner()
 
@@ -88,14 +88,14 @@ def test_unknown_run_exits_with_invalid_input(workspace_env: Path) -> None:
     result = runner.invoke(cli.app, ["transcribe", "20260101T000000-absent-abc123"])
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "Run not found" in result.output
+    assert "Run not found" in cli_output(result)
 
 
 def test_unsafe_run_id_is_rejected(workspace_env: Path) -> None:
     result = runner.invoke(cli.app, ["transcribe", ".."])
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "Invalid run identifier" in result.output
+    assert "Invalid run identifier" in cli_output(result)
 
 
 def test_broken_profile_exits_with_configuration(tmp_path: Path, workspace_env: Path) -> None:
@@ -105,7 +105,7 @@ def test_broken_profile_exits_with_configuration(tmp_path: Path, workspace_env: 
     result = runner.invoke(cli.app, ["doctor", "--config", str(profile)])
 
     assert result.exit_code == EXIT_CONFIGURATION
-    assert "transcription.modle" in result.output
+    assert "transcription.modle" in cli_output(result)
 
 
 def test_corrupt_manifest_reports_cleanly_without_a_traceback(
@@ -119,9 +119,9 @@ def test_corrupt_manifest_reports_cleanly_without_a_traceback(
     result = runner.invoke(cli.app, ["transcribe", run_path.name])
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "Unsupported artifact schema" in result.output
-    assert "Traceback" not in result.output
-    assert "pydantic" not in result.output.lower()
+    assert "Unsupported artifact schema" in cli_output(result)
+    assert "Traceback" not in cli_output(result)
+    assert "pydantic" not in cli_output(result).lower()
 
 
 def test_missing_audio_reports_the_missing_artifact(
@@ -136,7 +136,7 @@ def test_missing_audio_reports_the_missing_artifact(
     result = runner.invoke(cli.app, ["transcribe", run_path.name])
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "Run audio is missing" in result.output
+    assert "Run audio is missing" in cli_output(result)
 
 
 def _manifest_payload(run_id: str) -> dict[str, Any]:
@@ -192,8 +192,8 @@ def test_a_failed_inspection_keeps_the_run_and_records_the_stage(
     result = runner.invoke(cli.app, ["run", str(video)])
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "Missing audio stream" in result.output
-    assert "kept for diagnosis" in result.output
+    assert "Missing audio stream" in cli_output(result)
+    assert "kept for diagnosis" in cli_output(result)
 
     runs = list(workspace_env.joinpath("runs").iterdir())
     assert len(runs) == 1

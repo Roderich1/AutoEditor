@@ -37,7 +37,7 @@ from content_engine.domain.transcript_rules import (
 from content_engine.services.run_service import RunService
 from content_engine.services.transcription_service import STAGE_CONFIG_FILENAME
 from content_engine.utils.hashing import sha256_file
-from tests.conftest import FakeTranscriber, fake_process, raw_segment, raw_transcription
+from tests.conftest import FakeTranscriber, cli_output, fake_process, raw_segment, raw_transcription
 
 runner = CliRunner()
 AUDIO_DURATION = 10.0
@@ -166,7 +166,7 @@ def test_run_default_then_transcribe_default(harness: Harness, tmp_path: Path) -
     result = _transcribe(harness)
 
     assert result.exit_code == 0
-    assert "not the one" not in result.output
+    assert "not the one" not in cli_output(result)
     _assert_coherent(harness, DEFAULT_MODEL)
 
 
@@ -177,7 +177,7 @@ def test_run_default_then_transcribe_fast(harness: Harness, tmp_path: Path) -> N
     result = _transcribe(harness, "fast.toml")
 
     assert result.exit_code == 0
-    assert "not the one" in result.output
+    assert "not the one" in cli_output(result)
     _assert_coherent(harness, FAST_MODEL)
 
     # The run-level configuration still describes how the run was created.
@@ -190,7 +190,7 @@ def test_run_fast_then_transcribe_fast(harness: Harness, tmp_path: Path) -> None
     result = _transcribe(harness, "fast.toml")
 
     assert result.exit_code == 0
-    assert "not the one" not in result.output
+    assert "not the one" not in cli_output(result)
     _assert_coherent(harness, FAST_MODEL)
     assert _read(harness, "config.effective.json")["transcription"]["model"] == FAST_MODEL
 
@@ -203,7 +203,7 @@ def test_reuse_leaves_the_stage_configuration_untouched(harness: Harness, tmp_pa
     result = _transcribe(harness, "fast.toml")
 
     assert result.exit_code == 0
-    assert "Transcript reused" in result.output
+    assert "Transcript reused" in cli_output(result)
     assert len(harness.transcriber.calls) == 1
     assert _stage_config_path(harness).read_bytes() == before
 
@@ -221,7 +221,7 @@ def test_an_incompatible_configuration_leaves_the_stage_configuration_untouched(
     result = _transcribe(harness, "other.toml")
 
     assert result.exit_code != 0
-    assert "Incompatible artifact" in result.output
+    assert "Incompatible artifact" in cli_output(result)
     assert _stage_config_path(harness).read_bytes() == before
 
 
@@ -361,7 +361,7 @@ def test_a_valid_stage_configuration_is_reused(transcribed: Harness) -> None:
     result = _transcribe(transcribed)
 
     assert result.exit_code == 0
-    assert "Transcript reused" in result.output
+    assert "Transcript reused" in cli_output(result)
     assert len(transcribed.transcriber.calls) == 1
     _assert_untouched(transcribed, before)
 
@@ -374,8 +374,8 @@ def test_a_missing_stage_configuration_refuses_reuse(transcribed: Harness) -> No
     result = _transcribe(transcribed)
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "Incompatible artifact" in result.output
-    assert "missing" in result.output
+    assert "Incompatible artifact" in cli_output(result)
+    assert "missing" in cli_output(result)
     assert len(transcribed.transcriber.calls) == 1
     assert transcribed.run_path.joinpath("manifest.json").read_bytes() == before.manifest
 
@@ -387,7 +387,7 @@ def test_a_corrupt_stage_configuration_refuses_reuse(transcribed: Harness) -> No
     result = _transcribe(transcribed)
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "Incompatible artifact" in result.output
+    assert "Incompatible artifact" in cli_output(result)
     assert transcribed.run_path.joinpath("manifest.json").read_bytes() == before.manifest
     assert (
         transcribed.run_path.joinpath("transcript", "transcript.json").read_bytes()
@@ -401,7 +401,7 @@ def test_a_stage_configuration_that_is_not_an_object_refuses_reuse(transcribed: 
     result = _transcribe(transcribed)
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "does not contain a stage configuration object" in result.output
+    assert "does not contain a stage configuration object" in cli_output(result)
 
 
 def test_an_unknown_stage_configuration_schema_refuses_reuse(transcribed: Harness) -> None:
@@ -412,7 +412,7 @@ def test_an_unknown_stage_configuration_schema_refuses_reuse(transcribed: Harnes
     result = _transcribe(transcribed)
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "schema" in result.output
+    assert "schema" in cli_output(result)
 
 
 def test_a_stage_configuration_with_a_missing_field_refuses_reuse(transcribed: Harness) -> None:
@@ -423,7 +423,7 @@ def test_a_stage_configuration_with_a_missing_field_refuses_reuse(transcribed: H
     result = _transcribe(transcribed)
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "not a valid stage configuration" in result.output
+    assert "not a valid stage configuration" in cli_output(result)
 
 
 def test_a_stage_configuration_that_no_longer_hashes_to_the_manifest_refuses_reuse(
@@ -437,7 +437,7 @@ def test_a_stage_configuration_that_no_longer_hashes_to_the_manifest_refuses_reu
     result = _transcribe(transcribed)
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "does not match the manifest" in result.output
+    assert "does not match the manifest" in cli_output(result)
     assert transcribed.run_path.joinpath("manifest.json").read_bytes() == before.manifest
 
 
@@ -467,7 +467,7 @@ def test_a_repaired_hash_does_not_rescue_an_edited_stage_configuration(
     result = _transcribe(transcribed)
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "cannot be rebuilt" in result.output
+    assert "cannot be rebuilt" in cli_output(result)
     _assert_untouched(transcribed, before)
 
 
@@ -480,7 +480,7 @@ def test_force_regenerates_after_the_stage_configuration_was_destroyed(
     result = _transcribe(transcribed, None, "--force")
 
     assert result.exit_code == 0
-    assert "Transcript ready" in result.output
+    assert "Transcript ready" in cli_output(result)
     assert len(transcribed.transcriber.calls) == 2
     _assert_coherent(transcribed, DEFAULT_MODEL)
 
@@ -505,4 +505,4 @@ def test_a_transcript_without_a_stage_record_refuses_reuse(transcribed: Harness)
     result = _transcribe(transcribed)
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "no fingerprint was recorded" in result.output
+    assert "no fingerprint was recorded" in cli_output(result)

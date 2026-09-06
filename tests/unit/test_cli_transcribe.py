@@ -22,7 +22,7 @@ from content_engine.domain.exceptions import (
 )
 from content_engine.domain.models import TRANSCRIPT_SCHEMA_VERSION, RawTranscription
 from content_engine.services.run_service import RunService
-from tests.conftest import FakeTranscriber, fake_process, raw_segment, raw_transcription
+from tests.conftest import FakeTranscriber, cli_output, fake_process, raw_segment, raw_transcription
 
 runner = CliRunner()
 AUDIO_DURATION = 10.0
@@ -81,7 +81,7 @@ def test_a_first_transcription_records_state_and_fingerprint(harness: Harness) -
     result = _transcribe(harness)
 
     assert result.exit_code == 0
-    assert "Transcript ready" in result.output
+    assert "Transcript ready" in cli_output(result)
     manifest = _manifest(harness)
     assert manifest["status"] == RunStatus.TRANSCRIBED.value
     record = manifest["stages"][RunStage.TRANSCRIPTION.value]
@@ -95,7 +95,7 @@ def test_an_unchanged_run_is_reused_without_calling_the_provider(harness: Harnes
     result = _transcribe(harness)
 
     assert result.exit_code == 0
-    assert "Transcript reused" in result.output
+    assert "Transcript reused" in cli_output(result)
     assert len(harness.transcriber.calls) == 1
 
 
@@ -109,8 +109,8 @@ def test_changed_inputs_are_refused_rather_than_silently_reused(
     result = _transcribe(harness, "--config", str(profile))
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "Incompatible artifact" in result.output
-    assert "--force" in result.output
+    assert "Incompatible artifact" in cli_output(result)
+    assert "--force" in cli_output(result)
     assert len(harness.transcriber.calls) == 1
 
 
@@ -124,7 +124,7 @@ def test_a_transcript_without_a_recorded_fingerprint_is_refused(harness: Harness
     result = _transcribe(harness)
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "no fingerprint was recorded" in result.output
+    assert "no fingerprint was recorded" in cli_output(result)
 
 
 def test_a_transcript_from_another_schema_is_refused(harness: Harness) -> None:
@@ -137,7 +137,7 @@ def test_a_transcript_from_another_schema_is_refused(harness: Harness) -> None:
     result = _transcribe(harness)
 
     assert result.exit_code == EXIT_INVALID_INPUT
-    assert "schema 99" in result.output
+    assert "schema 99" in cli_output(result)
 
 
 def test_force_regenerates_and_updates_the_fingerprint(harness: Harness, tmp_path: Path) -> None:
@@ -160,8 +160,8 @@ def test_force_warns_that_downstream_artifacts_became_stale(harness: Harness) ->
     result = _transcribe(harness, "--force")
 
     assert result.exit_code == 0
-    assert "stale" in result.output
-    assert "CE-052" in result.output
+    assert "stale" in cli_output(result)
+    assert "CE-052" in cli_output(result)
 
 
 def test_a_provider_failure_is_recorded_against_the_transcription_stage(
@@ -180,7 +180,7 @@ def test_a_provider_failure_is_recorded_against_the_transcription_stage(
     result = _transcribe(harness)
 
     assert result.exit_code == EXIT_TRANSCRIPTION
-    assert "kept for diagnosis" in result.output
+    assert "kept for diagnosis" in cli_output(result)
     manifest = _manifest(harness)
     assert manifest["status"] == RunStatus.FAILED_TRANSCRIPTION.value
     assert manifest["failure"]["stage"] == RunStage.TRANSCRIPTION.value
@@ -199,7 +199,7 @@ def test_output_that_disagrees_with_the_audio_fails_the_transcription_stage(
     result = _transcribe(harness)
 
     assert result.exit_code == EXIT_TRANSCRIPTION
-    assert "not trusted" in result.output
+    assert "not trusted" in cli_output(result)
     assert _manifest(harness)["status"] == RunStatus.FAILED_TRANSCRIPTION.value
 
 
@@ -215,7 +215,7 @@ def test_an_empty_transcript_warns_but_still_completes(
     result = _transcribe(harness)
 
     assert result.exit_code == 0
-    assert "no segments" in result.output
+    assert "no segments" in cli_output(result)
     assert _manifest(harness)["status"] == RunStatus.TRANSCRIBED.value
 
 
@@ -268,12 +268,12 @@ def test_a_configuration_that_differs_from_the_run_is_reported(
     result = _transcribe(harness, "--config", str(profile))
 
     assert result.exit_code == 0
-    assert "not the one" in result.output
-    assert _manifest(harness)["config_sha256"] not in result.output
+    assert "not the one" in cli_output(result)
+    assert _manifest(harness)["config_sha256"] not in cli_output(result)
 
 
 def test_the_unchanged_configuration_is_not_reported_as_drift(harness: Harness) -> None:
     result = _transcribe(harness)
 
     assert result.exit_code == 0
-    assert "not the one" not in result.output
+    assert "not the one" not in cli_output(result)
