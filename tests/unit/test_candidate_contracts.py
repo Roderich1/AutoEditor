@@ -31,6 +31,9 @@ from content_engine.domain.candidates import (
     ValidatedCandidate,
 )
 from content_engine.domain.enums import (
+    POST_SCORING_REASONS,
+    PRE_SCORING_REASONS,
+    TERMINAL_REASONS,
     BoundaryAnchor,
     CandidateStatus,
     ClipCategory,
@@ -621,3 +624,426 @@ def test_a_candidate_cut_by_the_cap_is_recorded_rather_than_dropped() -> None:
 
     assert collection.counts.not_in_top_n == 1
     assert collection.rejected[0].total_score == 91.15
+
+
+# ---------------------------------------------------------------------------
+# 7. A reason must belong to the phase that could have decided it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        pytest.param(RejectionReason.BELOW_MIN_SCORE, id="below-min-score"),
+        pytest.param(RejectionReason.DUPLICATE, id="duplicate"),
+        pytest.param(RejectionReason.NOT_IN_TOP_N, id="not-in-top-n"),
+    ],
+)
+def test_an_invalid_candidate_cannot_cite_a_post_scoring_reason(
+    reason: RejectionReason,
+) -> None:
+    """CE-030 refuses before a score exists, so it cannot cite one.
+
+    A record claiming it was refused before scoring *for* being below the
+    minimum score describes two mutually exclusive histories at once, and
+    whichever one a reader believes, the funnel counted it under the other.
+    """
+    with pytest.raises(ValidationError, match="before scoring"):
+        _invalid(rejection_reasons=[reason])
+
+
+def test_an_invalid_candidate_may_cite_several_pre_scoring_defects() -> None:
+    """One pass can find more than one thing wrong with the same proposal."""
+    candidate = _invalid(
+        rejection_reasons=[
+            RejectionReason.INVALID_INTERVAL,
+            RejectionReason.OUTSIDE_CHUNK,
+        ]
+    )
+
+    assert len(candidate.rejection_reasons) == 2
+
+
+def test_a_rejected_candidate_cannot_cite_a_deduplication_reason() -> None:
+    """DUPLICATE belongs to the DEDUPLICATED status and to no other.
+
+    Without this rule a duplicate could be filed as a plain rejection and then
+    counted as below_min_score, and every total in the funnel would still add up.
+    """
+    with pytest.raises(ValidationError, match="not a terminal reason"):
+        _validated(
+            status=CandidateStatus.REJECTED,
+            rejection_reasons=[RejectionReason.DUPLICATE],
+        )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        pytest.param(RejectionReason.TOO_SHORT, id="too-short"),
+        pytest.param(RejectionReason.UNGROUNDED, id="ungrounded"),
+    ],
+)
+def test_a_rejected_candidate_cannot_cite_a_pre_scoring_reason(
+    reason: RejectionReason,
+) -> None:
+    """Anything CE-030 could have caught makes the record an InvalidCandidate."""
+    with pytest.raises(ValidationError, match="not a terminal reason"):
+        _validated(status=CandidateStatus.REJECTED, rejection_reasons=[reason])
+
+
+def test_a_rejected_candidate_carries_exactly_one_terminal_reason() -> None:
+    """One terminal outcome, one cause, one counter it belongs to."""
+    with pytest.raises(ValidationError, match="exactly one"):
+        _validated(
+            status=CandidateStatus.REJECTED,
+            rejection_reasons=[
+                RejectionReason.BELOW_MIN_SCORE,
+                RejectionReason.NOT_IN_TOP_N,
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        pytest.param(RejectionReason.BELOW_MIN_SCORE, id="below-min-score"),
+        pytest.param(RejectionReason.NOT_IN_TOP_N, id="not-in-top-n"),
+        pytest.param(RejectionReason.TOO_SHORT, id="too-short"),
+    ],
+)
+def test_a_deduplicated_candidate_must_cite_duplication(reason: RejectionReason) -> None:
+    with pytest.raises(ValidationError, match="not a terminal reason"):
+        _validated(status=CandidateStatus.DEDUPLICATED, rejection_reasons=[reason])
+
+
+def test_a_deduplicated_candidate_carries_exactly_one_reason() -> None:
+    with pytest.raises(ValidationError, match="exactly one"):
+        _validated(
+            status=CandidateStatus.DEDUPLICATED,
+            rejection_reasons=[RejectionReason.DUPLICATE, RejectionReason.DUPLICATE],
+        )
+
+
+def test_every_rejection_reason_belongs_to_exactly_one_phase() -> None:
+    """A reason with no phase would be silently unusable by either record type."""
+    assert not PRE_SCORING_REASONS & POST_SCORING_REASONS
+    assert set(RejectionReason) == PRE_SCORING_REASONS | POST_SCORING_REASONS
+
+
+def test_each_terminal_status_maps_to_the_reasons_it_can_carry() -> None:
+    assert TERMINAL_REASONS[CandidateStatus.REJECTED] == frozenset(
+        {RejectionReason.BELOW_MIN_SCORE, RejectionReason.NOT_IN_TOP_N}
+    )
+    assert TERMINAL_REASONS[CandidateStatus.DEDUPLICATED] == frozenset({RejectionReason.DUPLICATE})
+    assert CandidateStatus.SUGGESTED not in TERMINAL_REASONS
+
+
+# ---------------------------------------------------------------------------
+# 8. Every counter must be read off the records, not merely add up
+# ---------------------------------------------------------------------------
+
+#: kept [99.5, 151.0] against dropped [104.5, 156.0]: 46.5 s of overlap over
+#: 56.5 s of union. Written as the arithmetic rather than as a literal, so the
+#: test states the definition instead of trusting the implementation's answer.
+OVERLAP_IOU = 46.5 / 56.5
+
+
+def _overlapping_boundary(**overrides: Any) -> BoundaryAdjustment:
+    payload: dict[str, Any] = {
+        "proposed_start": 105.0,
+        "proposed_end": 155.0,
+        "adjusted_start": 104.5,
+        "adjusted_end": 156.0,
+        "start_delta": -0.5,
+        "end_delta": 1.0,
+    }
+    payload.update(overrides)
+    return _boundary(**payload)
+
+
+def _cut_by_cap(**overrides: Any) -> ValidatedCandidate:
+    payload: dict[str, Any] = {
+        "id": "cand_000000000003",
+        "status": CandidateStatus.REJECTED,
+        "rejection_reasons": [RejectionReason.NOT_IN_TOP_N],
+    }
+    payload.update(overrides)
+    return _validated(**payload)
+
+
+def _too_weak(**overrides: Any) -> ValidatedCandidate:
+    payload: dict[str, Any] = {
+        "id": "cand_000000000004",
+        "total_score": 10.0,
+        "status": CandidateStatus.REJECTED,
+        "rejection_reasons": [RejectionReason.BELOW_MIN_SCORE],
+    }
+    payload.update(overrides)
+    return _validated(**payload)
+
+
+def _event(**overrides: Any) -> DeduplicationEvent:
+    payload: dict[str, Any] = {
+        "kept_id": "cand_000000000001",
+        "dropped_id": "cand_000000000002",
+        "iou": OVERLAP_IOU,
+        "kept_score": 91.15,
+        "dropped_score": 80.0,
+    }
+    payload.update(overrides)
+    return DeduplicationEvent(**payload)
+
+
+def _duplicate_of_the_selected(**overrides: Any) -> ValidatedCandidate:
+    payload: dict[str, Any] = {
+        "id": "cand_000000000002",
+        "boundary": _overlapping_boundary(),
+        "total_score": 80.0,
+        "status": CandidateStatus.DEDUPLICATED,
+        "rejection_reasons": [RejectionReason.DUPLICATE],
+    }
+    payload.update(overrides)
+    return _validated(**payload)
+
+
+def _deduplicated_collection(**overrides: Any) -> CandidateCollection:
+    payload: dict[str, Any] = {
+        "rejected": [_duplicate_of_the_selected()],
+        "deduplication_events": [_event()],
+        "counts": CandidateCounts(
+            proposed=2,
+            invalid=0,
+            below_min_score=0,
+            deduplicated=1,
+            not_in_top_n=0,
+            selected=1,
+        ),
+    }
+    payload.update(overrides)
+    return _collection(**payload)
+
+
+def test_a_cap_cut_cannot_be_counted_as_a_score_failure() -> None:
+    """The sum identity alone lets two categories be swapped and still balance.
+
+    One rejected record, one unit counted: `below_min_score + deduplicated +
+    not_in_top_n == len(rejected)` holds either way. Only reading the record can
+    say which of the two happened, and the difference is the difference between
+    "the prompt scores badly" and "the cap is too tight".
+    """
+    with pytest.raises(ValidationError, match="below_min_score"):
+        _collection(
+            rejected=[_cut_by_cap()],
+            counts=CandidateCounts(
+                proposed=2,
+                invalid=0,
+                below_min_score=1,
+                deduplicated=0,
+                not_in_top_n=0,
+                selected=1,
+            ),
+        )
+
+
+def test_a_cap_cut_count_must_be_backed_by_a_record() -> None:
+    with pytest.raises(ValidationError, match="not_in_top_n"):
+        _collection(
+            rejected=[_too_weak()],
+            counts=CandidateCounts(
+                proposed=3,
+                invalid=0,
+                below_min_score=1,
+                deduplicated=0,
+                not_in_top_n=1,
+                selected=1,
+            ),
+        )
+
+
+def test_a_duplicate_cannot_be_counted_as_a_score_failure() -> None:
+    with pytest.raises(ValidationError, match="below_min_score"):
+        _deduplicated_collection(
+            counts=CandidateCounts(
+                proposed=2,
+                invalid=0,
+                below_min_score=1,
+                deduplicated=0,
+                not_in_top_n=0,
+                selected=1,
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 9. A deduplication event must be evidence of the drop it claims
+# ---------------------------------------------------------------------------
+
+
+def test_an_event_cannot_name_the_same_candidate_on_both_sides() -> None:
+    """A candidate cannot be the reason it was itself removed."""
+    with pytest.raises(ValidationError, match="itself"):
+        _event(kept_id="cand_000000000001", dropped_id="cand_000000000001")
+
+
+def test_an_event_must_drop_a_candidate_recorded_as_deduplicated() -> None:
+    """Otherwise the event is the only trace, and it contradicts the record."""
+    with pytest.raises(ValidationError, match="not recorded as deduplicated"):
+        _deduplicated_collection(
+            rejected=[_cut_by_cap()],
+            deduplication_events=[_event(dropped_id="cand_000000000003", dropped_score=91.15)],
+            counts=CandidateCounts(
+                proposed=3,
+                invalid=0,
+                below_min_score=0,
+                deduplicated=1,
+                not_in_top_n=1,
+                selected=1,
+            ),
+        )
+
+
+def test_a_deduplicated_candidate_must_have_an_event() -> None:
+    """A drop with no evidence is exactly what the events exist to prevent."""
+    with pytest.raises(ValidationError, match="no deduplication event"):
+        _deduplicated_collection(deduplication_events=[])
+
+
+def test_two_events_cannot_drop_the_same_candidate() -> None:
+    """One removal, one record. Two would count the same candidate twice."""
+    with pytest.raises(ValidationError, match="more than one deduplication event"):
+        _deduplicated_collection(
+            deduplication_events=[_event(), _event()],
+            counts=CandidateCounts(
+                proposed=2,
+                invalid=0,
+                below_min_score=0,
+                deduplicated=2,
+                not_in_top_n=0,
+                selected=1,
+            ),
+        )
+
+
+def test_an_event_must_report_the_kept_candidates_real_score() -> None:
+    with pytest.raises(ValidationError, match="kept_score"):
+        _deduplicated_collection(deduplication_events=[_event(kept_score=99.0)])
+
+
+def test_an_event_must_report_the_dropped_candidates_real_score() -> None:
+    with pytest.raises(ValidationError, match="dropped_score"):
+        _deduplicated_collection(deduplication_events=[_event(dropped_score=12.0)])
+
+
+def test_an_event_iou_must_match_the_intervals_it_references() -> None:
+    """The overlap is a fact about two intervals that are both on record."""
+    with pytest.raises(ValidationError, match="iou"):
+        _deduplicated_collection(deduplication_events=[_event(iou=0.99)])
+
+
+def test_an_event_iou_must_reach_the_configured_threshold() -> None:
+    """Below dedupe_iou they are different moments, so the drop lost material."""
+    with pytest.raises(ValidationError, match="threshold"):
+        _deduplicated_collection(dedupe_iou=0.95)
+
+
+def test_an_event_cannot_keep_a_candidate_that_was_itself_deduplicated() -> None:
+    """Deduplication keeps the best of a cluster; a loser keeps nothing."""
+    other = _validated(
+        id="cand_000000000003",
+        boundary=_overlapping_boundary(),
+        total_score=70.0,
+        status=CandidateStatus.DEDUPLICATED,
+        rejection_reasons=[RejectionReason.DUPLICATE],
+    )
+
+    with pytest.raises(ValidationError, match="did not survive"):
+        _deduplicated_collection(
+            rejected=[_duplicate_of_the_selected(), other],
+            deduplication_events=[
+                _event(
+                    kept_id="cand_000000000002",
+                    dropped_id="cand_000000000003",
+                    iou=1.0,
+                    kept_score=80.0,
+                    dropped_score=70.0,
+                )
+            ],
+            counts=CandidateCounts(
+                proposed=3,
+                invalid=0,
+                below_min_score=0,
+                deduplicated=2,
+                not_in_top_n=0,
+                selected=1,
+            ),
+        )
+
+
+def test_an_event_cannot_keep_a_candidate_dropped_below_the_minimum_score() -> None:
+    """The score filter runs first, so a keeper was never eliminated by it."""
+    with pytest.raises(ValidationError, match="did not survive"):
+        _deduplicated_collection(
+            candidates=[],
+            rejected=[_too_weak(), _duplicate_of_the_selected()],
+            deduplication_events=[_event(kept_id="cand_000000000004", kept_score=10.0)],
+            counts=CandidateCounts(
+                proposed=2,
+                invalid=0,
+                below_min_score=1,
+                deduplicated=1,
+                not_in_top_n=0,
+                selected=0,
+            ),
+        )
+
+
+def test_an_event_cannot_keep_the_lower_scoring_candidate() -> None:
+    with pytest.raises(ValidationError, match="scored below"):
+        _deduplicated_collection(
+            candidates=[_validated(rank=1, total_score=70.0)],
+            deduplication_events=[_event(kept_score=70.0)],
+        )
+
+
+def test_a_tie_is_broken_by_the_earlier_candidate() -> None:
+    """Equal scores need a rule, or one input can produce two shortlists."""
+    late = _validated(id="cand_000000000002", boundary=_overlapping_boundary(), rank=1)
+    early = _validated(
+        id="cand_000000000001",
+        status=CandidateStatus.DEDUPLICATED,
+        rejection_reasons=[RejectionReason.DUPLICATE],
+    )
+
+    with pytest.raises(ValidationError, match="tie"):
+        _deduplicated_collection(
+            candidates=[late],
+            rejected=[early],
+            deduplication_events=[
+                _event(
+                    kept_id="cand_000000000002",
+                    dropped_id="cand_000000000001",
+                    kept_score=91.15,
+                    dropped_score=91.15,
+                )
+            ],
+        )
+
+
+def test_the_documented_tie_break_is_accepted() -> None:
+    """Same score: the earlier interval is kept, and the id settles a full tie."""
+    collection = _deduplicated_collection(
+        rejected=[_duplicate_of_the_selected(total_score=91.15)],
+        deduplication_events=[_event(dropped_score=91.15)],
+    )
+
+    assert collection.deduplication_events[0].kept_id == "cand_000000000001"
+
+
+def test_a_coherent_deduplication_is_accepted() -> None:
+    collection = _deduplicated_collection()
+
+    assert collection.counts.deduplicated == len(collection.deduplication_events)
+    assert collection.counts.deduplicated == 1
+    assert collection.rejected[0].status is CandidateStatus.DEDUPLICATED
+    assert collection.deduplication_events[0].iou == pytest.approx(0.8230088, abs=1e-6)

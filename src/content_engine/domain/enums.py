@@ -1,4 +1,5 @@
 from enum import StrEnum
+from types import MappingProxyType
 
 
 class RunStatus(StrEnum):
@@ -114,6 +115,44 @@ class RejectionReason(StrEnum):
     DUPLICATE = "duplicate"
     #: Survived every rule and was still cut by the max_candidates ceiling.
     NOT_IN_TOP_N = "not_in_top_n"
+
+
+#: Reasons CE-030 can reach. They are decided by looking at the proposal and the
+#: chunk alone, before any score exists, so a record citing one of these never
+#: got far enough to have an interval, a boundary or a total of its own.
+PRE_SCORING_REASONS: frozenset[RejectionReason] = frozenset(
+    {
+        RejectionReason.INVALID_INTERVAL,
+        RejectionReason.OUTSIDE_CHUNK,
+        RejectionReason.END_BEYOND_SOURCE,
+        RejectionReason.UNGROUNDED,
+        RejectionReason.TOO_SHORT,
+        RejectionReason.TOO_LONG,
+    }
+)
+
+#: The three outcomes that require a score to have been computed first, one per
+#: stage of the deterministic pipeline. Named individually because each is the
+#: only reason its stage can produce, and code that means "the duplicate one"
+#: should say so rather than index a set.
+BELOW_SCORE_REASON = RejectionReason.BELOW_MIN_SCORE
+DEDUPE_REASON = RejectionReason.DUPLICATE
+TOP_N_REASON = RejectionReason.NOT_IN_TOP_N
+
+POST_SCORING_REASONS: frozenset[RejectionReason] = frozenset(
+    {BELOW_SCORE_REASON, DEDUPE_REASON, TOP_N_REASON}
+)
+
+#: The reasons each terminal status may carry, and the whole of them. A status
+#: absent from this mapping carries no reason at all, which is why SUGGESTED is
+#: not a key. Kept here rather than in the models so that adding a rejection
+#: reason forces a decision about which phase and which status owns it.
+TERMINAL_REASONS: MappingProxyType[CandidateStatus, frozenset[RejectionReason]] = MappingProxyType(
+    {
+        CandidateStatus.REJECTED: frozenset({BELOW_SCORE_REASON, TOP_N_REASON}),
+        CandidateStatus.DEDUPLICATED: frozenset({DEDUPE_REASON}),
+    }
+)
 
 
 class BoundaryAnchor(StrEnum):
