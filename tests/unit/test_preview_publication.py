@@ -39,6 +39,7 @@ from content_engine.domain.preview_rules import (
 from content_engine.services import preview_service
 from content_engine.services.preview_service import (
     ROLLBACK_DIRNAME,
+    ROLLBACK_JOURNAL,
     STAGING_DIRNAME,
     PreviewPlan,
     PreviewService,
@@ -207,6 +208,49 @@ def fail_on_replace(nth: int) -> Callable[..., Any]:
         return real(self, target)
 
     return guarded
+
+
+def fail_on_restore(nth: int, *, persistent: bool = False) -> Callable[..., Any]:
+    """Refuse the nth move that takes a saved file back out of `.rollback`.
+
+    The restore is the last line of defence, so a failure here is the one that
+    decides whether a bad moment costs data or only costs an error message.
+    `persistent` keeps refusing, which is what a full disk or a revoked
+    permission looks like: the restore cannot be completed now or on the next
+    attempt, and the backup has to survive regardless.
+    """
+    real = Path.replace
+    calls = {"count": 0}
+
+    def guarded(self: Path, target: Any) -> Any:
+        # Moves *out of* the rollback directory only. The move-aside goes the
+        # other way, and write_json's atomic `.tmp` rename must not be counted.
+        if ROLLBACK_DIRNAME in str(self) and self.suffix != ".tmp":
+            calls["count"] += 1
+            if calls["count"] == nth or (persistent and calls["count"] >= nth):
+                raise OSError(f"synthetic restore failure on file {calls['count']}")
+        return real(self, target)
+
+    return guarded
+
+
+def recoverable(directory: Path) -> dict[str, bytes]:
+    """Every published file still reachable, wherever it currently lives.
+
+    A file counts as safe whether it is back in `previews/` or still held in
+    `.rollback`. That union is the real guarantee: publication may be left
+    incomplete by a failure it cannot undo, but nothing may be *lost*.
+    """
+    found: dict[str, bytes] = {}
+    rollback = directory.joinpath(ROLLBACK_DIRNAME)
+    if rollback.is_dir():
+        for path in sorted(rollback.iterdir()):
+            if path.is_file() and path.name != ROLLBACK_JOURNAL:
+                found[path.name] = path.read_bytes()
+    for path in sorted(directory.iterdir()):
+        if path.is_file():
+            found[path.name] = path.read_bytes()
+    return found
 
 
 def fail_on_move_aside(nth: int) -> Callable[..., Any]:
@@ -382,3 +426,178 @@ class TestPublicationIsAllOrNothing:
         assert verify_previews(
             directory, outcome.fingerprint, outcome.stage_config_sha256, smaller
         ).previews
+
+
+class TestFailuresDuringRestoration:
+    """When the undo itself fails, nothing may be lost.
+
+    The transaction can be defeated: a restore is a sequence of renames, and a
+    rename can fail for reasons that have nothing to do with this program --
+    a full disk, a revoked permission, a virus scanner holding a handle. What
+    the design owes in that case is not atomicity, which it cannot deliver, but
+    **durability**: every file of the previous set stays reachable in
+    `previews/` or in `previews/.rollback/`, the backup is never deleted while
+    incomplete, and a later invocation can finish the job deterministically.
+
+    The defect these tests were written against did the opposite. A failing
+    restore propagated out of `_publish`, and `generate`'s `finally` deleted
+    `.rollback` unconditionally -- so the one copy of the previous set was
+    removed on the way out and `previews/` was left empty.
+    """
+
+    def publication_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the placement fail, which is what triggers a restore at all."""
+        monkeypatch.setattr(preview_service, "write_json", fail_on_write(PREVIEW_INDEX_FILENAME))
+
+    @pytest.mark.parametrize(("position", "nth"), [("first", 1), ("middle", 3), ("last", 5)])
+    def test_a_failed_restore_loses_nothing(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+        position: str,
+        nth: int,
+    ) -> None:
+        directory, plan, _, _ = published
+        before = snapshot(directory)
+        assert len(before) == 5, before.keys()
+
+        self.publication_fails(monkeypatch)
+        monkeypatch.setattr(Path, "replace", fail_on_restore(nth))
+        engine = service("second")
+
+        with pytest.raises((RenderError, OSError)):
+            engine.generate(plan, directory, LATER)
+
+        assert recoverable(directory) | before == recoverable(directory), (
+            f"restoring the {position} file failed and the previous set was not "
+            "left wholly reachable"
+        )
+
+    @pytest.mark.parametrize("shortlist", ["same", "grown", "shrunk"])
+    def test_the_backup_survives_a_failed_restore(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+        source: Path,
+        shortlist: str,
+    ) -> None:
+        directory, plan, _, _ = published
+        before = snapshot(directory)
+        grown = four_candidates()
+        regenerate = {
+            "same": plan,
+            "grown": plan_for(source, grown),
+            "shrunk": shorter(plan),
+        }[shortlist]
+
+        self.publication_fails(monkeypatch)
+        monkeypatch.setattr(Path, "replace", fail_on_restore(2, persistent=True))
+        engine = service("second")
+
+        with pytest.raises((RenderError, OSError)):
+            engine.generate(regenerate, directory, LATER)
+
+        assert directory.joinpath(ROLLBACK_DIRNAME).is_dir(), "the backup was deleted"
+        assert recoverable(directory) | before == recoverable(directory)
+
+    def test_the_error_says_where_the_data_is(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An incomplete restore is only survivable if the operator is told."""
+        directory, plan, _, _ = published
+        self.publication_fails(monkeypatch)
+        monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
+        engine = service("second")
+
+        with pytest.raises(RenderError) as raised:
+            engine.generate(plan, directory, LATER)
+
+        message = str(raised.value)
+        assert ROLLBACK_DIRNAME in message
+        assert str(directory) in message
+
+    def test_a_transient_restore_failure_is_finished_by_the_next_run(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The next invocation resolves the pending rollback before generating."""
+        directory, plan, fingerprint, digest = published
+        before = snapshot(directory)
+
+        self.publication_fails(monkeypatch)
+        monkeypatch.setattr(Path, "replace", fail_on_restore(2))
+        with pytest.raises((RenderError, OSError)):
+            service("second").generate(plan, directory, LATER)
+
+        # The interesting assertion is this one. Without it the test passes over
+        # the defect: a run that destroyed the backup simply republishes a fresh
+        # set on the next attempt and looks like it recovered.
+        assert directory.joinpath(ROLLBACK_DIRNAME).is_dir(), "the backup was deleted"
+        assert recoverable(directory) | before == recoverable(directory)
+
+        monkeypatch.undo()
+        outcome = service("third").generate(plan, directory, LATER)
+        assert not directory.joinpath(ROLLBACK_DIRNAME).exists()
+        assert verify_previews(
+            directory, outcome.fingerprint, outcome.stage_config_sha256, plan
+        ).previews
+        del fingerprint, digest
+
+    def test_a_persistent_restore_failure_never_loses_the_backup(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Three attempts, each failing, and the previous set is still all there."""
+        directory, plan, _, _ = published
+        before = snapshot(directory)
+
+        self.publication_fails(monkeypatch)
+        monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
+
+        for _ in range(3):
+            with pytest.raises((RenderError, OSError)):
+                service("second").generate(plan, directory, LATER)
+            assert directory.joinpath(ROLLBACK_DIRNAME).is_dir()
+            assert recoverable(directory) | before == recoverable(directory)
+
+    def test_a_pending_rollback_is_not_destroyed_by_the_next_publication(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pending backup is the only copy of something. It is never overwritten."""
+        directory, plan, _, _ = published
+        before = snapshot(directory)
+
+        self.publication_fails(monkeypatch)
+        monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
+        with pytest.raises((RenderError, OSError)):
+            service("second").generate(plan, directory, LATER)
+        pending = snapshot(directory.joinpath(ROLLBACK_DIRNAME))
+        assert pending, "the failed restore should have left a backup"
+
+        # The next attempt still cannot restore, and must not silently discard
+        # what it cannot put back.
+        with pytest.raises((RenderError, OSError)):
+            service("third").generate(plan, directory, LATER)
+        assert recoverable(directory) | before == recoverable(directory)
+
+    def test_a_rollback_with_no_journal_is_refused_untouched(
+        self,
+        published: tuple[Path, PreviewPlan, str, str],
+    ) -> None:
+        """An unreadable backup cannot be resolved deterministically, so it is left."""
+        directory, plan, _, _ = published
+        rollback = directory.joinpath(ROLLBACK_DIRNAME)
+        rollback.mkdir()
+        rollback.joinpath("candidate_cand_unknown.mp4").write_bytes(b"from an older build")
+        stranded = snapshot(rollback)
+
+        with pytest.raises(RenderError, match=ROLLBACK_DIRNAME):
+            service("second").generate(plan, directory, LATER)
+
+        assert snapshot(rollback) == stranded

@@ -71,6 +71,12 @@ STAGING_DIRNAME = ".staging"
 #: cannot fail for want of space at the moment things have already gone wrong.
 ROLLBACK_DIRNAME = ".rollback"
 
+#: The record inside a pending backup that says how far publication had got.
+#: Without it a later invocation cannot know whether the previews directory
+#: holds old files not yet moved aside or new ones already placed, and those
+#: two states need opposite undo steps.
+ROLLBACK_JOURNAL = "rollback.json"
+
 #: Written in this order, and the order matters: the file the reuse check looks
 #: for first is written last, so an interrupted run cannot leave a directory
 #: that looks complete.
