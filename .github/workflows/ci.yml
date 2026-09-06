@@ -1,0 +1,82 @@
+name: CI
+
+# The same commands CLAUDE.md requires locally, on Ubuntu, so a change that only
+# works on Windows fails here rather than after a merge.
+#
+# No secrets, no AI provider and no network fixtures: faster-whisper is not
+# installed, the integration tests synthesise their media locally with lavfi, and
+# nothing downloads a video. yt-dlp stays outside the core.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify on Ubuntu
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git diff --check needs a merge base, which a shallow clone lacks.
+          fetch-depth: 0
+
+      - name: Install FFmpeg and ffprobe
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync from the lockfile
+        run: uv sync --frozen --group dev
+
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy src
+
+      - name: Tests with the coverage gate
+        run: uv run pytest
+
+      # --no-cov is required. --cov-fail-under=80 measures whatever selection
+      # pytest was given, and 13 integration tests cover about 68% of the package
+      # on their own, so the focused run would fail on coverage even when every
+      # test passes. The gate stays intact for the full suite above.
+      - name: Integration tests with real FFmpeg
+        run: uv run pytest -m integration --no-cov
+
+      - name: Build the wheel and sdist
+        run: uv build
+
+      - name: Whitespace check on the diff
+        env:
+          BASE: ${{ github.event.pull_request.base.ref || 'main' }}
+        run: git diff --check "origin/$BASE...HEAD"
+
+      - name: The working tree must be clean after every step
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)"
