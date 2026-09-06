@@ -35,6 +35,7 @@ from content_engine.domain.exceptions import (
     EXIT_INVALID_INPUT,
     EXIT_SUCCESS,
     AnalysisError,
+    ConfigurationError,
 )
 from content_engine.ports.analyzer import AnalysisContext, CandidateBatch
 from content_engine.services.analysis_service import ARTIFACT_FILENAMES
@@ -385,3 +386,20 @@ def test_an_unknown_run_is_refused_before_any_provider_is_built(
     result = runner.invoke(cli.app, ["analyze", "20260101T000000-nope-abcdef"])
 
     assert result.exit_code == EXIT_INVALID_INPUT
+
+
+def test_a_provider_with_no_adapter_is_refused_by_name(settings: Any) -> None:
+    """Defensive: unreachable while AnalysisProvider has a single member.
+
+    Written as its own branch rather than as an `else` on the Gemini check so
+    that adding a provider to the enum without an adapter fails here, naming
+    the provider, instead of silently being treated as Gemini and calling the
+    wrong API with the wrong prompt.
+    """
+    settings.analysis.provider = "openai"
+
+    with pytest.raises(ConfigurationError) as caught:
+        cli._build_analyzer(settings, None)
+
+    assert "openai" in str(caught.value)
+    assert "--fixture" in str(caught.value)

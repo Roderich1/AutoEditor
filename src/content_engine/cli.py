@@ -14,16 +14,18 @@ from content_engine.adapters.analysis.fixture_analyzer import (
     load_fixture,
     require_fixture_covers,
 )
+from content_engine.adapters.analysis.gemini_analyzer import build_gemini_analyzer
 from content_engine.adapters.media.ffmpeg import FFmpegAdapter
 from content_engine.adapters.media.ffprobe import FFprobeAdapter
 from content_engine.adapters.persistence.filesystem import RunWorkspace
 from content_engine.adapters.transcription.faster_whisper import FasterWhisperTranscriber
 from content_engine.config import Settings, config_sha256, load_settings
 from content_engine.domain.candidates import CANDIDATES_SCHEMA_VERSION, CandidateCollection
-from content_engine.domain.enums import RunStage, RunStatus
+from content_engine.domain.enums import AnalysisProvider, RunStage, RunStatus
 from content_engine.domain.exceptions import (
     EXIT_CONFIGURATION,
     EXIT_UNKNOWN,
+    ConfigurationError,
     ContentEngineError,
     IncompatibleArtifactError,
     InvalidMediaError,
@@ -35,6 +37,7 @@ from content_engine.domain.models import (
 )
 from content_engine.domain.run_state import validate_transition
 from content_engine.domain.transcript_rules import stage_config, transcription_fingerprint
+from content_engine.ports.analyzer import ContentAnalyzerPort
 from content_engine.services.analysis_service import (
     CANDIDATES_FILENAME,
     AnalysisPlan,
@@ -276,18 +279,23 @@ def transcribe(
 def analyze(
     run_id: Annotated[str, typer.Argument(help="Existing run identifier")],
     fixture: Annotated[
-        Path,
-        typer.Option("--fixture", help="Recorded analyzer answers to replay"),
-    ],
+        Path | None,
+        typer.Option("--fixture", help="Replay recorded answers instead of calling a provider"),
+    ] = None,
     config: ConfigOption = None,
     force: Annotated[bool, typer.Option("--force", help="Replace existing candidates")] = False,
 ) -> None:
-    """Turn a transcript into a ranked candidate list, replaying a fixture.
+    """Turn a transcript into a ranked candidate list.
 
-    No provider is called and no credential is read. ``--fixture`` is required
-    in this build for exactly that reason: the deterministic pipeline is
-    finished, the Gemini adapter is not, and a command that silently produced
-    nothing without one would be dishonest about which half exists.
+    With ``--fixture`` the recorded answers in that file are replayed: no
+    provider is called, no credential is read and no network is touched. Without
+    it, ``analysis.provider`` decides, and for Gemini that means a real call per
+    chunk against a real key.
+
+    Which of the two ran is never inferred later. The analyzer names itself in
+    the manifest and in the stage configuration, and because the stage
+    configuration digest is what reuse compares, artifacts produced one way are
+    never reused by the other.
     """
 
     def action() -> str:
@@ -304,9 +312,12 @@ def analyze(
         transcript = read_transcript(run_path.joinpath("transcript"))
         _warn_about_configuration_drift(manifest, config_sha256(settings))
 
-        analyzer = FixtureAnalyzer(load_fixture(fixture))
+        # Built before anything is read back, so a machine that cannot run this
+        # stage at all says so before a single artifact is opened.
+        analyzer = _build_analyzer(settings, fixture)
         plan = plan_analysis(transcript, settings, analyzer.identity)
-        require_fixture_covers(analyzer, [chunk.id for chunk in plan.chunks.chunks])
+        if isinstance(analyzer, FixtureAnalyzer):
+            require_fixture_covers(analyzer, [chunk.id for chunk in plan.chunks.chunks])
 
         analysis_directory = run_path.joinpath("analysis")
         # Whether this stage has run is a question for the manifest, not for the
@@ -391,6 +402,29 @@ def analyze(
         )
 
     _execute(action)
+
+
+def _build_analyzer(settings: Settings, fixture: Path | None) -> ContentAnalyzerPort:
+    """Choose the executor: a recorded file, or the configured provider.
+
+    ``--fixture`` wins over the configuration on purpose. It is the explicit
+    instruction on the command line, and the configuration naming Gemini is the
+    default state of every profile in the repository; a run asked to replay must
+    not consult a credential, so the branch is taken before anything reads the
+    environment.
+    """
+    if fixture is not None:
+        return FixtureAnalyzer(load_fixture(fixture))
+    if settings.analysis.provider is AnalysisProvider.GEMINI:
+        return build_gemini_analyzer(settings)
+    # Unreachable while AnalysisProvider has one member, and deliberately not
+    # written as an else on the branch above: a provider added to the enum
+    # without an adapter must fail here by name rather than silently become
+    # Gemini.
+    raise ConfigurationError(
+        f"analysis.provider is {settings.analysis.provider}, which this build has no "
+        "adapter for. Use --fixture to replay recorded answers instead."
+    )
 
 
 def _refuse_or_reuse_analysis(
