@@ -33,6 +33,10 @@ SOURCE_ROOT = Path(__file__).resolve().parents[2].joinpath("src", "content_engin
 #: exists, which is exactly what this pull request claims.
 PROVIDER_MODULES = ("openai", "google", "google.genai", "anthropic")
 
+#: The single file permitted to import a provider SDK. ADR-019 puts Google's
+#: types behind the adapter boundary; this is that boundary, by name.
+SDK_OWNER = "gemini_analyzer.py"
+
 
 def _chunk() -> TranscriptChunk:
     segment = TranscriptSegment(index=0, start=0.0, end=30.0, text="hola", words=[])
@@ -148,14 +152,20 @@ def test_the_port_module_imports_no_provider_sdk() -> None:
     assert not imported & {module.split(".")[0] for module in PROVIDER_MODULES}
 
 
-def test_no_module_in_the_package_imports_a_provider_sdk_yet() -> None:
-    """This pull request adds no adapter, no SDK and no external call.
+def test_only_the_gemini_adapter_imports_a_provider_sdk() -> None:
+    """The SDK exists now, and exactly one file in the package may see it.
 
-    When one arrives it may import a provider only under adapters/analysis/,
-    and this test is where that boundary gets enforced.
+    This was "no module imports a provider" for as long as there was no
+    adapter. The boundary it was protecting never changed: the domain, the
+    ports, the services and the CLI describe candidates in their own types, and
+    a provider import anywhere among them is what would make swapping providers
+    a rewrite instead of an experiment. So the assertion narrows to a single
+    named file rather than disappearing.
     """
     offenders: list[str] = []
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        if path.name == SDK_OWNER:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             names: list[str] = []
@@ -168,6 +178,19 @@ def test_no_module_in_the_package_imports_a_provider_sdk_yet() -> None:
                     offenders.append(f"{path.name}:{node.lineno} imports {name}")
 
     assert offenders == []
+
+
+def test_the_one_file_allowed_to_import_the_sdk_still_exists() -> None:
+    """Otherwise the exemption above would silently protect nothing.
+
+    A rename would make the skip match no file, every real import would move
+    somewhere unexamined, and the suite would stay green while the boundary was
+    gone.
+    """
+    owner = SOURCE_ROOT.joinpath("adapters", "analysis", SDK_OWNER)
+
+    assert owner.is_file()
+    assert "google" in owner.read_text(encoding="utf-8")
 
 
 def test_the_analysis_context_carries_the_prompt_identity() -> None:

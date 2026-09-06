@@ -8,13 +8,18 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from content_engine.config import Settings, config_sources
+from content_engine.config import (
+    ANALYSIS_CREDENTIAL_ENV_VAR,
+    ANALYSIS_MODEL_PLACEHOLDER,
+    Settings,
+    config_sources,
+)
 from content_engine.domain.exceptions import ContentEngineError
 from content_engine.utils.subprocess import run_command
 
-ANALYSIS_MODEL_PLACEHOLDER = "SET_MODEL_HERE"
-#: ADR-019. Presence is checked; the value is never read, printed or stored.
-ANALYSIS_CREDENTIAL_ENV_VAR = "GEMINI_API_KEY"
+#: Re-exported: both names were defined here before the Gemini adapter needed
+#: them too, and an adapter importing a service would invert the layering.
+__all__ = ["ANALYSIS_CREDENTIAL_ENV_VAR", "ANALYSIS_MODEL_PLACEHOLDER", "Check", "DoctorService"]
 
 
 @dataclass(frozen=True)

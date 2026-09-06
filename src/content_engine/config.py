@@ -24,6 +24,13 @@ DEFAULT_CONFIG_RESOURCE = "default.toml"
 WORKSPACE_ENV_VAR = "CONTENT_ENGINE_WORKSPACE"
 ANALYSIS_MODEL_ENV_VAR = "CONTENT_ENGINE_ANALYSIS_MODEL"
 
+#: ADR-019. Presence is checked; the value is read only where it is handed to
+#: the SDK, and on a provider failure to redact it from the message.
+ANALYSIS_CREDENTIAL_ENV_VAR = "GEMINI_API_KEY"
+#: A configured model that names nothing. Both the doctor and the Gemini adapter
+#: refuse it, so it lives here rather than in either of them.
+ANALYSIS_MODEL_PLACEHOLDER = "SET_MODEL_HERE"
+
 #: Fields describing where this machine stores things rather than what the run
 #: computes. They are written to config.effective.json but excluded from
 #: config_sha256 so the same logical experiment hashes identically anywhere.

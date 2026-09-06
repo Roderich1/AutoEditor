@@ -326,10 +326,19 @@ def test_a_run_with_no_chunks_needs_no_answers() -> None:
 # --- what this adapter never does --------------------------------------------
 
 
-def test_no_module_under_analysis_imports_a_provider_sdk() -> None:
+def test_no_module_but_the_gemini_adapter_reaches_the_network() -> None:
+    """One file may talk to a provider. Nothing else may reach a socket at all.
+
+    `httpx`, `requests` and `socket` are in the forbidden set beside the SDKs
+    because the risk is a network call, not a particular vendor: an adapter that
+    reached the internet through a bare HTTP client would satisfy a rule about
+    provider SDKs and break the thing that rule exists for.
+    """
     forbidden = {"openai", "google", "anthropic", "yt_dlp", "requests", "httpx", "socket"}
     offenders: list[str] = []
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        if path.name == "gemini_analyzer.py":
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             names: list[str] = []

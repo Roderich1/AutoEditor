@@ -20,13 +20,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+
 from content_engine.adapters.analysis.gemini_analyzer import (
     ANALYZER_NAME,
     MAX_ATTEMPTS,
     GeminiContentAnalyzer,
     build_gemini_analyzer,
 )
-
 from content_engine.adapters.analysis.prompt import PROMPT_SHA256, PROMPT_TEXT, PROMPT_VERSION
 from content_engine.config import ChunkingSettings, Settings
 from content_engine.domain.candidates import TranscriptChunk
@@ -528,3 +528,89 @@ def _parameters(contents: Any) -> dict[str, Any]:
         if isinstance(payload, dict) and "run_target_candidates" in payload:
             return payload
     raise AssertionError("no request parameter block was sent")
+
+
+def test_building_the_analyzer_hands_the_credential_to_the_sdk_and_keeps_it_there(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one legitimate use of the variable, and the end of its travels."""
+    from google import genai
+
+    captured: dict[str, Any] = {}
+
+    class RecordingClient:
+        def __init__(self, *, api_key: str) -> None:
+            captured["api_key"] = api_key
+
+    monkeypatch.setenv("GEMINI_API_KEY", SECRET)
+    monkeypatch.setattr(genai, "Client", RecordingClient)
+
+    analyzer = build_gemini_analyzer(settings)
+
+    assert captured["api_key"] == SECRET
+    assert analyzer.model == settings.analysis.model
+    assert analyzer.identity.analyzer == ANALYZER_NAME
+    assert analyzer.identity.fixture_sha256 is None
+    # Not kept anywhere a later reader could reach it.
+    assert SECRET not in repr(vars(analyzer))
+
+
+def test_an_unrecognised_failure_is_not_retried(
+    chunk: TranscriptChunk, context: AnalysisContext
+) -> None:
+    """Only failures known to be transient are worth a second call."""
+    client = FakeClient(models=FakeModels(outcomes=[ValueError("something else entirely")]))
+    with pytest.raises(AnalysisError) as caught:
+        analyzer_for(client).find_candidates(chunk, context)
+    assert len(client.models.requests) == 1
+    assert "ValueError" in str(caught.value)
+
+
+def test_an_exhausted_timeout_says_the_request_did_not_complete(
+    chunk: TranscriptChunk, context: AnalysisContext
+) -> None:
+    import httpx
+
+    client = FakeClient(models=FakeModels(outcomes=[httpx.ConnectTimeout("no route")]))
+    with pytest.raises(AnalysisError) as caught:
+        analyzer_for(client).find_candidates(chunk, context)
+    message = str(caught.value)
+    assert "did not complete" in message
+    assert f"{MAX_ATTEMPTS} attempts" in message
+
+
+def test_a_candidate_with_no_finish_reason_is_accepted(
+    chunk: TranscriptChunk, context: AnalysisContext
+) -> None:
+    """Absence is not a refusal; there is simply nothing to check."""
+    client = client_returning(
+        FakeResponse(text=answer(proposal()), candidates=[FakeCandidate(finish_reason=None)])
+    )
+    assert len(analyzer_for(client).find_candidates(chunk, context).candidates) == 1
+
+
+def test_a_very_long_provider_message_is_truncated(
+    chunk: TranscriptChunk, context: AnalysisContext
+) -> None:
+    """An unbounded echo is the shape a leak takes even without a credential."""
+    from google.genai import errors
+
+    noisy = errors.ClientError(
+        400, {"error": {"message": "detalle " * 200, "status": "INVALID_ARGUMENT"}}
+    )
+    client = FakeClient(models=FakeModels(outcomes=[noisy]))
+    with pytest.raises(AnalysisError) as caught:
+        analyzer_for(client).find_candidates(chunk, context)
+    assert "..." in str(caught.value)
+    assert len(str(caught.value)) < 600
+
+
+def test_token_usage_is_counted_so_a_run_can_report_what_it_spent(
+    chunk: TranscriptChunk, context: AnalysisContext
+) -> None:
+    client = client_returning(FakeResponse(text=answer()))
+    analyzer = analyzer_for(client)
+    analyzer.find_candidates(chunk, context)
+    assert analyzer.calls == 1
+    assert analyzer.prompt_tokens == 1200
+    assert analyzer.response_tokens == 300

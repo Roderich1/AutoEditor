@@ -18,6 +18,8 @@ import hashlib
 import re
 
 import pytest
+
+from content_engine.adapters.analysis import prompt as module
 from content_engine.adapters.analysis.prompt import (
     PROMPT_IDENTITY,
     PROMPT_SHA256,
@@ -26,8 +28,8 @@ from content_engine.adapters.analysis.prompt import (
     load_prompt_text,
     prompt_digest,
 )
-
 from content_engine.domain.enums import ClipCategory
+from content_engine.domain.exceptions import EXIT_CONFIGURATION, ConfigurationError
 
 SCORE_WEIGHTS = {
     "hook": "25",
@@ -139,3 +141,37 @@ def test_timestamps_must_be_grounded_in_the_chunk() -> None:
     lowered = PROMPT_TEXT.lower()
     assert "timestamp" in lowered
     assert "chunk" in lowered
+
+
+def test_an_unreadable_prompt_resource_is_a_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken installation, not a provider failure: exit 2, and say so."""
+
+    class Broken:
+        def joinpath(self, *parts: str) -> Broken:
+            return self
+
+        def read_bytes(self) -> bytes:
+            raise OSError("the resource is not there")
+
+    monkeypatch.setattr(module.resources, "files", lambda package: Broken())
+    with pytest.raises(ConfigurationError) as caught:
+        module.load_prompt_text()
+    assert caught.value.exit_code == EXIT_CONFIGURATION
+    assert "incomplete" in str(caught.value)
+
+
+def test_a_prompt_that_is_not_utf8_is_a_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Mojibake:
+        def joinpath(self, *parts: str) -> Mojibake:
+            return self
+
+        def read_bytes(self) -> bytes:
+            return b"\xff\xfe not text at all \xff"
+
+    monkeypatch.setattr(module.resources, "files", lambda package: Mojibake())
+    with pytest.raises(ConfigurationError, match="UTF-8"):
+        module.load_prompt_text()

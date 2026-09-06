@@ -98,8 +98,7 @@ def parse_provider_response(text: str) -> tuple[RawCandidate, ...]:
     """
     if not text.strip():
         raise AnalysisError(
-            "The provider returned an empty response. Nothing was proposed and no "
-            "reason was given."
+            "The provider returned an empty response. Nothing was proposed and no reason was given."
         )
     try:
         payload = json.loads(text)
