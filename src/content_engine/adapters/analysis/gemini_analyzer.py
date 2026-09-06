@@ -207,10 +207,12 @@ class GeminiContentAnalyzer:
         self.calls = 0
         self.prompt_tokens = 0
         self.response_tokens = 0
-        #: Every distinct `model_version` the provider reported, for the report
-        #: at the end of a run. Diagnostics only: it is not persisted, because
-        #: no artifact schema should grow a field before a real response has
-        #: been seen to populate it. See ADR-027.
+        #: Every distinct `model_version` the provider reported. Diagnostics
+        #: only: printed by the opt-in live test in `tests/ai/`, and reaching no
+        #: artifact, no manifest and no command output. Nothing persists it,
+        #: because no schema should grow a field before a real response has been
+        #: seen to populate one -- and nothing reports it from `analyze`,
+        #: because plumbing a value nobody has observed is a guess. See ADR-027.
         self.reported_models: set[str] = set()
 
     @property

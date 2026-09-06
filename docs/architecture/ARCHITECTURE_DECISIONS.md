@@ -1192,8 +1192,15 @@ claim is not evidence of a mismatch.
 
   No schema was widened to hold a resolved model, because widening one requires
   knowing what a real response contains, and this branch does not. The reported
-  values are collected on the analyzer for the end-of-run report only. If a live
-  run shows the provider naming a specific revision, adding `model_resolved`
-  beside `model` is a schema bump with evidence behind it; until then, a run
-  records the model it asked for and this consequence says so plainly rather
-  than letting "the exact model" be assumed.
+  values are collected on the analyzer as `reported_models` and surfaced in
+  exactly one place: the diagnostics printed by the opt-in live test in
+  `tests/ai/`. They do **not** reach `analyze`'s output, the manifest or any
+  artifact, and this consequence previously implied an "end-of-run report" that
+  does not exist. Surfacing a value nobody has ever observed would be plumbing
+  built on a guess; the opt-in test is where a first observation will appear.
+
+  If a live run shows the provider naming a specific revision, adding
+  `model_resolved` beside `model` -- and reporting it from the command -- is a
+  schema bump with evidence behind it. Until then a run records the model it
+  asked for, and this says so plainly rather than letting "the exact model" be
+  assumed.

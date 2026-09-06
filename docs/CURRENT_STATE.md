@@ -25,7 +25,7 @@ Python 3.12.10, FFmpeg 9.0.1:
 | `uv run ruff check .` | passed |
 | `uv run ruff format --check .` | passed, 94 files |
 | `uv run mypy src` | passed, 43 files, strict |
-| `uv run pytest` | 1246 passed, 1 skipped, 160 more than the 1086 on `main` |
+| `uv run pytest` | 1252 passed, 1 skipped, 166 more than the 1086 on `main` |
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
@@ -78,7 +78,7 @@ Coverage:
 
 | Scope | Coverage |
 |---|---|
-| Total | 99.45% (2373 statements, 13 missed) |
+| Total | 99.45% (2384 statements, 13 missed) |
 | Domain | 100% |
 | Services | 100% |
 | Adapters | 100% except the faster-whisper decode loop |
