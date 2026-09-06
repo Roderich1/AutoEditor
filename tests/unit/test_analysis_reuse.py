@@ -24,6 +24,7 @@ from content_engine.adapters.analysis.fixture_analyzer import (
     FixtureBatch,
 )
 from content_engine.config import Settings
+from content_engine.domain.analysis_rules import coherence_problem
 from content_engine.domain.candidates import (
     RawCandidateBatch,
     RawCandidateCollection,
@@ -407,3 +408,93 @@ def test_the_service_refuses_to_write_artifacts_that_disagree(
         service.analyze(plan, directory, GENERATED_AT)
 
     assert not directory.exists() or list(directory.iterdir()) == []
+
+
+# --- one chunking rules version across all four ------------------------------
+
+
+def _coherence(outcome, **overrides):
+    """Call the coherence check directly, with one artifact swapped.
+
+    Some of these disagreements cannot be reached by editing a file: changing
+    the stage configuration on disk breaks its digest first, so the refusal that
+    fires is not the one under test. Testing the check itself is the honest
+    level for those.
+    """
+    parts = {
+        "transcript_sha256": outcome.chunks.transcript_sha256,
+        "chunks": outcome.chunks,
+        "raw": outcome.raw,
+        "collection": outcome.collection,
+        "config": outcome.stage_config,
+    }
+    parts.update(overrides)
+    return coherence_problem(
+        parts["transcript_sha256"],
+        parts["chunks"],
+        parts["raw"],
+        parts["collection"],
+        parts["config"],
+    )
+
+
+def test_a_coherent_set_of_artifacts_reports_no_problem(stage) -> None:
+    assert _coherence(stage[1]) is None
+
+
+def test_the_raw_collection_must_name_the_chunking_rules_the_chunks_used(stage) -> None:
+    """All four artifacts declare it, so all four have to agree. Comparing only
+    two of them left the other two free to claim the windows were cut by rules
+    that produced something else."""
+    outcome = stage[1]
+    tampered = outcome.raw.model_copy(update={"rules_version": 99})
+
+    problem = _coherence(outcome, raw=tampered)
+
+    assert problem is not None
+    assert "chunking rules" in problem
+
+
+def test_the_stage_configuration_must_name_the_chunking_rules_the_chunks_used(
+    stage,
+) -> None:
+    outcome = stage[1]
+    tampered = outcome.stage_config.model_copy(update={"chunking_rules_version": 99})
+
+    problem = _coherence(outcome, config=tampered)
+
+    assert problem is not None
+    assert "chunking rules" in problem
+
+
+def test_the_candidates_must_name_the_chunking_rules_the_chunks_used(stage) -> None:
+    outcome = stage[1]
+    tampered = outcome.collection.model_copy(update={"rules_version": 99})
+
+    problem = _coherence(outcome, collection=tampered)
+
+    assert problem is not None
+    assert "chunking rules" in problem
+
+
+def test_the_chunks_must_name_the_rules_every_other_artifact_records(stage) -> None:
+    outcome = stage[1]
+    tampered = outcome.chunks.model_copy(update={"rules_version": 99})
+
+    problem = _coherence(outcome, chunks=tampered)
+
+    assert problem is not None
+    assert "chunking rules" in problem
+
+
+def test_an_edited_raw_rules_version_is_refused_on_disk(stage) -> None:
+    """Reachable through a file: the coherence check runs before the fingerprint,
+    so this is refused for saying the wrong thing rather than for having been
+    touched at all."""
+    directory = stage[0]
+    _edit(
+        directory.joinpath(RAW_CANDIDATES_FILENAME),
+        lambda payload: payload.update({"rules_version": 99}),
+    )
+
+    _assert_refused(stage, match="chunking rules")
