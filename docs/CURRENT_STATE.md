@@ -8,26 +8,98 @@
   `#3 Stabilize Content Engine V0.1-V0.3` (merge commit `d047479`),
   `#4 Candidate engine foundation` (merge commit `70fb6ed`),
   `#5 Candidate engine deterministic pipeline` (merge commit `1b15e0f`),
-  `#6 Candidate engine provider` (merge commit `5570531`)
-- Active branch: `feat/human-evaluation`, based on `5570531`
+  `#6 Candidate engine provider` (merge commit `5570531`),
+  `#7 Human evaluation` (merge commit `1609bc1`)
+- Active branch: `feat/final-render`, based on `1609bc1`
 - Current package version: `0.1.0`
 
 ## Verification baseline
 
-`main` at `5570531` was reproduced before this branch started: ruff, ruff
-format (94 files), mypy strict (43 files), 1252 tests at 99.45% over 2384
-statements with 13 missed, 13 integration tests and `uv build`, all green. That
-is the baseline this branch is measured against.
+`main` at `1609bc1` was reproduced before this branch started: ruff,
+ruff format (111 files), mypy strict (50 files), 1765 tests at 99.61% over
+**3313** statements with 13 missed, 22 integration tests and `uv build`, all
+green. That is the baseline this branch is measured against.
 
-Last verification, on `feat/human-evaluation`, Windows 11, Python 3.12.10,
+The statement count is 3313. The previous edition of this file recorded 3314,
+which was simply wrong — it never matched any measured run — and is corrected
+here rather than left as a number that would make the next comparison
+meaningless.
+
+Last verification, on `feat/final-render`, Windows 11, Python 3.12.10,
 FFmpeg 9.0.1:
 
 | Check | Result |
 |---|---|
-| `uv run ruff check .` | passed |
-| `uv run ruff format --check .` | passed, 111 files |
-| `uv run mypy src` | passed, 50 files, strict |
-| `uv run pytest` | 1765 passed, 1 skipped, 513 more than the 1252 on `main`; 99.61% over 3314 statements, 13 missed — the same 13 `main` already had |
+| `uv run ruff check --no-cache .` | passed |
+| `uv run ruff format --check .` | passed, 130 files |
+| `uv run mypy --no-incremental src` | passed, 58 files, strict |
+| `uv run pytest -p no:cacheprovider` | 2298 passed, 1 skipped, 533 more than the 1765 on `main`; 99.70% over 4336 statements, 13 missed — the same 13 `main` already had. Before the two review defects were fixed this branch stood at 2240 tests over 4298 statements |
+| The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
+| `uv run pytest -m integration --no-cov` | 50 passed with real FFmpeg; 28 of them are the new render pipeline, 4 of those under a directory named `codex it's ñ` |
+| Coverage of every module added by CE-040–CE-046 | 100% |
+| `uv run pytest` from a working directory outside the repository | passed, no stray files |
+| Re-run with every cache disabled | `ruff --no-cache`, `mypy --no-incremental`, `pytest -p no:cacheprovider`: all green |
+| GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
+| Non-finite numbers refused | 142 parametrised cases for `nan`, `inf`, `-inf`, up from 88 |
+| Every material field of `metadata.json` mutated in turn | 33 cases, plus a whitespace-only change; every one stops reuse |
+| A path holding an apostrophe, a space and `ñ` | FFmpeg really opens the ASS and libass really draws it, asserted against the binary |
+| `uv build` | wheel and sdist built |
+| SonarCloud quality gate | passes; all five conditions green, **0 open issues** on the new code |
+| GitHub Actions "Verify on Ubuntu" | passes |
+
+### From the installed wheel
+
+Python 3.12.10 in a clean venv, 38 packages, working directory
+`…\pruebas de ñandú` outside the repository, no `GEMINI_API_KEY` in the
+environment.
+
+| Check | Result |
+|---|---|
+| `render` on the real run | exit 3, "This run is READY_FOR_REVIEW…", `clips/` untouched, manifest byte-identical, no failure recorded |
+| Three clips on synthetic 640x360 media | 12.4 s, all 1080x1920, SAR 1:1, h264/aac, duration drift **0.000 s**, 9.0 MB total |
+| Subtitles | 5 cues per clip; SRT and ASS agree text for text; every event inside `[0, duration]` |
+| Second call | verified byte-identical in 0.00 s, no encoder invoked, no `.staging` or `.rollback` left |
+| A/B render differing only in `burn_subtitles` | **149,625 differing pixels** in the caption band and a 24% larger file, so the caption really is drawn rather than merely accepted by the filter |
+
+The A/B is the check worth having. FFmpeg fails the whole graph when `ass=`
+cannot open its file, so a clip that exists proves the escaped path resolved —
+but it does not prove libass *drew* anything, and an unresolvable font or a
+margin off the frame would leave a clean video and a zero exit code.
+
+### What the render stage adds, asserted
+
+| Check | Result |
+|---|---|
+| One clip directory per kept decision, four artifacts in each | asserted from the service, the CLI and against real FFmpeg |
+| A rejected decision | produces no directory, no clip and no subtitle file; refused by `ClipRecord` as well as filtered by `build_render_target` |
+| A review that kept nothing | reaches RENDERED with an empty index and a real fingerprint; ADR-034 |
+| Clips read back independently with ffprobe | h264, aac, 1080x1920, SAR 1:1, no third stream, duration within 1.0 s |
+| Both presets, on wide, already-vertical and 641x361 sources | 1080x1920 with square pixels in every case |
+| `burn_subtitles` true and false | the `ass` filter is present or absent accordingly, and the sidecar files are written either way |
+| The ASS path inside the filter graph | escaped at both libavfilter levels; asserted on Windows and POSIX paths with spaces, accents, a drive colon, a quote and every graph separator |
+| Subtitle documents parsed back before a clip is published | ordered, inside `[0, duration]`, UTF-8 without BOM, LF only |
+| A transcript with no word timestamps | refused, naming `transcription.word_timestamps`; ADR-032 |
+| An interval with no speech in it | empty SRT, header-only ASS, `cue_count` 0 — not a failure |
+| A deleted, truncated, tampered or renamed artifact | refuses reuse and names `--force`; asserted for the MP4, the SRT and the ASS |
+| A clip directory from an earlier shortlist | refused as not in the index |
+| An edited `metadata.json` | refused twice over: its digest is in the index, and the two are still compared field by field |
+| An extra file inside a clip directory | refused; a clip directory holds exactly its four artifacts |
+| The ASS path | never in the filtergraph. FFmpeg runs in the clip's directory and resolves a bare basename (ADR-035) |
+| An edited `decisions.json` | refused: the review fingerprint is rebuilt from the file rather than read out of the manifest |
+| Clip publication failing at each step, shortlist same, grown and shrunk | the previous set stays byte-identical and still passes `verify_clips` |
+| Failure of the restore itself | every artifact stays reachable in `clips/` or `clips/.rollback/`, the backup is never deleted, and the error names the directory |
+| A restore interrupted and resumed, at each position, twice over | nothing lost at any step, complete at the end |
+| A pending backup a later invocation cannot interpret | left exactly as it was, and the run is recorded as FAILED_RENDER |
+| A second `render` with no changes | reuse; no FFmpeg call, no byte rewritten, the manifest untouched |
+| Reuse with `GEMINI_API_KEY` removed | unchanged; the variable is never read on any render path |
+| Upstream artifacts after a render | `analysis/`, `previews/`, `review/` and `transcript/` byte-identical |
+| Credential or credential name under a rendered run directory | none; searched recursively as bytes |
+| Third-party imports in the eight new modules | `pydantic` only; no network client, no provider SDK, no yt-dlp, and no module reads the environment |
+
+### What earlier milestones established, and the suite still asserts
+
+| Check | Result |
+|---|---|
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | `uv run pytest` at `COLUMNS=40` and `COLUMNS=200` | passed at both; no assertion depends on the console width |
@@ -431,7 +503,7 @@ and schema version. `manifest.stages["analysis"]` records the fingerprint, the
 digest of that file, the schema version and the completion time, exactly as the
 transcription stage does.
 
-### V0.5 Human Evaluation — CE-034 to CE-039, on `feat/human-evaluation`
+### V0.5 Human Evaluation — CE-034 to CE-039, merged in `1609bc1` (PR #7)
 
 Previews and human review, in `domain/previews.py`, `domain/preview_rules.py`,
 `domain/review.py`, `ports/preview.py`, `adapters/media/preview.py`,
@@ -484,10 +556,128 @@ single backwards transition in the state machine.
   set produced under other dimensions, other preview rules, another analysis or
   another source. Verification writes nothing, and a refusal names `--force`.
 
-- **What is deliberately not here.** No SRT or ASS, no final render, no
+- **What was deliberately not there.** No SRT or ASS, no final render, no
   `vertical_blur` or `vertical_crop`, no CE-040 and beyond, no second Gemini
   call, no prompt change and no scoring change. `preview` and `review` never
-  read `GEMINI_API_KEY` and open no socket.
+  read `GEMINI_API_KEY` and open no socket. CE-040 to CE-046 are the subject of
+  this branch.
+
+### V0.6 Final Render — CE-040 to CE-046, on `feat/final-render`
+
+Subtitles, both presets, the final encode and its verification, in
+`domain/subtitles.py`, `domain/renders.py`, `domain/render_rules.py`,
+`domain/render_targets.py`, `ports/render.py`, `adapters/media/render.py`,
+`services/publication.py`, `services/render_service.py` and one new CLI command.
+ADR-032 records the subtitle contract, ADR-033 the shared publication protocol
+and ADR-034 what an empty review means.
+
+- **CE-040, the subtitle builder.** Words intersecting the final interval are
+  selected strictly — a word ending exactly at the clip start shares no time
+  with it — clamped to the edges, and rebased with
+  `local = absolute - final_start`. Grouping is greedy and versioned: at most
+  eight words, at most two lines, a break at a sentence end, at a gap of 0.6 s
+  or more, at a comma once the cue already holds six words, and at the
+  two-line character budget. Lines are split at the word boundary that
+  minimises the longer line; a word longer than a line is kept whole.
+
+- **CE-041 and CE-042, the two exports.** One authoritative list of cues,
+  rendered twice, so the burned-in caption and the sidecar file cannot disagree
+  about the same clip. SRT quantises to milliseconds and ASS to centiseconds,
+  both with `Decimal` and `ROUND_HALF_UP` — Python's `round` is half-even and
+  would put 0.0005 s at 0 ms. A minimum visible duration is applied *before*
+  quantisation, so no rounding step can produce an empty or out-of-order event.
+  Both are UTF-8 without a BOM with LF endings; SRT is numbered from 1; the ASS
+  declares the clip's own resolution, disables automatic wrapping and places the
+  caption bottom-centre with a 320 px bottom margin.
+
+- **CE-043 `vertical_blur`.** `split` decodes once and uses the frame twice: the
+  background is scaled up until it covers 9:16 and cropped, then blurred with
+  `gblur=sigma=24`; the foreground is scaled down until it fits whole and
+  overlaid centred. Nothing uses a bare `scale=w:h`, which would stretch every
+  source that is not already 9:16. `force_divisible_by=2` is on both scalers
+  because `yuv420p` cannot represent an odd dimension and a 641x361 source
+  otherwise lands on one.
+
+- **CE-044 `vertical_crop`.** Scale to cover, centre crop, square pixels.
+
+- **CE-045, the renderer.** The FFmpeg argument list is built by a pure function
+  and asserted element by element. `-ss` precedes `-i` so the encoder seeks
+  instead of decoding up to the interval — which also rebases the output
+  timestamps to zero, and is what makes the clip-local subtitle times line up
+  with the picture — and `-t` follows it so the limit applies to what is
+  written. The subtitle *text* never appears in the command at all: it is in a
+  file, and the filter is handed the file's path.
+
+- **The one place a path becomes part of a string FFmpeg parses.** `ass=` takes
+  its filename as an option value inside a filtergraph, which is unescaped
+  twice. `escape_filter_path` handles both levels — backslashes become forward
+  slashes, every `:` including the drive letter's is escaped for the option
+  parser, and the result is single-quoted for the graph parser, with a literal
+  quote closed, escaped and reopened. It is a security boundary rather than a
+  formatting helper and has its own tests, on Windows and POSIX paths, with
+  spaces, accents, a quote and every graph separator.
+
+- **CE-046, verification.** Nothing asked of FFmpeg is trusted. Every clip is
+  read back with ffprobe in the staging directory — dimensions, sample aspect
+  ratio, both codecs, duration against a documented 1.0 s tolerance — and both
+  subtitle documents are parsed back and checked for order and bounds, before
+  anything is published. A later invocation proves the whole set again without
+  an encoder: every artifact's size and digest, every metadata file against its
+  record field by field, both documents parsed, no clip directory the index does
+  not name, the set against the decisions the review recorded, and the
+  fingerprint rebuilt.
+
+  `sample_aspect_ratio` is new on `MediaInfo` and is the reason for it:
+  1080x1920 with non-square pixels is not a vertical video, and no other check
+  would notice a render that lost `setsar`.
+
+- **Clip selection obeys the decisions exactly.** An approval renders the
+  candidate's own interval, an edit renders `final_start` and `final_end` and
+  nothing else — not widened back to the analyzer's minimum duration, not
+  re-snapped — and a rejection renders nothing. Order is the candidate rank and
+  never the order the decisions were answered in, so a reviewer who worked
+  backwards or resumed mid-session gets the same clips in the same order. Ranks
+  keep the gaps rejection leaves: rank 4 beside rank 1 is the honest record.
+
+  A review that is not finished does not render. A candidate with no decision is
+  not one a person chose to leave out.
+
+- **The artifacts.** `clips/clip_<candidate_id>/` holding `clip.mp4`,
+  `subtitles.srt`, `subtitles.ass` and `metadata.json`, plus `clips/index.json`
+  and `clips/config.effective.json`. The index carries the identity of
+  everything the clips were built from — the analysis fingerprint, the review
+  fingerprint, the digest of the decision file, the transcript digest, the
+  source digest — and a digest of every artifact. `metadata.json` travels with
+  its clip and is deliberately self-contained: somebody handed one directory can
+  say which candidate it is, which decision produced it, which seconds of which
+  source it holds, and which analysis and review it came out of. It is not
+  hashed into the index, because it would then have to contain its own digest;
+  it is verified by being parsed and compared, which is the stronger check.
+
+- **Reuse.** The fingerprint covers the index and the configuration, and the
+  index holds a digest of every artifact, so it covers the output. A second
+  invocation with nothing changed reuses, calls no encoder, rewrites no byte and
+  leaves the manifest untouched. A deleted, truncated, replaced or renamed
+  artifact cannot be reused; nor can a set produced under another preset, other
+  encoder settings, another burn setting, another analysis, another review,
+  another transcript or another source. Every refusal names `--force`.
+
+- **The review fingerprint is proved, not read.** `render` rebuilds it from
+  `decisions.json` and refuses a mismatch. That catches a decision file edited
+  after the review was recorded — the one artifact in the engine that cannot be
+  regenerated, and the one whose alteration would silently change what gets
+  published.
+
+- **State.** `REVIEWED → RENDERED`, `REVIEWED → FAILED_RENDER`,
+  `FAILED_RENDER → RENDERED` and `FAILED_RENDER → FAILED_RENDER`, all of which
+  the existing state machine already permitted; no transition was added. The run
+  reaches RENDERED only after every clip has been published and verified.
+
+- **What is deliberately not here.** No CE-047 and beyond, no `PipelineService`,
+  no `process`, no `resume`, no cascading invalidation, no platform metadata, no
+  publishing, no thumbnails, no kinetic subtitles, no smart reframing, no prompt
+  change, no scoring change, no Gemini call and no new dependency. `render`
+  never reads `GEMINI_API_KEY` and opens no socket.
 
 ## The real video: the first real Gemini run
 
@@ -568,6 +758,50 @@ candidate quality remains **undemonstrated** — one video, eleven intervals I
 chose from text without watching it, and a loose threshold on most of the
 matches. The specification asks for at least five representative videos, and
 that work has not been done.
+
+### The first human review, and exactly what it shows
+
+PR #7 was merged, and a person began reviewing the 15 verified previews of the
+real run. **The review is not finished.** At the time of writing
+`review/decisions.json` holds 13 of the 15 candidates and the run is still
+`READY_FOR_REVIEW`, so the render stage refuses it — which is the behaviour
+CE-045 is specified to have, and the reason the real end-to-end render in this
+branch has not been performed.
+
+What the 13 recorded decisions hold:
+
+| | |
+|---|---|
+| Decided | 13 of 15 |
+| Approved | 8 |
+| Edited | 1 |
+| Rejected | 4 |
+| Still pending | 2 |
+
+**These are counts, not metrics.** They are 13 decisions on one video by one
+person, they are incomplete, and `decisions.json` records no reason on any of
+the four rejections — the reason field is optional by design, so the file cannot
+say *why* anything was rejected. Approval rate, edit rate and rejection reasons
+are CE-057's measurements and are not computed here from a partial file.
+
+**The qualitative observation, recorded as an observation.** The reviewer's
+report of the first pass was that Gemini found genuinely useful moments, but
+that some of them did not close well — the interval ended before the idea did,
+or after it. That is consistent with one edited decision out of nine kept, and
+with the earlier finding that boundary snapping had almost nothing to do because
+the model returns the segment boundaries the chunk format puts in front of it.
+
+It is an impression from one video, not a measurement of boundary quality. It is
+recorded because it is the first editorial signal the project has, and it is
+qualified because a single reviewer on a single Spanish Linux tutorial cannot
+establish anything about candidate quality in general. The specification asks
+for at least five representative videos; that work has not been done.
+
+Nothing in this branch responds to it. The prompt, the scoring, the snapping,
+the deduplication and the ranking are all unchanged, and the render obeys
+`decisions.json` exactly — including the boundaries a person moved, which are
+rendered as they moved them and never widened back to the analyzer's minimum
+duration.
 
 ## Known limitations
 
@@ -667,6 +901,138 @@ that work has not been done.
   exist and the run is READY_FOR_REVIEW; the decisions are the operator's to
   make, and inventing them would fabricate exactly the measurement CE-053 to
   CE-059 are built to read. Full sessions are exercised only against fixtures.
+
+
+### V0.6 limitations
+
+- **The real end-to-end render has not been performed.** The review of the real
+  run holds 13 of 15 decisions and the run is `READY_FOR_REVIEW`, so `render`
+  refuses it — correctly. Every claim about the render stage in this document
+  comes from the unit suite, the CLI suite and 24 integration tests against real
+  FFmpeg on locally synthesised sources. **No MP4 has been produced from the
+  35-minute Spanish tutorial**, and until one has, V0.6 is implemented and
+  proved against synthetic media rather than demonstrated on real content. The
+  two remaining decisions are the operator's to make; inventing them would
+  fabricate exactly the measurement this subsystem exists to read.
+- **A burned-in caption is not byte-reproducible across platforms.** libass
+  resolves the font through fontconfig, and `Arial` substitutes to Liberation
+  Sans on Ubuntu and to Arial on Windows, so the pixels differ. The two sidecar
+  documents are byte-identical everywhere, and x264 is deterministic given the
+  same build, source and arguments — so the guarantee is "an unchanged run
+  rewrites nothing", not "two machines produce identical clips". The same
+  caveat already applies to previews.
+- **The duration tolerance is 1.0 s and is a stage constant.** Wide enough that
+  it cannot fail on a correct encode — the 15 real previews drifted at most
+  0.040 s — and therefore wide enough that a badly wrong short clip would have
+  to be more than a second off to be caught. It exists to catch a truncated or
+  empty encode, not to measure frame accuracy.
+- **ASS loses three characters.** `{`, `}` and `\` are transliterated to `(`,
+  `)` and `/` because the format has no portable escape for them and libass and
+  VSFilter disagree about an unmatched brace. The SRT and `transcript.json` keep
+  the exact text. ADR-032 records the trade.
+- **A transcript without word timestamps cannot be rendered.** The stage refuses
+  rather than approximating cues from segment bounds, which would produce
+  five-to-thirty-second blocks claiming a synchronisation they do not have. The
+  packaged default is `word_timestamps = true`, so this is reachable only by a
+  profile that turned it off.
+- **`force_divisible_by=2` requires FFmpeg 4.4 or newer.** It is on both scalers
+  because `yuv420p` cannot represent an odd dimension. Older builds would refuse
+  the filter option outright rather than produce something wrong, and nothing in
+  the project checks the version.
+- **`gblur` is the blur, and its cost scales with the output frame.** At
+  1080x1920 it is the most expensive filter in the graph. `boxblur` would be
+  faster and is GPL-only; the sigma is a stage constant rather than a profile
+  key, so tuning it is a code change and a rules-version bump.
+- **Nothing invalidates a render when an upstream stage changes.** Re-running
+  `review --force` or `analyze --force` leaves the clips as they are, and the
+  next `render` refuses them as incoherent rather than replacing them
+  automatically. Cascading invalidation is CE-052; until then the refusal names
+  `--force` and the operator decides. The `preview --force` path already warns
+  that `clips` went stale.
+- **The metadata beside a clip is not covered by a digest.** It cannot be: it
+  would have to contain its own. It is verified by being parsed and compared
+  against the index field by field, which is a stronger check than a digest for
+  the thing that matters — that the two artifacts still say the same thing — but
+  it does mean a field the comparison does not list could be edited without
+  being noticed. The listed fields are the ones that identify the clip and its
+  bytes.
+- **On Windows a clip path longer than 260 characters fails.** The same
+  `MAX_PATH` limit the preview stage documents, and it is worse here because a
+  clip lives two directories deeper. FFmpeg exits 0 and writes nothing; the
+  adapter catches it and the run becomes `FAILED_RENDER` with no partial
+  artifact, but the fix is a shorter workspace path, not a code change.
+
+
+### Two defects an independent review found, and what they cost
+
+Both were reproducible, both were in code this branch had already claimed was
+verified, and both are recorded because the pair says something about what the
+tests were proving.
+
+**The subtitle path was escaped into the filtergraph, and FFmpeg opened a
+different file.** The `ass` filter takes its document as an option value inside
+the filtergraph, so the path was escaped: backslashes to forward slashes, every
+`:` escaped for the option parser, single quotes for the graph parser, and a
+literal quote closed-escaped-reopened as `'\''`. A unit test compared the
+escaped string and passed. Under a directory called `codex it's ñ`, FFmpeg
+reported:
+
+```text
+Could not create a libass track when reading file '/tmp/codex its ñ/subtitles.ass'
+```
+
+The apostrophe is gone. The value is unescaped **twice** — once splitting the
+graph, once parsing the option — so the `'\''` that correctly survives the first
+pass is read as a quote again by the second. Reproduced on Windows as well as
+Linux.
+
+Escaping twice would fix this input and break the reverse case, and the number
+of passes is not a property this code controls. So the path is not there at all
+any more: FFmpeg runs in the clip's own directory and the filter gets the bare
+basename `subtitles.ass`, which it resolves itself. Source and output stay
+absolute, so moving the working directory cannot change which files those are.
+`escape_filter_path` is deleted rather than repaired — a helper that cannot be
+made correct is worse than none, because its tests look like evidence.
+
+The test that replaces it asks FFmpeg. Four integration tests run under a
+directory really named `codex it's ñ`, one of them rendering the same clip twice
+differing only in `burn_subtitles` and comparing the caption band, because
+FFmpeg exits 0 whether or not libass drew anything. ADR-035.
+
+**`metadata.json` was outside every digest.** The argument was that a file
+cannot contain its own hash, so it was verified by parsing it and comparing it
+against the index instead. That comparison covered fourteen fields. Changing
+`topic` to another valid string and calling `require_clips` produced no refusal.
+
+Exposed: `run_id`, `category`, `topic`, `hook`, `summary`, `reason`,
+`total_score`, `original_start`, `original_end`, `preset`, `width`, `height`,
+`measured_duration_seconds`, `subtitles_burned`, `generated_at` and all four
+provenance fingerprints — most of the document, and specifically the half that
+says which candidate a clip is and where it came from.
+
+The "cannot contain its own hash" argument was true and irrelevant: nothing
+requires the hash to be in the file. `ClipRecord` now carries
+`metadata_sha256` and `metadata_size_bytes`, so the fingerprint covers the
+metadata through the index. The ordering removes the apparent cycle — measure,
+build the metadata, write it, hash the written file, then build the record — and
+`_measure` returns measurements rather than a record so that order is the
+obvious one. The semantic comparison stays as a second layer and is widened to
+every shared field: a digest proves the bytes have not moved, the comparison
+proves the two artifacts still agree. `index.json` is at schema 2. ADR-036.
+
+**What the pair has in common.** Both passed a test that examined something the
+code produced rather than something the system did. One compared a string the
+escaper returned; the other compared a list of fields somebody had chosen. The
+replacements ask a different question — what does FFmpeg open, and does *any*
+byte changing stop reuse — and that is the difference between a test and a
+restatement.
+
+**One more gap the audit found.** Reviewing every published artifact for the
+same class of hole turned up a third: a file dropped into a clip directory was
+checked by nothing and would have ridden along through every republication. A
+clip directory now holds exactly its four artifacts. Stray files at the top of
+`clips/` remain permitted and tested — publication does not own them, and an
+operator's notes survive a regeneration.
 
 ### Four defects found in review, and what they cost
 
@@ -823,23 +1189,26 @@ and `-p no:cacheprovider` before any claim of green.
 
 ## Current priority
 
-V0.5, Human Evaluation (CE-034–CE-039), on `feat/human-evaluation` and pending
-review. V0.4 is complete and merged: the foundation as `70fb6ed`, the
-deterministic pipeline and `analyze` as `1b15e0f`, the prompt, the Gemini
-adapter and structured output as `5570531`.
+V0.6, Final Render (CE-040–CE-046), on `feat/final-render` and pending review.
+V0.5 is complete and merged as `1609bc1` (PR #7). V0.4 is complete and merged:
+the foundation as `70fb6ed`, the deterministic pipeline and `analyze` as
+`1b15e0f`, the prompt, the Gemini adapter and structured output as `5570531`.
 
-The immediate next step is not code. The real run is READY_FOR_REVIEW with 15
-verified previews, and the measurement the whole subsystem exists for needs a
-person to watch them and decide:
+The immediate next step is not code. The real run has 13 of its 15 decisions,
+and the render stage refuses an unfinished review — correctly, because a
+candidate with no decision is one nobody has reached rather than one anybody
+left out:
 
 ```bash
 content-engine review 20260906T134657-aprende-linux-ahora-curso-desde--881437
+content-engine render 20260906T134657-aprende-linux-ahora-curso-desde--881437
 ```
 
-That produces the first real editorial data — approval rate, edit rate and
-rejection reasons — which is what CE-053 to CE-059 will read and what will say
-whether the prompt is any good. One video is still a signal rather than a
-measurement; the specification asks for at least five.
+Finishing those two decisions is what unblocks the first real MP4 + SRT + ASS,
+and it is also what produces the first complete editorial data — approval rate,
+edit rate and rejection reasons — which is what CE-053 to CE-059 will read and
+what will say whether the prompt is any good. One video is still a signal rather
+than a measurement; the specification asks for at least five.
 
 ## Deferred to V0.7 (CE-047 to CE-052)
 

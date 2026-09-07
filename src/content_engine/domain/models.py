@@ -39,6 +39,12 @@ class MediaInfo(_Model):
     height: int = Field(gt=0)
     #: 0.0 means the container did not declare a usable frame rate.
     fps: float = Field(ge=0)
+    #: The pixel aspect ratio as the container declares it, ``"1:1"`` for square
+    #: pixels, or None when nothing usable was declared. CE-046 verifies it on a
+    #: finished clip: dimensions alone do not say whether a player will stretch
+    #: the picture back out of 9:16, and a render that lost ``setsar`` would
+    #: otherwise pass every other check.
+    sample_aspect_ratio: str | None = None
     audio_codec: str | None
     sample_rate: int | None
     channels: int | None

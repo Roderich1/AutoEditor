@@ -420,18 +420,36 @@ class FakeMedia:
     probed: list[Path] = field(default_factory=list)
     #: Output basenames the encoder must refuse, so a failure can be placed.
     fail_for: set[str] = field(default_factory=set)
+    #: Output basenames the encoder writes but ffprobe will then deny knowing,
+    #: which is how a file that exists and cannot be read back is placed.
+    unprobeable: set[str] = field(default_factory=set)
     #: Output basename -> duration ffprobe will report, overriding the request.
     measured: dict[str, float] = field(default_factory=dict)
     #: Output basename -> the dimensions ffprobe will report.
     dimensions: dict[str, tuple[int, int]] = field(default_factory=dict)
     #: What ffprobe will name the video codec, so a wrong encode can be placed.
     video_codec: str = "h264"
+    #: The same for audio, so a stream-copied or transcoded track can be placed.
+    audio_codec: str = "aac"
+    #: What ffprobe will report as the pixel aspect ratio. CE-046 refuses
+    #: anything but square, so a lost `setsar` has to be placeable.
+    sample_aspect_ratio: str | None = "1:1"
+    #: The working directory each call was made in, so a test can assert the
+    #: render stage runs FFmpeg where the subtitles are (ADR-035).
+    working_directories: list[Path | None] = field(default_factory=list)
     _known: dict[Path, dict[str, Any]] = field(default_factory=dict)
 
-    def ffmpeg(self, arguments: Sequence[str], timeout: float | None = None) -> Any:
+    def ffmpeg(
+        self,
+        arguments: Sequence[str],
+        timeout: float | None = None,
+        cwd: Path | None = None,
+    ) -> Any:
         from content_engine.domain.exceptions import ExternalToolError
 
         self.calls.append(list(arguments))
+        self.working_directories.append(cwd)
+        self._resolve_subtitles(arguments, cwd)
         output = Path(arguments[-1])
         if output.name in self.fail_for:
             raise ExternalToolError(f"ffmpeg failed: synthetic refusal of {output.name}")
@@ -439,32 +457,68 @@ class FakeMedia:
         width, height = self.dimensions.get(output.name, (self.width, self.height))
         duration = self.measured.get(output.name, requested)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(f"preview:{output.name}:{requested:.3f}".encode())
-        streams: list[dict[str, Any]] = [
-            {
-                "codec_type": "video",
-                "codec_name": self.video_codec,
-                "width": width,
-                "height": height,
-                "avg_frame_rate": "30/1",
-            }
-        ]
+        # The parent directory is part of the placeholder because a render
+        # writes every clip as `clip.mp4`, so without it two clips of equal
+        # duration would be byte-identical and no test could tell them apart.
+        output.write_bytes(f"encoded:{output.parent.name}:{output.name}:{requested:.3f}".encode())
+        video: dict[str, Any] = {
+            "codec_type": "video",
+            "codec_name": self.video_codec,
+            "width": width,
+            "height": height,
+            "avg_frame_rate": "30/1",
+        }
+        if self.sample_aspect_ratio is not None:
+            video["sample_aspect_ratio"] = self.sample_aspect_ratio
+        streams: list[dict[str, Any]] = [video]
         if self.audio:
             streams.append(
                 {
                     "codec_type": "audio",
-                    "codec_name": "aac",
+                    "codec_name": self.audio_codec,
                     "sample_rate": "44100",
                     "channels": 2,
                 }
             )
-        self._known[output.resolve()] = {
-            "streams": streams,
-            "format": {"duration": f"{duration:.3f}", "format_name": "mov,mp4,m4a"},
-        }
+        if output.name not in self.unprobeable:
+            self._known[output.resolve()] = {
+                "streams": streams,
+                "format": {"duration": f"{duration:.3f}", "format_name": "mov,mp4,m4a"},
+            }
         return fake_process(arguments)
 
-    def ffprobe(self, arguments: Sequence[str], timeout: float | None = None) -> Any:
+    @staticmethod
+    def _resolve_subtitles(arguments: Sequence[str], cwd: Path | None) -> None:
+        """Model how FFmpeg finds the ASS: relative to its own cwd, or not at all.
+
+        Without this the fake would accept a filter naming a file that is not
+        where the process runs, and the unit suite would go on passing over
+        exactly the defect ADR-035 fixed -- which is what happened when the
+        graph carried an escaped absolute path.
+        """
+        from content_engine.domain.exceptions import ExternalToolError
+
+        if "-filter_complex" not in arguments:
+            return
+        graph = arguments[list(arguments).index("-filter_complex") + 1]
+        for chain in graph.split(";"):
+            for piece in chain.split(","):
+                if not piece.startswith("ass="):
+                    continue
+                name = piece.removeprefix("ass=").split("[", 1)[0]
+                base = Path.cwd() if cwd is None else cwd
+                if not base.joinpath(name).is_file():
+                    raise ExternalToolError(
+                        f"ffmpeg failed: Could not create a libass track when reading file "
+                        f"'{base.joinpath(name)}'"
+                    )
+
+    def ffprobe(
+        self,
+        arguments: Sequence[str],
+        timeout: float | None = None,
+        cwd: Path | None = None,
+    ) -> Any:
         from content_engine.domain.exceptions import ExternalToolError
 
         path = Path(arguments[-1])
@@ -482,6 +536,7 @@ class FakeMedia:
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeMedia:
         monkeypatch.setattr("content_engine.adapters.media.preview.run_command", self.ffmpeg)
+        monkeypatch.setattr("content_engine.adapters.media.render.run_command", self.ffmpeg)
         monkeypatch.setattr("content_engine.adapters.media.ffprobe.run_command", self.ffprobe)
         return self
 

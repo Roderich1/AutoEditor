@@ -15,6 +15,18 @@ from content_engine.domain.models import MediaInfo
 from content_engine.utils.subprocess import PROBE_TIMEOUT_SECONDS, run_command
 
 
+def _parse_sample_aspect_ratio(video: dict[str, Any]) -> str | None:
+    """The declared pixel aspect ratio, or None when there is not a usable one.
+
+    ffprobe writes ``N/A`` for a stream that declares nothing and ``0:1`` for
+    one whose value is degenerate. Neither is a ratio, and passing either
+    through would let a verification compare a string against a placeholder and
+    call it square.
+    """
+    raw = str(video.get("sample_aspect_ratio") or "").strip()
+    return None if raw in {"", "N/A", "0:1"} else raw
+
+
 def _parse_frame_rate(video: dict[str, Any]) -> float:
     """Return frames per second, or 0.0 when the container does not declare one.
 
@@ -86,6 +98,7 @@ class FFprobeAdapter:
                 width=int(video["width"]),
                 height=int(video["height"]),
                 fps=_parse_frame_rate(video),
+                sample_aspect_ratio=_parse_sample_aspect_ratio(video),
                 audio_codec=audio.get("codec_name"),
                 sample_rate=int(audio["sample_rate"]) if audio.get("sample_rate") else None,
                 channels=int(audio["channels"]) if audio.get("channels") else None,

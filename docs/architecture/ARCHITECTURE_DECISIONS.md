@@ -1554,3 +1554,355 @@ directory would preserve that too, and buys nothing else.
 - `review` does not resolve a pending backup. It must not mutate the previews
   directory, so it fails verification with a message pointing at `preview`,
   which is the command that owns those files.
+
+---
+
+## ADR-032 — Subtitles are built from words, and nothing else
+
+**Status:** Accepted for V0.6 (CE-040, CE-041, CE-042)
+
+### Context
+
+CE-040 turns transcript timestamps into clip-local subtitles. The specification
+gives the conversion — `local = absolute - clip_start` — and a baseline for
+grouping: around six to eight visible words, at most two lines, break at
+punctuation and pauses. It does not say what happens when the transcript has no
+word timestamps, how times are rounded, or what to do with the characters SRT
+and ASS give structural meaning to. Each of those can produce two different,
+apparently valid files from the same input, which is exactly the kind of gap
+this project resolves explicitly rather than inside a helper.
+
+### Decision
+
+**Words are the only source.** A transcript with segments but no word
+timestamps is refused with a message naming `transcription.word_timestamps`.
+`RenderStageConfig.subtitles.source` records the value `words`, so a future
+segment-level mode is a version bump and not a silent change of meaning.
+
+An interval with no words in it is a different thing entirely, and is not a
+failure: it produces an empty SRT and an ASS holding only its header. A clip of
+a command running in silence is a real thing to publish.
+
+**Selection is a strict intersection.** A word is in the clip when
+`word.end > clip_start` and `word.start < clip_end`, both strictly. A word
+ending exactly at the start or beginning exactly at the end shares no time with
+the clip, and including it would put a caption on screen for material the viewer
+cannot hear. Words that straddle either edge are clamped.
+
+**Grouping is greedy and versioned.** A cue ends when it holds
+`max_words_per_cue` words, when the previous word ends a sentence, when the gap
+to the next word reaches `pause_seconds`, when the previous word ends on a comma
+and the cue already holds `min_words_before_soft_break` words, or when adding
+the next word would exceed two lines' worth of characters. Lines are split at
+the word boundary that minimises the longer line. Greedy rather than optimal on
+purpose: an optimiser gives prettier breaks and makes the output depend on a
+search whose result changes whenever the cost function is touched.
+
+A word longer than the line budget is kept whole and overflows. A caption
+reading `systemct` / `l` is worse than one that is slightly too wide.
+
+**Rounding is stated.** SRT quantises to milliseconds and ASS to centiseconds,
+both with `Decimal` and `ROUND_HALF_UP`. Python's `round` is half-even, so it
+would put 0.0005 s at 0 ms and 0.0015 s at 2 ms — correct for statistics, wrong
+for timestamps, and different from what every other subtitle tool does. Cues are
+given a minimum visible duration *before* quantisation, so the smallest cue is
+250 ms and no rounding step can collapse one to zero; quantisation is monotone,
+so an ordered list stays ordered.
+
+**ASS's three structural characters are transliterated, not escaped.** `{` and
+`}` delimit an override block whose contents libass interprets as formatting
+commands and then removes from the picture, and `\` begins an escape. The format
+defines no portable escape for any of them, and libass and VSFilter disagree
+about what an unmatched brace does. A brace becomes a parenthesis and a
+backslash a forward slash, under `SUBTITLE_RULES_VERSION`.
+
+This is about the subtitle *text*. How the finished document reaches libass is a
+separate question, and the first answer to it was wrong: ADR-035 records why the
+path no longer goes into the filtergraph at all.
+
+**The subtitle rules and the caption style are stage constants.** ADR-028's
+reasoning applies unchanged: a new key in `[render]` folds into `config_sha256`
+and changes the logical identity of every run that already exists, to describe a
+caption layout. They are recorded in full in `clips/config.effective.json`, and
+the builder is driven from that artifact rather than from the module constants,
+so a set of clips and the configuration beside it cannot describe two different
+policies.
+
+### Consequences
+
+- The transliteration is lossy, and it is the smaller cost. `transcript.json`
+  and the SRT export keep the exact characters, and the JSON is the artifact
+  every measurement reads.
+- A run transcribed with `word_timestamps = false` cannot be rendered without
+  re-transcribing. That is the honest outcome: segment-level blocks would be an
+  artifact claiming a synchronisation it does not have.
+- Burned-in captions are not byte-reproducible across platforms, because libass
+  resolves the font through fontconfig and Arial substitutes differently on
+  Windows and Linux. The two sidecar documents *are* byte-identical everywhere;
+  only the picture is not, and previews already carry the same caveat.
+- Two documents, one list of cues. Building the SRT and the ASS from separate
+  passes would let them disagree about the same clip, which is the defect nobody
+  notices until a viewer compares the burned caption with the sidecar file.
+
+---
+
+## ADR-033 — One durable publication protocol, two stages
+
+**Status:** Accepted for V0.6
+
+### Context
+
+The render stage has to replace a published set of artifacts under exactly the
+conditions the preview stage does: a failure part-way through must not leave a
+mixture of two runs, a failed `--force` must destroy nothing, and a restore that
+cannot finish must lose nothing.
+
+That protocol is where three defects were found in review of PR #7, and the
+third was the expensive one: a restore interrupted half-way could be resumed in
+a way that deleted the files it had just recovered. ADR-031 records the fix — a
+three-phase journal in which `restoring` is written after the last deletion and
+before the first move back.
+
+Copying it into the render stage would put that defect one edit away from coming
+back, in a place where the tests that caught it do not run.
+
+### Decision
+
+The protocol moves to `services/publication.py` and both stages use it. A
+`PublicationLayout` carries everything that differs between them: the directory
+names, the journal filename, the predicate that says which entries the stage
+owns, the exception type a failure raises, and the nouns the messages use. The
+caller places its new set inside a `with publish(...)` block, so *what* is
+published stays with the stage that knows.
+
+Generalising cost one thing. An item is now a file **or** a directory, because a
+clip is a directory of four artifacts while a preview is a single MP4. Every
+rename works on both; the deletion in the `placing` phase is the one step that
+has to tell them apart.
+
+The preview stage was migrated rather than left alone. Its 76-test publication
+suite is the regression proof that the generalisation preserved behaviour, and
+it passes unchanged except for two monkeypatches retargeted at the module that
+now owns the journal write — a test patching only `preview_service` would inject
+a failure the journal write never sees, and would pass while proving nothing.
+
+### Consequences
+
+- The guarantee is stated once. It is **durability, not atomicity**: two
+  outcomes are atomic — the new set is published, or the previous one is
+  restored byte for byte — and the third is a restore that cannot complete,
+  after which every item stays in the published directory or in the backup, the
+  backup is never deleted while the restore is unfinished, the error names the
+  directory holding the data, and the next invocation of the same command
+  finishes the job.
+- `ClipRollbackError` is separate from `PreviewRollbackError` rather than shared.
+  An operator reading the message needs to know which directory holds their
+  data, and the two failures call for different next steps: a stranded preview
+  set costs an encode to rebuild, a stranded clip set costs a render.
+- Publishing by directory rename is still rejected, for the reasons ADR-031
+  gives, and they get stronger here: a clip is what somebody opens in a player,
+  and on Windows a directory rename fails while any handle inside it is open.
+- The two stages keep their own `resolve_pending_rollback`, each a one-line call
+  into the shared resolver. The CLI imports them under distinct names, so a
+  command can never finish the wrong stage's restore.
+
+---
+
+## ADR-034 — A review that kept nothing is a result, not a failure
+
+**Status:** Accepted for V0.6
+
+### Context
+
+`render` acts on a completed review. A completed review can reject every
+candidate, and that is not an unusual case: the whole point of CE-034 to CE-039
+is that a person may decide the analyzer found nothing worth publishing. The
+stage has to do something coherent, and the obvious options each say something
+different about what happened.
+
+### Decision
+
+The stage succeeds. It writes `clips/index.json` with an empty `clips` list and
+`clips/config.effective.json` beside it, records the render stage in the
+manifest with a real fingerprint, advances the run to `RENDERED`, and prints a
+warning saying the review kept none of the candidates.
+
+Nothing is fabricated. There is no clip, no directory and no subtitle file.
+
+### Rejected alternatives
+
+**Failing the stage.** `FAILED_RENDER` means the render could not be performed.
+Here it was performed and its correct output is empty, so the state would be a
+lie — and it would leave the run in a failure state that every later invocation
+retries, permanently, over a decision a person deliberately made.
+
+**Refusing to run at all.** Leaving the run at `REVIEWED` would make "the review
+rejected everything" indistinguishable from "nobody has run render yet", which
+is exactly the distinction the state machine exists to keep.
+
+**Rendering the best candidate anyway.** Beyond the scope of any decision a
+person took, and a direct violation of the rule that a rejection renders
+nothing.
+
+### Consequences
+
+- The empty index is a real artifact with a real fingerprint, so a second
+  invocation reuses it and rewrites nothing, exactly as a non-empty one does.
+- CE-053 to CE-059 can read a run that rendered nothing and see *why*: the
+  decisions are there, and the rejection rate is the measurement.
+- `preview` already behaves this way for an analysis that selected no
+  candidates, so the two stages agree about what an empty stage means.
+
+---
+
+## ADR-035 — The subtitle file reaches libass by working directory, not by path
+
+**Status:** Accepted for V0.6, replacing the escaping approach shipped first
+
+### Context
+
+The `ass` filter takes the document it draws as an **option value inside the
+filtergraph**, which is the one string FFmpeg parses rather than receives. The
+first implementation therefore escaped an absolute path into it, handling what
+looked like the two levels of libavfilter escaping: backslashes became forward
+slashes, every `:` was escaped for the option parser, the whole was wrapped in
+single quotes for the graph parser, and a literal quote was closed, escaped and
+reopened as `'\''`.
+
+It had a unit test that compared the escaped string, and the string was right.
+
+An independent review reproduced a failure anyway, on a directory called
+`codex it's ñ`:
+
+```text
+Could not create a libass track when reading file '/tmp/codex its ñ/subtitles.ass'
+```
+
+The apostrophe is gone. Reproduced on Windows as well.
+
+**Why.** The value is unescaped **twice**: once when the graph is split into
+chains and filters, and again when the filter's options are parsed. `'\''`
+correctly survives the first pass and becomes `it's` — and the second pass then
+reads that `'` as a quote character and swallows it. Escaping twice would fix
+this input and break the round trip in the other direction; the number of passes
+is not a property this code controls, and getting it right for every future
+FFmpeg is not a promise that can be kept.
+
+### Decision
+
+**No path goes into the filtergraph.** FFmpeg is run with its working directory
+set to the clip's own directory, and the filter is handed the bare basename
+`subtitles.ass`, which it resolves itself. `run_command` gains a `cwd`
+parameter for this.
+
+- `source` and `output` stay **absolute** and are passed as arguments, which no
+  parser touches, so moving the working directory cannot change which files
+  those are.
+- The adapter refuses subtitles that are not beside the output, because the
+  filter would resolve the name against the wrong directory — or, worse, find a
+  same-named document that happens to be in the right one.
+- `require_plain_filter_name` refuses anything but letters, digits, underscores,
+  hyphens and dots. The name is a constant of this stage, so it never rejects
+  what the engine produces; it rejects what a future edit could introduce.
+- `run_command` checks the working directory before calling, because
+  `subprocess` reports a missing one as the same `FileNotFoundError` a missing
+  executable produces, and "ffmpeg was not found. Install it and make sure it is
+  on PATH" is a misleading thing to tell somebody whose directory was deleted.
+
+### Consequences
+
+- The property is now asserted by **FFmpeg** rather than by a string comparison.
+  Four integration tests run under a directory really named `codex it's ñ`, one
+  of which renders the same clip twice differing only in `burn_subtitles` and
+  compares the caption band, because FFmpeg exits 0 whether or not libass drew
+  anything.
+- `escape_filter_path` is deleted rather than fixed. A helper that cannot be
+  made correct is worse than no helper, because its tests look like evidence.
+- The unit suite keeps a narrower claim it can actually support: nothing but a
+  plain filename can enter the graph. The fake encoder models the resolution, so
+  a future change that put a path back would fail there too rather than only in
+  integration.
+- A clip directory is now also where FFmpeg runs. Nothing is written there that
+  the stage does not write, and the "no extra files" check in ADR-036 covers
+  that.
+
+---
+
+## ADR-036 — Every published artifact is inside a digest, metadata.json included
+
+**Status:** Accepted for V0.6
+
+### Context
+
+`metadata.json` was deliberately left outside every digest. The reasoning was
+that a file cannot contain its own hash, so it was verified by being parsed and
+compared against the index instead — which is a stronger check for what it
+covers.
+
+It covered fourteen fields. An independent review changed `topic` to another
+valid string, called `require_clips`, and got no refusal.
+
+The exposed fields were `run_id`, `category`, `topic`, `hook`, `summary`,
+`reason`, `total_score`, `original_start`, `original_end`, `preset`, `width`,
+`height`, `measured_duration_seconds`, `subtitles_burned`, `generated_at` and
+all four provenance fingerprints — which is to say most of the document, and
+specifically the half that says which candidate this clip is and where it came
+from. A `metadata.json` that travels with a clip and answers those questions
+wrongly is worse than one that is missing.
+
+The "cannot contain its own hash" argument was true and irrelevant: nothing
+requires the hash to be *in* the file.
+
+### Decision
+
+`ClipRecord` carries `metadata_sha256` and `metadata_size_bytes`, so the render
+fingerprint covers `metadata.json` through the index like the other three
+artifacts.
+
+There is no cycle, and the ordering is what removes it:
+
+```text
+measure the finished files
+  → build the metadata from those measurements
+  → write it
+  → hash the file that was written
+  → build the record, digest included
+```
+
+`_measure` therefore returns measurements rather than a record. That is the
+change that makes the order the obvious one instead of a circularity to work
+around.
+
+**The semantic comparison stays**, and is widened to every field the two models
+share. It is not redundant: a digest proves the bytes have not moved, the
+comparison proves the two artifacts still *agree*, and only the second catches a
+set where the index and the metadata were rewritten together.
+
+`RENDER_INDEX_SCHEMA_VERSION` goes to 2. A version 1 index is refused rather
+than reinterpreted, because it cannot answer the question this build asks.
+
+### One more gap the audit found
+
+Reviewing every published artifact for the same class of hole turned up
+another: a file dropped into a clip directory was checked by nothing, and would
+have been moved along by every republication with no record of it anywhere. A
+clip directory now holds **exactly** its four artifacts and anything else is a
+refusal.
+
+Stray files at the top of `clips/` are still permitted, and that is deliberate
+and tested: publication does not own them, an operator's notes survive a
+regeneration, and they are not inside any clip.
+
+### Consequences
+
+- Every published byte of the render stage is now either inside a digest or
+  refused: the MP4, the SRT, the ASS and the metadata by digest; `index.json`
+  and `config.effective.json` by the fingerprint; anything else by name.
+- Changing one byte of a metadata document — including whitespace, which no
+  field comparison could ever see — stops the set being reused.
+- 33 adversarial cases, one per material field, assert this rather than trusting
+  it.
+- A test that wants to reach the checks *behind* the digests has to recompute
+  them first, which is what somebody tampering carefully would do. That is what
+  `reseal()` in the integrity suite is, and it deliberately does not repair the
+  fingerprint, so every deeper refusal still gets its turn.

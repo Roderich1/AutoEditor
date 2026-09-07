@@ -141,3 +141,32 @@ def test_text_artifacts_are_written_atomically(
 
     assert not list(tmp_path.glob("**/*.tmp"))
     assert "previo" in target.read_text(encoding="utf-8")
+
+
+class TestRunCommandWorkingDirectory:
+    """``cwd`` exists so a filename never has to be escaped into a parsed syntax.
+
+    ADR-035: the render stage runs FFmpeg in the clip's own directory and hands
+    the ``ass`` filter a bare basename, because an option value inside a
+    filtergraph is unescaped twice and no escaping of an absolute path survives
+    an apostrophe.
+    """
+
+    def test_a_missing_working_directory_is_named(self, tmp_path: Path) -> None:
+        """subprocess reports it as the same FileNotFoundError a missing binary gives.
+
+        Left untranslated, a directory problem would be reported as "ffmpeg was
+        not found. Install it and make sure it is on PATH", which sends the
+        reader somewhere else entirely.
+        """
+        missing = tmp_path.joinpath("no-such-directory")
+
+        with pytest.raises(ExternalToolError, match="not a directory"):
+            run_command(["ffprobe", "-version"], cwd=missing)
+
+    def test_a_file_as_a_working_directory_is_named(self, tmp_path: Path) -> None:
+        not_a_directory = tmp_path.joinpath("a-file")
+        not_a_directory.write_text("x", encoding="utf-8")
+
+        with pytest.raises(ExternalToolError, match="not a directory"):
+            run_command(["ffprobe", "-version"], cwd=not_a_directory)

@@ -121,6 +121,19 @@ class RenderError(ContentEngineError):
     title = "Render failed"
 
 
+class ClipRollbackError(RenderError):
+    """A clip publication failed and could not be fully undone.
+
+    The render stage's counterpart to ``PreviewRollbackError``, and separate
+    from it for the same reason the two stages are separate: an operator reading
+    the message has to know which directory holds their data, and the two
+    failures call for different next steps -- a stranded preview set costs an
+    encode to rebuild, a stranded clip set costs a render.
+    """
+
+    title = "Clip rollback incomplete"
+
+
 class PreviewRollbackError(RenderError):
     """A preview publication failed and could not be fully undone.
 
