@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Sequence
+from pathlib import Path
 
 from content_engine.domain.exceptions import ExternalToolError, ExternalToolNotFoundError
 
@@ -14,9 +15,21 @@ TRANSCODE_TIMEOUT_SECONDS = 3600.0
 def run_command(
     arguments: Sequence[str],
     timeout: float | None = PROBE_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run an external tool with an argument list, never a shell string."""
+    """Run an external tool with an argument list, never a shell string.
+
+    ``cwd`` runs the tool somewhere else. It exists for one reason: a filename
+    a tool resolves relative to its own working directory never has to be
+    escaped into a syntax that tool parses. It is checked before the call
+    because ``subprocess`` reports a missing working directory as the same
+    ``FileNotFoundError`` a missing executable produces, and reporting "ffmpeg
+    was not found" for a directory problem sends the reader somewhere else
+    entirely.
+    """
     executable = arguments[0]
+    if cwd is not None and not cwd.is_dir():
+        raise ExternalToolError(f"{executable} cannot be run in {cwd}, which is not a directory")
     try:
         return subprocess.run(
             list(arguments),
@@ -27,6 +40,7 @@ def run_command(
             errors="replace",
             timeout=timeout,
             stdin=subprocess.DEVNULL,
+            cwd=None if cwd is None else str(cwd),
         )
     except FileNotFoundError as error:
         raise ExternalToolNotFoundError(

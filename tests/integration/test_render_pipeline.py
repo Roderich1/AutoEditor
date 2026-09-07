@@ -103,11 +103,29 @@ def _synthesise(path: Path, size: str, seconds: int, pixel_format: str = "yuv420
 def awkward_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A directory whose name has a space and a non-ASCII character.
 
-    Not decoration. The ASS filter's filename is an option value inside a
-    filtergraph, so it passes through two levels of unescaping, and a space, an
-    accent and a Windows drive colon are exactly what breaks there.
+    Not decoration. Everything about how the ASS document reaches libass has to
+    survive a path a person would really have on their machine.
     """
     return tmp_path_factory.mktemp("clases de ñandú")
+
+
+@pytest.fixture(scope="module")
+def apostrophe_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A directory holding an apostrophe, a space and a non-ASCII character.
+
+    Built by hand rather than through ``mktemp``, which normalises its prefix
+    and would quietly give back a directory without the apostrophe -- and a
+    fixture that silently drops the character under test is worse than no test.
+    """
+    root = tmp_path_factory.mktemp("apostrophe").joinpath("codex it's ñ")
+    root.mkdir(parents=True, exist_ok=True)
+    assert "'" in str(root), "the fixture must really contain an apostrophe"
+    return root
+
+
+@pytest.fixture(scope="module")
+def apostrophe_source(apostrophe_root: Path) -> Path:
+    return _synthesise(apostrophe_root.joinpath("mi vídeo it's ñ.mp4"), "640x360", 40)
 
 
 @pytest.fixture(scope="module")
@@ -534,3 +552,103 @@ class TestRealFailures:
         }
         assert after == before
         assert verify_clips(directory, outcome.fingerprint, outcome.stage_config_sha256, plan).clips
+
+
+class TestAwkwardPaths:
+    """The ASS document has to reach libass whatever the directory is called.
+
+    An earlier version put the escaped path inside the filtergraph. It passed a
+    unit test that compared the escaped string, and FFmpeg still opened the
+    wrong file: a quote that survives the graph parser is read as a quote again
+    by the option parser, so `codex it's ñ` was opened as `codex its ñ` and the
+    render failed. A string comparison could not have caught that, so these
+    tests ask the binary instead.
+    """
+
+    def test_a_path_with_an_apostrophe_space_and_unicode_renders(
+        self,
+        apostrophe_source: Path,
+        apostrophe_root: Path,
+        probe_json: Callable[[Path], dict[str, Any]],
+    ) -> None:
+        directory = apostrophe_root.joinpath("salida it's ñ", "clips")
+
+        outcome = render(plan_for(apostrophe_source), directory)
+
+        assert len(outcome.index.clips) == 2
+        for clip in outcome.index.clips:
+            path = directory.joinpath(clip.directory, CLIP_FILENAME)
+            assert path.is_file() and path.stat().st_size > 0
+            raw = probe_json(path)
+            assert (video_stream(raw)["width"], video_stream(raw)["height"]) == (1080, 1920)
+            assert clip.subtitles_burned is True
+
+    def test_libass_really_drew_the_caption_from_that_path(
+        self, apostrophe_source: Path, apostrophe_root: Path
+    ) -> None:
+        """FFmpeg exiting 0 is not proof: an unresolvable font also exits 0.
+
+        The same clip is rendered twice, differing only in `burn_subtitles`, and
+        the caption band of one frame is compared against the other. If the ASS
+        never reached libass the two frames are identical.
+        """
+        frames = {}
+        for burn in (True, False):
+            directory = apostrophe_root.joinpath(f"burn-{burn} it's ñ", "clips")
+            outcome = render(plan_for(apostrophe_source, burn_subtitles=burn), directory)
+            clip = directory.joinpath(outcome.index.clips[0].directory, CLIP_FILENAME)
+            frames[burn] = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-ss",
+                    "3",
+                    "-i",
+                    str(clip),
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "gray",
+                    "-",
+                ],
+                capture_output=True,
+                check=True,
+                stdin=subprocess.DEVNULL,
+            ).stdout
+
+        band = int(1920 * 0.72) * 1080
+        differing = sum(
+            1
+            for left, right in zip(frames[True][band:], frames[False][band:], strict=True)
+            if left != right
+        )
+        assert differing > 20_000, "the caption was not drawn into the picture"
+
+    def test_the_source_and_the_output_still_resolve_from_that_path(
+        self, apostrophe_source: Path, apostrophe_root: Path
+    ) -> None:
+        """The fix moves the process cwd, so both absolute paths must still work.
+
+        The source lives in the apostrophe directory and the output goes to a
+        third place, neither of which is the directory FFmpeg runs in.
+        """
+        directory = apostrophe_root.joinpath("otra salida", "clips")
+
+        outcome = render(plan_for(apostrophe_source), directory)
+
+        assert "'" in str(apostrophe_source)
+        for clip in outcome.index.clips:
+            assert directory.joinpath(clip.directory, CLIP_FILENAME).is_file()
+
+    def test_nothing_is_left_in_the_working_directory(
+        self, apostrophe_source: Path, apostrophe_root: Path, tmp_path: Path
+    ) -> None:
+        """Running FFmpeg elsewhere must not write anything into this process's cwd."""
+        before = sorted(path.name for path in Path.cwd().iterdir())
+
+        render(plan_for(apostrophe_source), apostrophe_root.joinpath("limpio", "clips"))
+
+        assert sorted(path.name for path in Path.cwd().iterdir()) == before

@@ -11,10 +11,12 @@ filename could reach a shell is if this function put it there. Keeping the
 construction pure makes that a property the suite checks on every run instead of
 a convention someone has to remember.
 
-The filter graph is the one place in the engine where a path becomes part of a
-string an external tool parses, because ``ass=`` takes its file as an option
-value rather than as an argument of its own. ``escape_filter_path`` is therefore
-a security boundary and not a formatting helper, and it has its own tests.
+The filter graph is the only string FFmpeg *parses* rather than receives, so
+nothing variable goes in it. The ``ass`` filter takes its file as an option
+value, and an option value is unescaped twice -- which is why the escaped
+absolute path this project shipped first could not survive an apostrophe. The
+graph now carries the fixed basename of the document beside the output, and the
+adapter runs FFmpeg in that directory. ADR-035 records the reasoning.
 
 Two digests, following the shape the other three stages established (ADR-017,
 ADR-024, ADR-031):
@@ -37,7 +39,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from math import isfinite
-from pathlib import Path, PurePath
+from pathlib import Path
 
 from content_engine.config import RenderSettings
 from content_engine.domain.candidates import (
@@ -72,7 +74,6 @@ __all__ = [
     "RENDER_INDEX_FILENAME",
     "RENDER_OUTPUT_LABEL",
     "RENDER_STAGE_CONFIG_FILENAME",
-    "escape_filter_path",
     "render_arguments",
     "render_coherence_problem",
     "render_filter_complex",
@@ -80,6 +81,7 @@ __all__ = [
     "ass_style",
     "render_stage_config",
     "render_stage_config_sha256",
+    "require_plain_filter_name",
     "subtitle_rules",
 ]
 
@@ -208,30 +210,28 @@ def ass_style(config: RenderStageConfig) -> AssStyle:
     )
 
 
-def escape_filter_path(path: PurePath) -> str:
-    """Quote a path so libavfilter reads it back unchanged.
+#: What a subtitle filename may contain before it is put in a filtergraph.
+#: Deliberately narrow: this is a constant of the render stage, not a path, and
+#: anything outside this set means the stage is being asked for something it
+#: does not produce.
+_PLAIN_NAME = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
 
-    A filtergraph is unescaped twice on the way to a filter's option, and a
-    Windows path trips over both levels.
 
-    At the *graph* level ``,`` ``;`` ``[`` ``]`` separate chains and ``'``
-    quotes; inside single quotes none of them is special and no backslash is
-    consumed. At the *option* level ``:`` separates one option from the next and
-    ``=`` separates a name from its value, and a backslash escapes either.
+def require_plain_filter_name(name: str) -> str:
+    """Refuse a subtitle filename that is not safe to write into a filtergraph.
 
-    So: backslashes become forward slashes, which FFmpeg accepts on Windows and
-    which removes the whole question of what a backslash means here; every
-    ``:`` -- the drive letter's included -- is escaped for the option parser;
-    and the result is wrapped in single quotes for the graph parser. A literal
-    quote in the path closes, escapes and reopens, which is the only way the
-    format offers.
-
-    The escaping is deliberately not "replace the characters that broke last
-    time": both levels are handled, in the order they are applied, so a path
-    holding a comma is protected by the quotes rather than by luck.
+    The filtergraph is the one string FFmpeg parses rather than receives, and
+    the only value this stage puts in it is the fixed basename of the ASS
+    document it just wrote. That name never varies, so this never rejects
+    anything the engine produced -- it rejects what a future edit could
+    introduce, which is the point of checking a constant.
     """
-    text = str(path).replace("\\", "/").replace(":", "\\:")
-    return "'" + text.replace("'", "'\\''") + "'"
+    if not name or not set(name) <= _PLAIN_NAME:
+        raise ValueError(
+            f"subtitle filename {name!r} is not safe to put in a filter graph; expected "
+            "only letters, digits, underscores, hyphens and dots"
+        )
+    return name
 
 
 def _blur_chains(config: RenderStageConfig) -> list[str]:
@@ -269,16 +269,25 @@ def _crop_chains(config: RenderStageConfig) -> list[str]:
     ]
 
 
-def render_filter_complex(config: RenderStageConfig, subtitles: PurePath | None) -> str:
+def render_filter_complex(config: RenderStageConfig, subtitles_name: str | None) -> str:
     """The whole filter graph, ending on the label ``-map`` is pointed at.
 
     Subtitles are burned last, after the composition and after ``setsar``, so
     the caption is drawn in output pixels at the size the ASS document declares
     rather than scaled along with the picture.
 
-    ``subtitles`` is None when nothing is to be burned -- either because the
-    profile says so or because there is nothing to draw. The distinction is the
-    caller's to make; this function only reports what it was given.
+    ``subtitles_name`` is a **bare filename**, never a path, and FFmpeg resolves
+    it against the working directory the adapter runs it in. That is the whole
+    of the fix for a defect this project shipped: the filename used to be an
+    escaped absolute path, and libavfilter unescapes a filter option value
+    twice, so a quote that survived the graph parser was read as a quote again
+    by the option parser. A directory called ``codex it's ñ`` was opened as
+    ``codex its ñ`` and the render failed. No amount of escaping fixes that
+    reliably; not putting the path there at all does. ADR-035.
+
+    None means nothing is to be burned -- either because the profile says so or
+    because there is nothing to draw. The distinction is the caller's to make;
+    this function only reports what it was given.
     """
     chains = (
         _blur_chains(config)
@@ -286,8 +295,8 @@ def render_filter_complex(config: RenderStageConfig, subtitles: PurePath | None)
         else _crop_chains(config)
     )
     last = chains[-1]
-    if subtitles is not None:
-        last = f"{last},ass={escape_filter_path(subtitles)}"
+    if subtitles_name is not None:
+        last = f"{last},ass={require_plain_filter_name(subtitles_name)}"
     chains[-1] = f"{last}[{RENDER_OUTPUT_LABEL}]"
     return ";".join(chains)
 
@@ -301,11 +310,16 @@ def render_arguments(
     source: Path,
     start: float,
     duration: float,
-    subtitles: Path | None,
+    subtitles_name: str | None,
     output: Path,
     config: RenderStageConfig,
 ) -> list[str]:
     """CE-045. The exact FFmpeg invocation for one clip.
+
+    ``source`` and ``output`` are absolute paths handed to FFmpeg as arguments,
+    which no parser touches. ``subtitles_name`` is a bare filename because it
+    goes inside the filtergraph, which is parsed -- see ``render_filter_complex``
+    and ADR-035.
 
     ``-ss`` goes before ``-i`` so FFmpeg seeks rather than decoding the whole
     file up to the interval, and ``-t`` goes after it so the limit applies to
@@ -339,7 +353,7 @@ def render_arguments(
         "-t",
         f"{duration:.3f}",
         "-filter_complex",
-        render_filter_complex(config, subtitles),
+        render_filter_complex(config, subtitles_name),
         # One video and one audio stream, and nothing else. A source carrying a
         # subtitle or data track must not have it copied into the clip -- the
         # subtitles this stage produces are the ones it built.

@@ -434,12 +434,22 @@ class FakeMedia:
     #: What ffprobe will report as the pixel aspect ratio. CE-046 refuses
     #: anything but square, so a lost `setsar` has to be placeable.
     sample_aspect_ratio: str | None = "1:1"
+    #: The working directory each call was made in, so a test can assert the
+    #: render stage runs FFmpeg where the subtitles are (ADR-035).
+    working_directories: list[Path | None] = field(default_factory=list)
     _known: dict[Path, dict[str, Any]] = field(default_factory=dict)
 
-    def ffmpeg(self, arguments: Sequence[str], timeout: float | None = None) -> Any:
+    def ffmpeg(
+        self,
+        arguments: Sequence[str],
+        timeout: float | None = None,
+        cwd: Path | None = None,
+    ) -> Any:
         from content_engine.domain.exceptions import ExternalToolError
 
         self.calls.append(list(arguments))
+        self.working_directories.append(cwd)
+        self._resolve_subtitles(arguments, cwd)
         output = Path(arguments[-1])
         if output.name in self.fail_for:
             raise ExternalToolError(f"ffmpeg failed: synthetic refusal of {output.name}")
@@ -477,7 +487,38 @@ class FakeMedia:
             }
         return fake_process(arguments)
 
-    def ffprobe(self, arguments: Sequence[str], timeout: float | None = None) -> Any:
+    @staticmethod
+    def _resolve_subtitles(arguments: Sequence[str], cwd: Path | None) -> None:
+        """Model how FFmpeg finds the ASS: relative to its own cwd, or not at all.
+
+        Without this the fake would accept a filter naming a file that is not
+        where the process runs, and the unit suite would go on passing over
+        exactly the defect ADR-035 fixed -- which is what happened when the
+        graph carried an escaped absolute path.
+        """
+        from content_engine.domain.exceptions import ExternalToolError
+
+        if "-filter_complex" not in arguments:
+            return
+        graph = arguments[list(arguments).index("-filter_complex") + 1]
+        for chain in graph.split(";"):
+            for piece in chain.split(","):
+                if not piece.startswith("ass="):
+                    continue
+                name = piece.removeprefix("ass=").split("[", 1)[0]
+                base = Path.cwd() if cwd is None else cwd
+                if not base.joinpath(name).is_file():
+                    raise ExternalToolError(
+                        f"ffmpeg failed: Could not create a libass track when reading file "
+                        f"'{base.joinpath(name)}'"
+                    )
+
+    def ffprobe(
+        self,
+        arguments: Sequence[str],
+        timeout: float | None = None,
+        cwd: Path | None = None,
+    ) -> Any:
         from content_engine.domain.exceptions import ExternalToolError
 
         path = Path(arguments[-1])

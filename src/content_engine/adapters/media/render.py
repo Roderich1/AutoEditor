@@ -8,10 +8,16 @@ What is left here is the one thing that has to touch a process boundary.
 ADR-007: FFmpeg is handed an argument list. There is no shell, no string
 interpolation of a filename into a command, and no path through this module by
 which transcript content could become an argument -- the only strings that reach
-FFmpeg are three paths the service constructed, two formatted numbers and the
-constants from the render policy. The subtitle text itself never appears in the
-command at all: it is in a file the service wrote, and the filter is handed the
-file's path.
+FFmpeg are two absolute paths the service constructed, two formatted numbers and
+the constants from the render policy. The subtitle text itself never appears in
+the command at all: it is in a file the service wrote.
+
+ADR-035: neither does the subtitle *path*. The filtergraph is the one string
+FFmpeg parses rather than receives, and an option value inside it is unescaped
+twice, so no escaping of an absolute path survives an apostrophe. FFmpeg is run
+**in the clip's own directory** and the filter is handed the bare basename,
+which it resolves itself. Source and output stay absolute, so moving the working
+directory cannot change which files those are.
 """
 
 from pathlib import Path
@@ -46,10 +52,30 @@ class FFmpegClipRenderer:
         steps later, when the clip is probed.
         """
         output.parent.mkdir(parents=True, exist_ok=True)
+        working_directory = output.parent.resolve()
+        subtitles_name = None
+        if subtitles is not None:
+            # The filter resolves the name against the working directory, so a
+            # document anywhere else would silently not be found -- or, worse,
+            # a same-named one here would be found instead.
+            if subtitles.parent.resolve() != working_directory:
+                raise RenderError(
+                    f"The subtitles for {output.name} are in {subtitles.parent}, not beside "
+                    f"the clip in {working_directory}, so FFmpeg would not resolve them"
+                )
+            subtitles_name = subtitles.name
         try:
             run_command(
-                render_arguments(source, start, duration, subtitles, output, config),
+                render_arguments(
+                    source.resolve(),
+                    start,
+                    duration,
+                    subtitles_name,
+                    output.resolve(),
+                    config,
+                ),
                 timeout=TRANSCODE_TIMEOUT_SECONDS,
+                cwd=working_directory,
             )
         except ExternalToolError as error:
             raise RenderError(f"FFmpeg could not render the clip {output.name}: {error}") from (

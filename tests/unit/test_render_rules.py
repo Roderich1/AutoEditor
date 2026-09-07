@@ -12,7 +12,7 @@ dimensions would pass on a graph that squashed the picture to fit.
 
 from __future__ import annotations
 
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 
 import pytest
 
@@ -20,13 +20,13 @@ from content_engine.config import load_settings
 from content_engine.domain.enums import RenderPreset
 from content_engine.domain.render_rules import (
     RENDER_OUTPUT_LABEL,
-    escape_filter_path,
     render_arguments,
     render_filter_complex,
     render_stage_config,
     render_stage_config_sha256,
+    require_plain_filter_name,
 )
-from content_engine.domain.renders import RenderStageConfig
+from content_engine.domain.renders import SUBTITLES_ASS_FILENAME, RenderStageConfig
 
 
 def config(**overrides: object) -> RenderStageConfig:
@@ -197,51 +197,68 @@ class TestSubtitleBurn:
         assert "ass=" not in render_filter_complex(config(), None)
 
     @pytest.mark.parametrize("preset", [RenderPreset.VERTICAL_BLUR, RenderPreset.VERTICAL_CROP])
-    def test_a_subtitle_path_is_burned_last(self, preset: RenderPreset, tmp_path: Path) -> None:
-        subtitles = tmp_path.joinpath("subtitles.ass")
-
-        graph = render_filter_complex(config(preset=preset), subtitles)
+    def test_a_subtitle_name_is_burned_last(self, preset: RenderPreset) -> None:
+        graph = render_filter_complex(config(preset=preset), SUBTITLES_ASS_FILENAME)
 
         burn = graph.rsplit(",", 1)[-1]
         assert burn.startswith("ass=")
         assert burn.endswith(f"[{RENDER_OUTPUT_LABEL}]")
 
 
-class TestFilterPathEscaping:
-    """The one place a path becomes part of a string FFmpeg parses.
+class TestTheSubtitleNameInTheGraph:
+    """The filtergraph carries a bare filename, never a path. ADR-035.
 
-    libavfilter unescapes twice: once for the graph description and once for the
-    option value inside a filter. A Windows path carries a drive colon and
-    backslashes, both of which mean something at one of those levels.
+    An earlier version escaped an absolute path into the graph and had a unit
+    test that compared the escaped string. The string looked right and FFmpeg
+    still opened the wrong file, because libavfilter unescapes a filter option
+    value twice: a quote that survives the graph parser is read as a quote again
+    by the option parser, so ``codex it's ñ`` was opened as ``codex its ñ``.
+
+    A string comparison could never have caught that, which is why the real
+    assertion now lives in ``tests/integration/test_render_pipeline.py`` and
+    asks FFmpeg. What is left here is that nothing but a plain filename can get
+    into the graph at all.
     """
 
-    def test_a_windows_path_keeps_its_drive_and_loses_its_backslashes(self) -> None:
-        escaped = escape_filter_path(PureWindowsPath(r"C:\Users\MSI\clip\subtitles.ass"))
+    def test_the_graph_carries_the_bare_filename(self) -> None:
+        graph = render_filter_complex(config(), SUBTITLES_ASS_FILENAME)
 
-        assert escaped == "'C\\:/Users/MSI/clip/subtitles.ass'"
+        assert f"ass={SUBTITLES_ASS_FILENAME}" in graph
 
-    def test_a_posix_path_is_quoted_unchanged(self) -> None:
-        escaped = escape_filter_path(PurePosixPath("/home/user/clip/subtitles.ass"))
+    def test_no_separator_or_path_character_reaches_the_graph(self) -> None:
+        graph = render_filter_complex(config(), SUBTITLES_ASS_FILENAME)
+        burn = graph.rsplit(",", 1)[-1]
 
-        assert escaped == "'/home/user/clip/subtitles.ass'"
+        assert burn == f"ass={SUBTITLES_ASS_FILENAME}[{RENDER_OUTPUT_LABEL}]"
+        for character in ("/", "\\", ":", "'", '"'):
+            assert character not in burn
 
-    def test_spaces_and_non_ascii_survive_inside_the_quotes(self) -> None:
-        escaped = escape_filter_path(PureWindowsPath(r"C:\Mis Vídeos\año ñ\subtitles.ass"))
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "",
+            "sub titles.ass",
+            "it's.ass",
+            "a:b.ass",
+            "a,b.ass",
+            "a;b.ass",
+            "a[b].ass",
+            "/tmp/subtitles.ass",
+            "C:/tmp/subtitles.ass",
+            r"..\subtitles.ass",
+            "ñ.ass",
+        ],
+    )
+    def test_anything_but_a_plain_name_is_refused(self, name: str) -> None:
+        with pytest.raises(ValueError, match="not safe"):
+            require_plain_filter_name(name)
 
-        assert escaped == "'C\\:/Mis Vídeos/año ñ/subtitles.ass'"
+    def test_the_name_the_engine_produces_is_accepted(self) -> None:
+        assert require_plain_filter_name(SUBTITLES_ASS_FILENAME) == SUBTITLES_ASS_FILENAME
 
-    def test_a_single_quote_is_closed_escaped_and_reopened(self) -> None:
-        escaped = escape_filter_path(PurePosixPath("/tmp/it's/subtitles.ass"))
-
-        assert escaped == "'/tmp/it'\\''s/subtitles.ass'"
-
-    @pytest.mark.parametrize("character", [",", ";", "[", "]", "="])
-    def test_graph_separators_are_protected_by_the_quotes(self, character: str) -> None:
-        escaped = escape_filter_path(PurePosixPath(f"/tmp/a{character}b/subtitles.ass"))
-
-        assert escaped.startswith("'")
-        assert escaped.endswith("'")
-        assert f"a{character}b" in escaped
+    def test_a_graph_built_with_an_unsafe_name_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="not safe"):
+            render_filter_complex(config(), "it's.ass")
 
 
 class TestArguments:
@@ -335,7 +352,7 @@ class TestArguments:
             tmp_path.joinpath("s.mp4"),
             0.0,
             1.0,
-            tmp_path.joinpath("subtitles.ass"),
+            SUBTITLES_ASS_FILENAME,
             tmp_path.joinpath("o.mp4"),
             config(),
         )
@@ -344,16 +361,34 @@ class TestArguments:
         for dangerous in ("&&", "||", "|", ">", "<", "$(", "`"):
             assert dangerous not in joined
 
-    def test_the_subtitle_path_appears_only_inside_the_filter_graph(self, tmp_path: Path) -> None:
-        subtitles = tmp_path.joinpath("subtitles.ass")
-
+    def test_the_subtitle_name_appears_only_inside_the_filter_graph(self, tmp_path: Path) -> None:
         arguments = render_arguments(
-            tmp_path.joinpath("s.mp4"), 0.0, 1.0, subtitles, tmp_path.joinpath("o.mp4"), config()
+            tmp_path.joinpath("s.mp4"),
+            0.0,
+            1.0,
+            SUBTITLES_ASS_FILENAME,
+            tmp_path.joinpath("o.mp4"),
+            config(),
         )
 
-        holders = [argument for argument in arguments if "subtitles.ass" in argument]
+        holders = [argument for argument in arguments if SUBTITLES_ASS_FILENAME in argument]
         assert len(holders) == 1
         assert holders[0] == arguments[arguments.index("-filter_complex") + 1]
+
+    def test_no_directory_of_the_subtitles_appears_anywhere(self, tmp_path: Path) -> None:
+        """The whole point of ADR-035: the path is not in the command at all."""
+        arguments = render_arguments(
+            tmp_path.joinpath("s.mp4"),
+            0.0,
+            1.0,
+            SUBTITLES_ASS_FILENAME,
+            tmp_path.joinpath("clip_x", "clip.mp4"),
+            config(),
+        )
+
+        graph = arguments[arguments.index("-filter_complex") + 1]
+        assert "clip_x" not in graph
+        assert str(tmp_path) not in graph
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_a_non_finite_timestamp_is_refused(self, value: float, tmp_path: Path) -> None:

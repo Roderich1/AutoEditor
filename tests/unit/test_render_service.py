@@ -776,3 +776,75 @@ class TestRefusals:
         plan.source_path.unlink()
 
         assert service(media).generate(plan, clips, GENERATED_AT).index.clips == []
+
+
+class TestWhereFfmpegRuns:
+    """ADR-035: the ASS reaches libass by working directory, not by escaped path.
+
+    The integration suite proves FFmpeg really opens the file from a directory
+    called `codex it's ñ`. These prove the mechanism the fix relies on, which a
+    unit test can see and an integration test cannot separate from everything
+    else that has to work.
+    """
+
+    def test_ffmpeg_is_run_in_the_clip_directory(
+        self, media: FakeMedia, tmp_path: Path, clips: Path
+    ) -> None:
+        outcome = service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+
+        expected = clips.joinpath(STAGING_DIRNAME, outcome.index.clips[0].directory).resolve()
+        assert media.working_directories == [expected]
+
+    def test_the_graph_names_the_file_without_any_directory(
+        self, media: FakeMedia, tmp_path: Path, clips: Path
+    ) -> None:
+        service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+
+        graph = media.calls[0][media.calls[0].index("-filter_complex") + 1]
+        assert f"ass={SUBTITLES_ASS_FILENAME}" in graph
+        assert str(tmp_path) not in graph
+        assert "clip_" not in graph
+
+    def test_the_source_and_output_arguments_stay_absolute(
+        self, media: FakeMedia, tmp_path: Path, clips: Path
+    ) -> None:
+        """Moving the working directory must not change which files those are."""
+        service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+
+        arguments = media.calls[0]
+        assert Path(arguments[arguments.index("-i") + 1]).is_absolute()
+        assert Path(arguments[-1]).is_absolute()
+
+    def test_no_working_directory_is_set_when_nothing_is_burned_in(
+        self, media: FakeMedia, tmp_path: Path, clips: Path
+    ) -> None:
+        """It is set regardless, because the output is written there either way."""
+        plan = plan_for(tmp_path, count=1, burn_subtitles=False)
+
+        outcome = service(media).generate(plan, clips, GENERATED_AT)
+
+        expected = clips.joinpath(STAGING_DIRNAME, outcome.index.clips[0].directory).resolve()
+        assert media.working_directories == [expected]
+        graph = media.calls[0][media.calls[0].index("-filter_complex") + 1]
+        assert "ass=" not in graph
+
+    def test_subtitles_somewhere_other_than_beside_the_clip_are_refused(
+        self, media: FakeMedia, tmp_path: Path
+    ) -> None:
+        """The filter would resolve the name against the wrong directory."""
+        from content_engine.adapters.media.render import FFmpegClipRenderer
+
+        elsewhere = tmp_path.joinpath("otro", SUBTITLES_ASS_FILENAME)
+        elsewhere.parent.mkdir(parents=True)
+        elsewhere.write_text("[Events]\n", encoding="utf-8")
+        output = tmp_path.joinpath("aqui", CLIP_FILENAME)
+
+        with pytest.raises(RenderError, match="not beside the clip"):
+            FFmpegClipRenderer().render(
+                tmp_path.joinpath("source.mp4"),
+                0.0,
+                1.0,
+                elsewhere,
+                output,
+                render_stage_config(load_settings().render),
+            )
