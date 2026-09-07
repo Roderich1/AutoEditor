@@ -33,14 +33,16 @@ FFmpeg 9.0.1:
 | `uv run ruff check --no-cache .` | passed |
 | `uv run ruff format --check .` | passed, 130 files |
 | `uv run mypy --no-incremental src` | passed, 58 files, strict |
-| `uv run pytest -p no:cacheprovider` | 2240 passed, 1 skipped, 475 more than the 1765 on `main`; 99.70% over 4298 statements, 13 missed — the same 13 `main` already had |
+| `uv run pytest -p no:cacheprovider` | 2298 passed, 1 skipped, 533 more than the 1765 on `main`; 99.70% over 4336 statements, 13 missed — the same 13 `main` already had. Before the two review defects were fixed this branch stood at 2240 tests over 4298 statements |
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
-| `uv run pytest -m integration --no-cov` | 46 passed with real FFmpeg; 24 of them are the new render pipeline |
+| `uv run pytest -m integration --no-cov` | 50 passed with real FFmpeg; 28 of them are the new render pipeline, 4 of those under a directory named `codex it's ñ` |
 | Coverage of every module added by CE-040–CE-046 | 100% |
 | `uv run pytest` from a working directory outside the repository | passed, no stray files |
 | Re-run with every cache disabled | `ruff --no-cache`, `mypy --no-incremental`, `pytest -p no:cacheprovider`: all green |
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
 | Non-finite numbers refused | 142 parametrised cases for `nan`, `inf`, `-inf`, up from 88 |
+| Every material field of `metadata.json` mutated in turn | 33 cases, plus a whitespace-only change; every one stops reuse |
+| A path holding an apostrophe, a space and `ñ` | FFmpeg really opens the ASS and libass really draws it, asserted against the binary |
 | `uv build` | wheel and sdist built |
 | SonarCloud quality gate | passes; all five conditions green, **0 open issues** on the new code |
 | GitHub Actions "Verify on Ubuntu" | passes |
@@ -80,7 +82,9 @@ margin off the frame would leave a clean video and a zero exit code.
 | An interval with no speech in it | empty SRT, header-only ASS, `cue_count` 0 — not a failure |
 | A deleted, truncated, tampered or renamed artifact | refuses reuse and names `--force`; asserted for the MP4, the SRT and the ASS |
 | A clip directory from an earlier shortlist | refused as not in the index |
-| An edited `metadata.json` | refused by comparison against the index, field by field |
+| An edited `metadata.json` | refused twice over: its digest is in the index, and the two are still compared field by field |
+| An extra file inside a clip directory | refused; a clip directory holds exactly its four artifacts |
+| The ASS path | never in the filtergraph. FFmpeg runs in the clip's directory and resolves a bare basename (ADR-035) |
 | An edited `decisions.json` | refused: the review fingerprint is rebuilt from the file rather than read out of the manifest |
 | Clip publication failing at each step, shortlist same, grown and shrunk | the previous set stays byte-identical and still passes `verify_clips` |
 | Failure of the restore itself | every artifact stays reachable in `clips/` or `clips/.rollback/`, the backup is never deleted, and the error names the directory |
@@ -957,6 +961,78 @@ duration.
   clip lives two directories deeper. FFmpeg exits 0 and writes nothing; the
   adapter catches it and the run becomes `FAILED_RENDER` with no partial
   artifact, but the fix is a shorter workspace path, not a code change.
+
+
+### Two defects an independent review found, and what they cost
+
+Both were reproducible, both were in code this branch had already claimed was
+verified, and both are recorded because the pair says something about what the
+tests were proving.
+
+**The subtitle path was escaped into the filtergraph, and FFmpeg opened a
+different file.** The `ass` filter takes its document as an option value inside
+the filtergraph, so the path was escaped: backslashes to forward slashes, every
+`:` escaped for the option parser, single quotes for the graph parser, and a
+literal quote closed-escaped-reopened as `'\''`. A unit test compared the
+escaped string and passed. Under a directory called `codex it's ñ`, FFmpeg
+reported:
+
+```text
+Could not create a libass track when reading file '/tmp/codex its ñ/subtitles.ass'
+```
+
+The apostrophe is gone. The value is unescaped **twice** — once splitting the
+graph, once parsing the option — so the `'\''` that correctly survives the first
+pass is read as a quote again by the second. Reproduced on Windows as well as
+Linux.
+
+Escaping twice would fix this input and break the reverse case, and the number
+of passes is not a property this code controls. So the path is not there at all
+any more: FFmpeg runs in the clip's own directory and the filter gets the bare
+basename `subtitles.ass`, which it resolves itself. Source and output stay
+absolute, so moving the working directory cannot change which files those are.
+`escape_filter_path` is deleted rather than repaired — a helper that cannot be
+made correct is worse than none, because its tests look like evidence.
+
+The test that replaces it asks FFmpeg. Four integration tests run under a
+directory really named `codex it's ñ`, one of them rendering the same clip twice
+differing only in `burn_subtitles` and comparing the caption band, because
+FFmpeg exits 0 whether or not libass drew anything. ADR-035.
+
+**`metadata.json` was outside every digest.** The argument was that a file
+cannot contain its own hash, so it was verified by parsing it and comparing it
+against the index instead. That comparison covered fourteen fields. Changing
+`topic` to another valid string and calling `require_clips` produced no refusal.
+
+Exposed: `run_id`, `category`, `topic`, `hook`, `summary`, `reason`,
+`total_score`, `original_start`, `original_end`, `preset`, `width`, `height`,
+`measured_duration_seconds`, `subtitles_burned`, `generated_at` and all four
+provenance fingerprints — most of the document, and specifically the half that
+says which candidate a clip is and where it came from.
+
+The "cannot contain its own hash" argument was true and irrelevant: nothing
+requires the hash to be in the file. `ClipRecord` now carries
+`metadata_sha256` and `metadata_size_bytes`, so the fingerprint covers the
+metadata through the index. The ordering removes the apparent cycle — measure,
+build the metadata, write it, hash the written file, then build the record — and
+`_measure` returns measurements rather than a record so that order is the
+obvious one. The semantic comparison stays as a second layer and is widened to
+every shared field: a digest proves the bytes have not moved, the comparison
+proves the two artifacts still agree. `index.json` is at schema 2. ADR-036.
+
+**What the pair has in common.** Both passed a test that examined something the
+code produced rather than something the system did. One compared a string the
+escaper returned; the other compared a list of fields somebody had chosen. The
+replacements ask a different question — what does FFmpeg open, and does *any*
+byte changing stop reuse — and that is the difference between a test and a
+restatement.
+
+**One more gap the audit found.** Reviewing every published artifact for the
+same class of hole turned up a third: a file dropped into a clip directory was
+checked by nothing and would have ridden along through every republication. A
+clip directory now holds exactly its four artifacts. Stray files at the top of
+`clips/` remain permitted and tested — publication does not own them, and an
+operator's notes survive a regeneration.
 
 ### Four defects found in review, and what they cost
 

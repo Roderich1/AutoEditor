@@ -1616,6 +1616,10 @@ defines no portable escape for any of them, and libass and VSFilter disagree
 about what an unmatched brace does. A brace becomes a parenthesis and a
 backslash a forward slash, under `SUBTITLE_RULES_VERSION`.
 
+This is about the subtitle *text*. How the finished document reaches libass is a
+separate question, and the first answer to it was wrong: ADR-035 records why the
+path no longer goes into the filtergraph at all.
+
 **The subtitle rules and the caption style are stage constants.** ADR-028's
 reasoning applies unchanged: a new key in `[render]` folds into `config_sha256`
 and changes the logical identity of every run that already exists, to describe a
@@ -1748,3 +1752,157 @@ nothing.
   decisions are there, and the rejection rate is the measurement.
 - `preview` already behaves this way for an analysis that selected no
   candidates, so the two stages agree about what an empty stage means.
+
+---
+
+## ADR-035 — The subtitle file reaches libass by working directory, not by path
+
+**Status:** Accepted for V0.6, replacing the escaping approach shipped first
+
+### Context
+
+The `ass` filter takes the document it draws as an **option value inside the
+filtergraph**, which is the one string FFmpeg parses rather than receives. The
+first implementation therefore escaped an absolute path into it, handling what
+looked like the two levels of libavfilter escaping: backslashes became forward
+slashes, every `:` was escaped for the option parser, the whole was wrapped in
+single quotes for the graph parser, and a literal quote was closed, escaped and
+reopened as `'\''`.
+
+It had a unit test that compared the escaped string, and the string was right.
+
+An independent review reproduced a failure anyway, on a directory called
+`codex it's ñ`:
+
+```text
+Could not create a libass track when reading file '/tmp/codex its ñ/subtitles.ass'
+```
+
+The apostrophe is gone. Reproduced on Windows as well.
+
+**Why.** The value is unescaped **twice**: once when the graph is split into
+chains and filters, and again when the filter's options are parsed. `'\''`
+correctly survives the first pass and becomes `it's` — and the second pass then
+reads that `'` as a quote character and swallows it. Escaping twice would fix
+this input and break the round trip in the other direction; the number of passes
+is not a property this code controls, and getting it right for every future
+FFmpeg is not a promise that can be kept.
+
+### Decision
+
+**No path goes into the filtergraph.** FFmpeg is run with its working directory
+set to the clip's own directory, and the filter is handed the bare basename
+`subtitles.ass`, which it resolves itself. `run_command` gains a `cwd`
+parameter for this.
+
+- `source` and `output` stay **absolute** and are passed as arguments, which no
+  parser touches, so moving the working directory cannot change which files
+  those are.
+- The adapter refuses subtitles that are not beside the output, because the
+  filter would resolve the name against the wrong directory — or, worse, find a
+  same-named document that happens to be in the right one.
+- `require_plain_filter_name` refuses anything but letters, digits, underscores,
+  hyphens and dots. The name is a constant of this stage, so it never rejects
+  what the engine produces; it rejects what a future edit could introduce.
+- `run_command` checks the working directory before calling, because
+  `subprocess` reports a missing one as the same `FileNotFoundError` a missing
+  executable produces, and "ffmpeg was not found. Install it and make sure it is
+  on PATH" is a misleading thing to tell somebody whose directory was deleted.
+
+### Consequences
+
+- The property is now asserted by **FFmpeg** rather than by a string comparison.
+  Four integration tests run under a directory really named `codex it's ñ`, one
+  of which renders the same clip twice differing only in `burn_subtitles` and
+  compares the caption band, because FFmpeg exits 0 whether or not libass drew
+  anything.
+- `escape_filter_path` is deleted rather than fixed. A helper that cannot be
+  made correct is worse than no helper, because its tests look like evidence.
+- The unit suite keeps a narrower claim it can actually support: nothing but a
+  plain filename can enter the graph. The fake encoder models the resolution, so
+  a future change that put a path back would fail there too rather than only in
+  integration.
+- A clip directory is now also where FFmpeg runs. Nothing is written there that
+  the stage does not write, and the "no extra files" check in ADR-036 covers
+  that.
+
+---
+
+## ADR-036 — Every published artifact is inside a digest, metadata.json included
+
+**Status:** Accepted for V0.6
+
+### Context
+
+`metadata.json` was deliberately left outside every digest. The reasoning was
+that a file cannot contain its own hash, so it was verified by being parsed and
+compared against the index instead — which is a stronger check for what it
+covers.
+
+It covered fourteen fields. An independent review changed `topic` to another
+valid string, called `require_clips`, and got no refusal.
+
+The exposed fields were `run_id`, `category`, `topic`, `hook`, `summary`,
+`reason`, `total_score`, `original_start`, `original_end`, `preset`, `width`,
+`height`, `measured_duration_seconds`, `subtitles_burned`, `generated_at` and
+all four provenance fingerprints — which is to say most of the document, and
+specifically the half that says which candidate this clip is and where it came
+from. A `metadata.json` that travels with a clip and answers those questions
+wrongly is worse than one that is missing.
+
+The "cannot contain its own hash" argument was true and irrelevant: nothing
+requires the hash to be *in* the file.
+
+### Decision
+
+`ClipRecord` carries `metadata_sha256` and `metadata_size_bytes`, so the render
+fingerprint covers `metadata.json` through the index like the other three
+artifacts.
+
+There is no cycle, and the ordering is what removes it:
+
+```text
+measure the finished files
+  → build the metadata from those measurements
+  → write it
+  → hash the file that was written
+  → build the record, digest included
+```
+
+`_measure` therefore returns measurements rather than a record. That is the
+change that makes the order the obvious one instead of a circularity to work
+around.
+
+**The semantic comparison stays**, and is widened to every field the two models
+share. It is not redundant: a digest proves the bytes have not moved, the
+comparison proves the two artifacts still *agree*, and only the second catches a
+set where the index and the metadata were rewritten together.
+
+`RENDER_INDEX_SCHEMA_VERSION` goes to 2. A version 1 index is refused rather
+than reinterpreted, because it cannot answer the question this build asks.
+
+### One more gap the audit found
+
+Reviewing every published artifact for the same class of hole turned up
+another: a file dropped into a clip directory was checked by nothing, and would
+have been moved along by every republication with no record of it anywhere. A
+clip directory now holds **exactly** its four artifacts and anything else is a
+refusal.
+
+Stray files at the top of `clips/` are still permitted, and that is deliberate
+and tested: publication does not own them, an operator's notes survive a
+regeneration, and they are not inside any clip.
+
+### Consequences
+
+- Every published byte of the render stage is now either inside a digest or
+  refused: the MP4, the SRT, the ASS and the metadata by digest; `index.json`
+  and `config.effective.json` by the fingerprint; anything else by name.
+- Changing one byte of a metadata document — including whitespace, which no
+  field comparison could ever see — stops the set being reused.
+- 33 adversarial cases, one per material field, assert this rather than trusting
+  it.
+- A test that wants to reach the checks *behind* the digests has to recompute
+  them first, which is what somebody tampering carefully would do. That is what
+  `reseal()` in the integrity suite is, and it deliberately does not repair the
+  fingerprint, so every deeper refusal still gets its turn.

@@ -272,11 +272,28 @@ después para que el límite se aplique a lo que se escribe. El *texto* del
 subtítulo nunca aparece en el comando: está en un archivo, y al filtro se le pasa
 la ruta.
 
-Esa ruta es el único lugar del motor donde un path se vuelve parte de una cadena
-que FFmpeg analiza, porque `ass=` la recibe como valor de opción dentro del grafo
-de filtros y se desescapa dos veces. `escape_filter_path` cubre ambos niveles y
-tiene sus propias pruebas, con rutas de Windows y POSIX, espacios, acentos, dos
-puntos, comillas y cada separador del grafo.
+**Ninguna ruta entra en el grafo de filtros.** `ass=` recibe su archivo como
+valor de opción dentro del grafo, y un valor de opción se desescapa **dos
+veces**: una al partir el grafo y otra al leer las opciones del filtro. Una
+primera versión escapaba ahí la ruta absoluta y tenía una prueba unitaria que
+comparaba la cadena escapada; la cadena era correcta y FFmpeg abría otro archivo:
+
+```text
+Could not create a libass track when reading file '/tmp/codex its ñ/subtitles.ass'
+```
+
+El apóstrofo desaparece, porque el `'''` que sobrevive correctamente al primer
+paso vuelve a leerse como comilla en el segundo. Escapar dos veces arreglaría
+este caso y rompería el contrario, y el número de pasos no lo decide este
+código.
+
+Así que FFmpeg se ejecuta **en el directorio del propio clip** y al filtro se le
+pasa el nombre a secas, `subtitles.ass`, que él mismo resuelve. `source` y
+`output` siguen siendo absolutos y van como argumentos, que ningún analizador
+toca, de modo que mover el directorio de trabajo no puede cambiar qué archivos
+son. La prueba que lo respalda se la hace a FFmpeg, bajo un directorio que de
+verdad se llama `codex it's ñ`, e incluye un render A/B que compara la banda del
+subtítulo: FFmpeg termina con 0 haya dibujado libass algo o no. ADR-035.
 
 ### Verificación
 
@@ -289,12 +306,22 @@ La relación de aspecto de píxel se comprueba porque 1080x1920 con píxeles no
 cuadrados no es un video vertical, y ninguna otra comprobación notaría un render
 que perdiera `setsar`.
 
-Una invocación posterior lo prueba todo otra vez sin codificador: tamaño y digest
-de cada artefacto, cada `metadata.json` contra su registro campo por campo, ambos
-documentos parseados, ningún directorio de clip que el índice no nombre, el
-conjunto contra las decisiones que la revisión registró, y el fingerprint
-reconstruido. Un artefacto borrado, truncado, manipulado o renombrado no se
-reutiliza, y el rechazo nombra `--force`.
+Una invocación posterior lo prueba todo otra vez sin codificador: tamaño y
+digest de **los cuatro** artefactos —`metadata.json` incluido—, cada
+`metadata.json` contra su registro campo por campo, ambos documentos parseados,
+ningún archivo de más dentro de un directorio de clip, ningún directorio de clip
+que el índice no nombre, el conjunto contra las decisiones que la revisión
+registró, y el fingerprint reconstruido. Un artefacto borrado, truncado,
+manipulado o renombrado no se reutiliza, y el rechazo nombra `--force`.
+
+`metadata.json` estuvo fuera de todo digest en una primera versión, con el
+argumento de que un archivo no puede contener su propio hash. Era cierto e
+irrelevante: nada obliga a que el hash esté *dentro*. `ClipRecord` guarda
+`metadata_sha256` y `metadata_size_bytes`, y el orden deshace el ciclo aparente
+—medir, construir el metadata, escribirlo, hashear el archivo escrito, y
+entonces construir el registro—. La comparación campo por campo se mantiene como
+segunda capa: un digest demuestra que los bytes no se movieron, la comparación
+demuestra que los dos artefactos siguen diciendo lo mismo. ADR-036.
 
 El fingerprint de la revisión se **reconstruye** desde `decisions.json` en lugar
 de leerse del manifiesto. Eso detecta un archivo de decisiones editado después de
