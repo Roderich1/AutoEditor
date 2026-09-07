@@ -83,11 +83,41 @@ class TestStageConfig:
         ):
             assert getattr(built, field) >= 1
 
-    def test_the_digest_is_stable_and_covers_every_field(self) -> None:
-        first = config()
+    def test_the_digest_is_the_same_for_two_independently_built_configurations(self) -> None:
+        """Hashing one object twice would pass for any pure function.
 
-        assert render_stage_config_sha256(first) == render_stage_config_sha256(first)
-        assert render_stage_config_sha256(first) != render_stage_config_sha256(config(crf=21))
+        The property that matters is portability: two configurations built
+        separately from the same profile must hash identically, because that
+        digest is what a later run compares against the manifest -- on another
+        machine, in another process.
+        """
+        assert render_stage_config_sha256(config()) == render_stage_config_sha256(config())
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("crf", 21),
+            ("preset", RenderPreset.VERTICAL_CROP.value),
+            ("burn_subtitles", False),
+            ("encoder_preset", "slow"),
+            ("blur_sigma", 12.0),
+            ("width", 720),
+        ],
+    )
+    def test_any_changed_setting_changes_the_digest(self, field: str, value: object) -> None:
+        assert render_stage_config_sha256(config()) != render_stage_config_sha256(
+            config(**{field: value})
+        )
+
+    def test_a_changed_subtitle_rule_changes_the_digest(self) -> None:
+        """Nested, so a digest over the top level alone would miss it."""
+        built = config()
+        payload = built.model_dump(mode="json")
+        payload["subtitles"]["max_words_per_cue"] = 5
+
+        assert render_stage_config_sha256(built) != render_stage_config_sha256(
+            RenderStageConfig.model_validate(payload)
+        )
 
     def test_odd_dimensions_are_refused(self) -> None:
         with pytest.raises(ValueError, match="even"):
