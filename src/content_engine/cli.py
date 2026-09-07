@@ -24,6 +24,7 @@ from content_engine.adapters.analysis.prompt import Prompt, select_prompt
 from content_engine.adapters.media.ffmpeg import FFmpegAdapter
 from content_engine.adapters.media.ffprobe import FFprobeAdapter
 from content_engine.adapters.media.preview import FFmpegPreviewRenderer
+from content_engine.adapters.media.render import FFmpegClipRenderer
 from content_engine.adapters.persistence.filesystem import RunWorkspace
 from content_engine.adapters.transcription.faster_whisper import FasterWhisperTranscriber
 from content_engine.config import Settings, config_sha256, load_settings
@@ -59,6 +60,9 @@ from content_engine.domain.preview_rules import (
     preview_stage_config,
 )
 from content_engine.domain.previews import PREVIEW_INDEX_SCHEMA_VERSION, PreviewIndex
+from content_engine.domain.render_rules import RENDER_INDEX_FILENAME, render_stage_config
+from content_engine.domain.render_targets import build_render_target
+from content_engine.domain.renders import RENDER_INDEX_SCHEMA_VERSION, RenderIndex
 from content_engine.domain.review import (
     DECISIONS_SCHEMA_VERSION,
     DETAIL_MAX_LENGTH,
@@ -66,6 +70,7 @@ from content_engine.domain.review import (
     EditedDecision,
     RejectedDecision,
     ReviewDecisionCollection,
+    review_fingerprint,
 )
 from content_engine.domain.run_state import validate_transition
 from content_engine.domain.transcript_rules import stage_config, transcription_fingerprint
@@ -88,6 +93,14 @@ from content_engine.services.preview_service import (
     resolve_pending_rollback,
     verify_previews,
 )
+from content_engine.services.render_service import (
+    RenderPlan,
+    RenderService,
+    verify_clips,
+)
+from content_engine.services.render_service import (
+    resolve_pending_rollback as resolve_pending_clip_rollback,
+)
 from content_engine.services.review_service import (
     DECISIONS_FILENAME,
     Decision,
@@ -95,6 +108,7 @@ from content_engine.services.review_service import (
     ReviewSession,
     empty_collection,
     require_decisions,
+    review_stage_config,
 )
 from content_engine.services.run_service import RunService
 from content_engine.services.transcription_service import (
@@ -103,6 +117,7 @@ from content_engine.services.transcription_service import (
     read_transcript,
     verify_stage_config,
 )
+from content_engine.utils.canonical import canonical_sha256
 from content_engine.utils.hashing import sha256_file
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
@@ -1336,6 +1351,251 @@ def _ask_for_bound(name: str, current: float, source_duration_seconds: float) ->
         )
         return None
     return value
+
+
+@app.command()
+def render(
+    run_id: Annotated[str, typer.Argument(help="Existing run identifier")],
+    config: ConfigOption = None,
+    force: Annotated[bool, typer.Option("--force", help="Replace existing clips")] = False,
+) -> None:
+    """Cut the final vertical clips a completed review kept (CE-040 to CE-046).
+
+    One directory per decision, holding ``clip.mp4``, ``subtitles.srt``,
+    ``subtitles.ass`` and ``metadata.json``. Approvals are cut over the
+    candidate's own interval and edits over the bounds the reviewer moved to;
+    a rejection produces nothing at all.
+
+    Subtitles are built from the transcript's word timestamps, converted to
+    clip-local time and exported twice from one list of cues, so the burned-in
+    caption and the sidecar file cannot disagree. Nothing reaches the clips
+    directory until every clip has been read back with ffprobe and both
+    documents have been parsed, so a failure leaves the previous set intact and
+    the run never claims RENDERED on the strength of files that were not
+    produced.
+
+    This stage opens no socket and reads no credential.
+    """
+
+    def action() -> str:
+        settings: Settings = load_settings(config)
+        workspace = RunWorkspace(settings.workspace.root)
+        run_service = RunService(settings, workspace)
+        run_path = workspace.require(run_id)
+        manifest = workspace.read_manifest(run_path)
+
+        # Refused before anything is read, hashed or encoded, so a run that
+        # cannot reach RENDERED says so instead of failing at the end.
+        #
+        # This check rather than `validate_transition`, and the difference is
+        # the message. The state machine would answer READY_FOR_REVIEW with
+        # "cannot move to RENDERED; allowed: FAILED_PREVIEW, FAILED_REVIEW,
+        # REVIEWED", which is true and tells an operator nothing about what to
+        # do next. The three states below are exactly the ones the machine
+        # permits, so nothing is loosened, and `run_service.advance` still
+        # enforces the machine before any status is written.
+        if manifest.status not in {RunStatus.REVIEWED, RunStatus.FAILED_RENDER, RunStatus.RENDERED}:
+            raise IncompatibleArtifactError(
+                f"This run is {manifest.status}, so no human decision has settled what to "
+                f"render. Run `content-engine review {run_id}` and decide every candidate "
+                "first."
+            )
+
+        _warn_about_configuration_drift(manifest, config_sha256(settings))
+        plan = _plan_render(run_path, manifest, settings)
+
+        clips_directory = run_path.joinpath("clips")
+        # Before the reuse decision, not after. A backup left pending by an
+        # earlier failed publication holds part of the published set, so
+        # verifying the directory without finishing the restore first would
+        # refuse a set that is merely unfinished.
+        try:
+            restored = resolve_pending_clip_rollback(clips_directory)
+        except ContentEngineError as error:
+            run_service.fail(run_path, manifest, RunStage.RENDER, error)
+            _report_run_context(run_path, manifest)
+            raise
+        if restored is not None:
+            console.print(f"[yellow]Recovered:[/yellow] {restored}.")
+
+        # Whether this stage has run is a question for the manifest and for the
+        # index together. Either signal sends the invocation through
+        # verification, which refuses whatever is inconsistent and leaves the
+        # decision to --force.
+        already_rendered = (
+            RunStage.RENDER.value in manifest.stages
+            or clips_directory.joinpath(RENDER_INDEX_FILENAME).is_file()
+        )
+        if already_rendered and not force:
+            return _reuse_or_recover_clips(run_service, run_path, manifest, clips_directory, plan)
+
+        try:
+            outcome = RenderService(FFmpegClipRenderer(), FFprobeAdapter()).generate(
+                plan, clips_directory, datetime.now(UTC)
+            )
+        except ContentEngineError as error:
+            run_service.fail(run_path, manifest, RunStage.RENDER, error)
+            _report_run_context(run_path, manifest)
+            raise
+
+        manifest = run_service.advance(run_path, manifest, RunStatus.RENDERED)
+        run_service.record_stage(
+            run_path,
+            manifest,
+            RunStage.RENDER,
+            outcome.fingerprint,
+            outcome.stage_config_sha256,
+            RENDER_INDEX_SCHEMA_VERSION,
+        )
+        return _describe_clips(outcome.index, outcome.fingerprint, clips_directory)
+
+    _execute(action)
+
+
+def _plan_render(run_path: Path, manifest: RunManifest, settings: Settings) -> RenderPlan:
+    """Everything the render stage needs, resolved before an encoder starts.
+
+    Five artifacts have to agree before a single frame is encoded: the
+    transcript the subtitles come from, the candidates the review was taken
+    over, the previews that were watched, the decisions themselves, and the
+    source. The source is hashed rather than merely checked for existence,
+    because a file at the recorded path that is not the recorded file would be
+    rendered into clips of the wrong video under the right names.
+    """
+    transcript = read_transcript(run_path.joinpath("transcript"))
+    collection = read_candidates(run_path.joinpath("analysis"))
+    analysis_fingerprint = _analysis_fingerprint(manifest)
+    review_plan = ReviewPlan(
+        candidates=tuple(collection.candidates),
+        analysis_fingerprint=analysis_fingerprint,
+        source_duration_seconds=collection.source_duration_seconds,
+    )
+    # The previews are proved before the decisions are read. They are what the
+    # reviewer actually watched, and a decision taken over a preview that has
+    # since been replaced is a decision about something else.
+    _require_reviewable_previews(manifest, run_path.joinpath("previews"), review_plan)
+
+    review_directory = run_path.joinpath("review")
+    decisions = require_decisions(review_directory, review_plan)
+    source = manifest.input.path
+    if not source.is_file():
+        raise InvalidMediaError(
+            f"The run source is missing, so no clip can be cut from it: {source}"
+        )
+    digest = sha256_file(source)
+    if digest != manifest.input.sha256:
+        raise InvalidMediaError(
+            f"The file at the run source path is not the one this run was created from "
+            f"(recorded {manifest.input.sha256[:12]}, on disk {digest[:12]}): {source}"
+        )
+    target = build_render_target(
+        candidates=review_plan.candidates,
+        decisions=decisions,
+        analysis_fingerprint=analysis_fingerprint,
+        review_fingerprint=_review_fingerprint(manifest, review_plan, decisions),
+        decisions_sha256=canonical_sha256(decisions.model_dump(mode="json")),
+        transcript_sha256=transcript_sha256(transcript),
+        source_sha256=digest,
+        source_duration_seconds=collection.source_duration_seconds,
+    )
+    return RenderPlan(
+        target=target,
+        config=render_stage_config(settings.render),
+        source_path=source,
+        transcript=transcript,
+        run_id=manifest.run_id,
+    )
+
+
+def _review_fingerprint(
+    manifest: RunManifest,
+    plan: ReviewPlan,
+    decisions: ReviewDecisionCollection,
+) -> str:
+    """The completed review these clips are being cut from, proved rather than read.
+
+    The manifest records a fingerprint when the review finishes. It is not
+    simply trusted here: it is rebuilt from the decisions on disk and the two
+    must agree, which is what catches a decision file edited after the review
+    was recorded -- the one artifact in the engine that cannot be regenerated
+    and the one whose alteration would silently change what gets published.
+    """
+    record = manifest.stages.get(RunStage.REVIEW.value)
+    if record is None:
+        raise IncompatibleArtifactError(
+            "This run has no recorded review, so nothing has settled what to render. Run "
+            f"`content-engine review {manifest.run_id}` and decide every candidate first."
+        )
+    if record.schema_version != DECISIONS_SCHEMA_VERSION:
+        raise IncompatibleArtifactError(
+            f"The existing decisions use schema {record.schema_version}; this build produces "
+            f"{DECISIONS_SCHEMA_VERSION}. Review the run again with "
+            f"`content-engine review {manifest.run_id} --force`."
+        )
+    rebuilt = review_fingerprint(plan.analysis_fingerprint, decisions, review_stage_config(plan))
+    if rebuilt != record.fingerprint:
+        raise IncompatibleArtifactError(
+            f"The recorded review fingerprint cannot be rebuilt from "
+            f"{DECISIONS_FILENAME} (recorded {record.fingerprint[:12]}, rebuilt "
+            f"{rebuilt[:12]}). The decisions were changed after the review was recorded, and "
+            "human decisions are never regenerated. Review the run again with "
+            f"`content-engine review {manifest.run_id} --force` if that is what you want."
+        )
+    return rebuilt
+
+
+def _describe_clips(index: RenderIndex, fingerprint: str, directory: Path) -> str:
+    if not index.clips:
+        console.print(
+            "[yellow]Warning:[/yellow] the review kept none of the candidates, so there was "
+            "nothing to render. The stage is recorded with an empty set rather than inventing "
+            "a clip: rejecting everything is a result, not a failure."
+        )
+    seconds = sum(clip.duration for clip in index.clips)
+    return (
+        f"[green]Clips ready:[/green] {len(index.clips)} clips at {index.width}x{index.height}, "
+        f"{seconds:.1f}s in total, {index.preset} in {directory}, "
+        f"fingerprint {fingerprint[:12]}"
+    )
+
+
+def _reuse_or_recover_clips(
+    run_service: RunService,
+    run_path: Path,
+    manifest: RunManifest,
+    clips_directory: Path,
+    plan: RenderPlan,
+) -> str:
+    """Report a proved reuse, settling the run's status if it was left failed.
+
+    The same shape the analysis and preview stages use, for the same reason:
+    everything before this decides what to run, and this decides what an
+    already-complete stage means.
+    """
+    record = manifest.stages.get(RunStage.RENDER.value)
+    if record is None:
+        raise IncompatibleArtifactError(
+            "Clips exist but no fingerprint was recorded for them, so they cannot be shown to "
+            "match the current decisions and settings. Rerun with --force."
+        )
+    if record.schema_version != RENDER_INDEX_SCHEMA_VERSION:
+        raise IncompatibleArtifactError(
+            f"The existing clips use index schema {record.schema_version}; this build produces "
+            f"{RENDER_INDEX_SCHEMA_VERSION}. Rerun with --force."
+        )
+    index = verify_clips(clips_directory, record.fingerprint, record.stage_config_sha256, plan)
+    summary = f"{len(index.clips)} clips at {index.width}x{index.height}"
+    if manifest.status is RunStatus.RENDERED:
+        # Already settled: reuse must not touch a single byte, so the manifest
+        # is not rewritten either.
+        return f"[green]Clips reused:[/green] {summary}. Use --force to regenerate."
+    previous = manifest.status
+    run_service.advance(run_path, manifest, RunStatus.RENDERED)
+    return (
+        f"[green]Clips recovered:[/green] {summary}. The files still match the current "
+        f"decisions, transcript, source and settings, so the run moves from {previous} to "
+        f"{RunStatus.RENDERED}. Use --force to regenerate."
+    )
 
 
 def _first_message(error: ValidationError) -> str:
