@@ -420,12 +420,20 @@ class FakeMedia:
     probed: list[Path] = field(default_factory=list)
     #: Output basenames the encoder must refuse, so a failure can be placed.
     fail_for: set[str] = field(default_factory=set)
+    #: Output basenames the encoder writes but ffprobe will then deny knowing,
+    #: which is how a file that exists and cannot be read back is placed.
+    unprobeable: set[str] = field(default_factory=set)
     #: Output basename -> duration ffprobe will report, overriding the request.
     measured: dict[str, float] = field(default_factory=dict)
     #: Output basename -> the dimensions ffprobe will report.
     dimensions: dict[str, tuple[int, int]] = field(default_factory=dict)
     #: What ffprobe will name the video codec, so a wrong encode can be placed.
     video_codec: str = "h264"
+    #: The same for audio, so a stream-copied or transcoded track can be placed.
+    audio_codec: str = "aac"
+    #: What ffprobe will report as the pixel aspect ratio. CE-046 refuses
+    #: anything but square, so a lost `setsar` has to be placeable.
+    sample_aspect_ratio: str | None = "1:1"
     _known: dict[Path, dict[str, Any]] = field(default_factory=dict)
 
     def ffmpeg(self, arguments: Sequence[str], timeout: float | None = None) -> Any:
@@ -439,29 +447,34 @@ class FakeMedia:
         width, height = self.dimensions.get(output.name, (self.width, self.height))
         duration = self.measured.get(output.name, requested)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(f"preview:{output.name}:{requested:.3f}".encode())
-        streams: list[dict[str, Any]] = [
-            {
-                "codec_type": "video",
-                "codec_name": self.video_codec,
-                "width": width,
-                "height": height,
-                "avg_frame_rate": "30/1",
-            }
-        ]
+        # The parent directory is part of the placeholder because a render
+        # writes every clip as `clip.mp4`, so without it two clips of equal
+        # duration would be byte-identical and no test could tell them apart.
+        output.write_bytes(f"encoded:{output.parent.name}:{output.name}:{requested:.3f}".encode())
+        video: dict[str, Any] = {
+            "codec_type": "video",
+            "codec_name": self.video_codec,
+            "width": width,
+            "height": height,
+            "avg_frame_rate": "30/1",
+        }
+        if self.sample_aspect_ratio is not None:
+            video["sample_aspect_ratio"] = self.sample_aspect_ratio
+        streams: list[dict[str, Any]] = [video]
         if self.audio:
             streams.append(
                 {
                     "codec_type": "audio",
-                    "codec_name": "aac",
+                    "codec_name": self.audio_codec,
                     "sample_rate": "44100",
                     "channels": 2,
                 }
             )
-        self._known[output.resolve()] = {
-            "streams": streams,
-            "format": {"duration": f"{duration:.3f}", "format_name": "mov,mp4,m4a"},
-        }
+        if output.name not in self.unprobeable:
+            self._known[output.resolve()] = {
+                "streams": streams,
+                "format": {"duration": f"{duration:.3f}", "format_name": "mov,mp4,m4a"},
+            }
         return fake_process(arguments)
 
     def ffprobe(self, arguments: Sequence[str], timeout: float | None = None) -> Any:
@@ -482,6 +495,7 @@ class FakeMedia:
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeMedia:
         monkeypatch.setattr("content_engine.adapters.media.preview.run_command", self.ffmpeg)
+        monkeypatch.setattr("content_engine.adapters.media.render.run_command", self.ffmpeg)
         monkeypatch.setattr("content_engine.adapters.media.ffprobe.run_command", self.ffprobe)
         return self
 

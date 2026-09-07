@@ -61,6 +61,8 @@ from content_engine.domain.subtitles import (
     DEFAULT_ASS_STYLE,
     DEFAULT_SUBTITLE_RULES,
     SUBTITLE_RULES_VERSION,
+    AssStyle,
+    SubtitleRules,
 )
 from content_engine.utils.canonical import canonical_sha256
 
@@ -75,8 +77,10 @@ __all__ = [
     "render_coherence_problem",
     "render_filter_complex",
     "render_fingerprint",
+    "ass_style",
     "render_stage_config",
     "render_stage_config_sha256",
+    "subtitle_rules",
 ]
 
 #: Bumped whenever the argument list changes, even if the policy did not. The
@@ -166,6 +170,41 @@ def render_stage_config(settings: RenderSettings) -> RenderStageConfig:
         metadata_schema_version=CLIP_METADATA_SCHEMA_VERSION,
         candidates_schema_version=CANDIDATES_SCHEMA_VERSION,
         decisions_schema_version=DECISIONS_SCHEMA_VERSION,
+    )
+
+
+def subtitle_rules(config: RenderStageConfig) -> SubtitleRules:
+    """The cue rules a recorded stage configuration describes.
+
+    The builder is driven from the artifact rather than from the module
+    constants, so a set of clips and the configuration written beside them
+    cannot describe two different policies -- and so a future run reading an
+    older configuration back would build the cues that configuration names.
+    """
+    return SubtitleRules(
+        max_words_per_cue=config.subtitles.max_words_per_cue,
+        min_words_before_soft_break=config.subtitles.min_words_before_soft_break,
+        max_lines=config.subtitles.max_lines,
+        max_chars_per_line=config.subtitles.max_chars_per_line,
+        pause_seconds=config.subtitles.pause_seconds,
+        min_cue_seconds=config.subtitles.min_cue_seconds,
+    )
+
+
+def ass_style(config: RenderStageConfig) -> AssStyle:
+    """The caption style a recorded stage configuration describes."""
+    return AssStyle(
+        font_name=config.subtitles.font_name,
+        font_size=config.subtitles.font_size,
+        primary_colour=config.subtitles.primary_colour,
+        outline_colour=config.subtitles.outline_colour,
+        back_colour=config.subtitles.back_colour,
+        bold=config.subtitles.bold,
+        outline=config.subtitles.outline,
+        shadow=config.subtitles.shadow,
+        alignment=config.subtitles.alignment,
+        margin_horizontal=config.subtitles.margin_horizontal,
+        margin_vertical=config.subtitles.margin_vertical,
     )
 
 

@@ -56,6 +56,7 @@ from content_engine.services.preview_service import (
 )
 from tests.conftest import chunk_of, collect, raw_candidate, speech_transcript
 
+
 def patch_writes(monkeypatch: pytest.MonkeyPatch, replacement: Callable[..., None]) -> None:
     """Intercept every JSON write a publication performs.
 
