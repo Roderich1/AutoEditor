@@ -31,8 +31,13 @@ from pydantic import Field, model_validator
 from content_engine.domain.candidates import _Artifact, _close
 from content_engine.domain.enums import ClipCategory, RenderPreset, ReviewDecisionType
 
-#: Bumped whenever clips/index.json changes incompatibly.
-RENDER_INDEX_SCHEMA_VERSION = 1
+#: Bumped whenever clips/index.json changes incompatibly. Version 2 added
+#: ``metadata_sha256`` and ``metadata_size_bytes`` to every record: version 1
+#: left ``metadata.json`` outside every digest, so a clip's topic, its
+#: provenance fingerprints or the run it came from could be rewritten and the
+#: set still reused. An index written by a version 1 build is refused rather
+#: than reinterpreted, because it cannot answer the question this one asks.
+RENDER_INDEX_SCHEMA_VERSION = 2
 #: Bumped whenever clips/config.effective.json changes incompatibly.
 RENDER_STAGE_CONFIG_SCHEMA_VERSION = 1
 #: Bumped whenever a clip's metadata.json changes incompatibly.
@@ -239,6 +244,14 @@ class ClipRecord(_Artifact):
     srt_size_bytes: int = Field(ge=0)
     ass_sha256: str = Field(min_length=64, max_length=64)
     ass_size_bytes: int = Field(gt=0)
+    #: The metadata document beside the clip. It is digested like the other
+    #: three artifacts and for the same reason: without this, every field of
+    #: ``metadata.json`` that the index does not separately duplicate could be
+    #: rewritten without the set becoming unusable. There is no cycle -- the
+    #: metadata is written first and hashed afterwards, so it never contains
+    #: its own digest.
+    metadata_sha256: str = Field(min_length=64, max_length=64)
+    metadata_size_bytes: int = Field(gt=0)
     #: Zero is legitimate: an interval with no speech in it produces an empty
     #: SRT and an ASS holding only its header.
     cue_count: int = Field(ge=0)
@@ -328,10 +341,15 @@ class ClipMetadata(_Artifact):
     seconds of which source it holds, and which analysis and review it came out
     of -- without the run it was cut from.
 
-    It is not hashed into the index, because it would then have to contain its
-    own digest. It is verified by being parsed and compared against the record
-    instead, which is a stronger check than a digest: a digest proves the bytes
-    have not moved, this proves the two artifacts still say the same thing.
+    Its **digest** is in the index, and the file itself is not, which is what
+    keeps the two from chasing each other: the metadata is written, then hashed,
+    and the hash goes into the record. So it never contains its own digest and
+    is still covered by the render fingerprint.
+
+    It is *also* parsed and compared against the record field by field. That is
+    not redundant with the digest -- a digest proves the bytes have not moved,
+    the comparison proves the two artifacts still say the same thing, and only
+    the second would catch a set where both files were rewritten together.
     """
 
     schema_version: int = CLIP_METADATA_SCHEMA_VERSION

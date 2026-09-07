@@ -69,6 +69,35 @@ def prove(rendered: tuple[Path, RenderPlan, str, str]) -> None:
     require_clips(directory, fingerprint, digest, plan.target)
 
 
+def reseal(rendered: tuple[Path, RenderPlan, str, str]) -> None:
+    """Make the index agree with whatever is on disk now.
+
+    Every published file is digested, so a test that edits one is caught by the
+    digest before anything deeper runs -- which is the point of the digest and
+    is asserted on its own. To reach the layer *behind* it, this recomputes the
+    four digests and sizes, which is what somebody tampering carefully would
+    do. The fingerprint is deliberately not repaired: it is checked last, so
+    every deeper refusal still gets its turn first.
+    """
+    from content_engine.utils.hashing import sha256_file
+
+    directory, _, _, _ = rendered
+    path = directory.joinpath(RENDER_INDEX_FILENAME)
+    payload = json.loads(path.read_text("utf-8"))
+    for record in payload["clips"]:
+        base = directory.joinpath(record["directory"])
+        for key, filename in (
+            ("", record["clip_filename"]),
+            ("srt_", record["srt_filename"]),
+            ("ass_", record["ass_filename"]),
+            ("metadata_", record["metadata_filename"]),
+        ):
+            artifact = base.joinpath(filename)
+            record[f"{key}sha256"] = sha256_file(artifact)
+            record[f"{key}size_bytes"] = artifact.stat().st_size
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 class TestTheIndex:
     def test_a_missing_index_is_refused(self, rendered: tuple[Path, RenderPlan, str, str]) -> None:
         directory, _, _, _ = rendered
@@ -175,6 +204,7 @@ class TestTheMetadata:
         payload = json.loads(path.read_text("utf-8"))
         payload["schema_version"] = 99
         path.write_text(json.dumps(payload), encoding="utf-8")
+        reseal(rendered)
 
         with pytest.raises(IncompatibleArtifactError, match="metadata schema 99"):
             prove(rendered)
@@ -186,6 +216,7 @@ class TestTheMetadata:
         payload = json.loads(path.read_text("utf-8"))
         payload["total_score"] = 5000.0
         path.write_text(json.dumps(payload), encoding="utf-8")
+        reseal(rendered)
 
         with pytest.raises(IncompatibleArtifactError, match="not valid clip metadata"):
             prove(rendered)
@@ -201,6 +232,7 @@ class TestTheMetadata:
         payload = json.loads(path.read_text("utf-8"))
         payload[field] = value
         path.write_text(json.dumps(payload), encoding="utf-8")
+        reseal(rendered)
 
         with pytest.raises(IncompatibleArtifactError, match=field):
             prove(rendered)
@@ -214,7 +246,7 @@ class TestTheSubtitleDocuments:
     def rehash(self, rendered: tuple[Path, RenderPlan, str, str], name: str) -> None:
         """Make the index and the metadata agree with the damaged file.
 
-        Without this the digest check refuses it first, which is correct and is
+        Without this the digest refuses it first, which is correct and is
         asserted elsewhere -- but it means the parse never runs. The point of
         these tests is the layer *behind* the digests: somebody who edited a
         subtitle file and carefully updated every hash still cannot publish a
@@ -222,22 +254,13 @@ class TestTheSubtitleDocuments:
         """
         from content_engine.utils.hashing import sha256_file
 
-        directory, _, _, _ = rendered
         clip_directory = self.clip_directory(rendered)
-        path = clip_directory.joinpath(name)
         key = "srt" if name.endswith(".srt") else "ass"
-        digest = sha256_file(path)
-
-        index_path = directory.joinpath(RENDER_INDEX_FILENAME)
-        payload = json.loads(index_path.read_text("utf-8"))
-        payload["clips"][0][f"{key}_sha256"] = digest
-        payload["clips"][0][f"{key}_size_bytes"] = path.stat().st_size
-        index_path.write_text(json.dumps(payload), encoding="utf-8")
-
         metadata_path = clip_directory.joinpath(CLIP_METADATA_FILENAME)
         metadata = json.loads(metadata_path.read_text("utf-8"))
-        metadata[f"{key}_sha256"] = digest
+        metadata[f"{key}_sha256"] = sha256_file(clip_directory.joinpath(name))
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        reseal(rendered)
 
     def test_an_unparseable_srt_is_refused(
         self, rendered: tuple[Path, RenderPlan, str, str]
@@ -505,3 +528,183 @@ class TestSilence:
         base = directory.joinpath(clip.directory)
         assert base.joinpath(SUBTITLES_SRT_FILENAME).read_text("utf-8") == ""
         assert "[Events]" in base.joinpath(SUBTITLES_ASS_FILENAME).read_text("utf-8")
+
+
+class TestMetadataIsCoveredByTheDigest:
+    """Any byte of metadata.json changing must stop the set being reused.
+
+    The semantic comparison against the index came first and it only ever looked
+    at the fields it happened to list, so `topic`, `hook`, `summary`, `reason`,
+    `run_id`, `preset` and the three provenance fingerprints could all be
+    rewritten and the clips would still be reused -- a `metadata.json` that
+    travels with a clip and says which candidate, which source and which review
+    produced it, quietly saying something else.
+
+    These are the fields, one test each, and none of them is allowed through.
+    """
+
+    def clip_directory(self, rendered: tuple[Path, RenderPlan, str, str]) -> Path:
+        directory, _, _, _ = rendered
+        return directory.joinpath(read_index(directory).clips[0].directory)
+
+    def mutate(self, rendered: tuple[Path, RenderPlan, str, str], field: str, value: Any) -> None:
+        path = self.clip_directory(rendered).joinpath(CLIP_METADATA_FILENAME)
+        payload = json.loads(path.read_text("utf-8"))
+        assert field in payload, f"{field} is not a metadata field"
+        assert payload[field] != value, f"{field} was already {value!r}"
+        payload[field] = value
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("run_id", "otro-run"),
+            ("candidate_id", "cand_9999999999999999"),
+            ("rank", 9),
+            ("decision", "edited"),
+            ("category", "tip"),
+            ("topic", "un tema completamente distinto"),
+            ("hook", "otro gancho"),
+            ("summary", "otro resumen"),
+            ("reason", "otro motivo"),
+            ("total_score", 12.5),
+            ("original_start", 1.5),
+            ("original_end", 999.0),
+            ("start", 2.5),
+            ("end", 998.0),
+            ("duration", 3.5),
+            ("preset", "vertical_crop"),
+            ("width", 720),
+            ("height", 1280),
+            ("sample_aspect_ratio", "4:3"),
+            ("video_codec", "hevc"),
+            ("audio_codec", "mp3"),
+            ("measured_duration_seconds", 4.5),
+            ("sha256", "9" * 64),
+            ("size_bytes", 12345),
+            ("srt_sha256", "8" * 64),
+            ("ass_sha256", "7" * 64),
+            ("cue_count", 999),
+            ("subtitles_burned", False),
+            ("analysis_fingerprint", "6" * 64),
+            ("review_fingerprint", "5" * 64),
+            ("source_sha256", "4" * 64),
+            ("transcript_sha256", "3" * 64),
+            ("generated_at", "2001-01-01T00:00:00Z"),
+        ],
+    )
+    def test_changing_any_material_field_prevents_reuse(
+        self, rendered: tuple[Path, RenderPlan, str, str], field: str, value: Any
+    ) -> None:
+        self.mutate(rendered, field, value)
+
+        with pytest.raises(IncompatibleArtifactError):
+            prove(rendered)
+
+    def test_even_a_whitespace_change_prevents_reuse(
+        self, rendered: tuple[Path, RenderPlan, str, str]
+    ) -> None:
+        """No field changes value, so only a digest can notice."""
+        path = self.clip_directory(rendered).joinpath(CLIP_METADATA_FILENAME)
+        payload = json.loads(path.read_text("utf-8"))
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+        with pytest.raises(IncompatibleArtifactError, match="changed since"):
+            prove(rendered)
+
+    def test_the_index_records_the_metadata_digest_and_size(
+        self, rendered: tuple[Path, RenderPlan, str, str]
+    ) -> None:
+        from content_engine.utils.hashing import sha256_file
+
+        directory, _, _, _ = rendered
+        record = read_index(directory).clips[0]
+        path = directory.joinpath(record.directory, record.metadata_filename)
+
+        assert record.metadata_sha256 == sha256_file(path)
+        assert record.metadata_size_bytes == path.stat().st_size
+
+    def test_the_metadata_does_not_contain_its_own_digest(
+        self, rendered: tuple[Path, RenderPlan, str, str]
+    ) -> None:
+        """There is no cycle: the digest is taken after the file is written."""
+        payload = json.loads(
+            self.clip_directory(rendered).joinpath(CLIP_METADATA_FILENAME).read_text("utf-8")
+        )
+
+        assert "metadata_sha256" not in payload
+        assert "metadata_size_bytes" not in payload
+
+    def test_the_render_fingerprint_covers_the_metadata(
+        self, rendered: tuple[Path, RenderPlan, str, str]
+    ) -> None:
+        """Through the index, which is what the fingerprint hashes."""
+        from content_engine.domain.render_rules import render_fingerprint
+
+        directory, _, fingerprint, _ = rendered
+        index = read_index(directory)
+        config = read_stage_config(directory)
+        assert render_fingerprint(index, config) == fingerprint
+
+        moved = index.model_copy(
+            update={
+                "clips": [index.clips[0].model_copy(update={"metadata_sha256": "0" * 64})],
+            }
+        )
+        assert render_fingerprint(moved, config) != fingerprint
+
+
+class TestNoUncheckedArtifact:
+    def test_an_extra_file_inside_a_clip_directory_is_refused(
+        self, rendered: tuple[Path, RenderPlan, str, str]
+    ) -> None:
+        """Every published file is either digested or refused; none is ignored."""
+        directory, _, _, _ = rendered
+        clip_directory = directory.joinpath(read_index(directory).clips[0].directory)
+        clip_directory.joinpath("extra.txt").write_text("smuggled", encoding="utf-8")
+
+        with pytest.raises(IncompatibleArtifactError, match="extra"):
+            prove(rendered)
+
+    def test_the_four_artifacts_are_the_whole_of_a_clip_directory(
+        self, rendered: tuple[Path, RenderPlan, str, str]
+    ) -> None:
+        directory, _, _, _ = rendered
+        record = read_index(directory).clips[0]
+        names = sorted(path.name for path in directory.joinpath(record.directory).iterdir())
+
+        assert names == sorted(
+            (
+                record.clip_filename,
+                record.srt_filename,
+                record.ass_filename,
+                record.metadata_filename,
+            )
+        )
+
+
+class TestTheMetadataTranslation:
+    def test_metadata_the_stage_cannot_describe_becomes_a_render_error(
+        self, media: FakeMedia, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same defensive translation the clip record gets, for the same reason.
+
+        Injected because the metadata is built from measurements that
+        ``_measure`` has already validated, so nothing a probe can return
+        reaches the constructor and fails it. What is pinned is that a
+        ValidationError here arrives as a render failure naming the stage rather
+        than as a traceback in front of an operator.
+        """
+        real = render_service.ClipMetadata
+
+        def refuse(**fields: Any) -> Any:
+            del fields
+            return real(run_id="")  # every other required field is missing
+
+        monkeypatch.setattr(render_service, "ClipMetadata", refuse)
+        engine = service()
+        plan = plan_for(tmp_path, count=1)
+        clips = tmp_path.joinpath("clips")
+
+        with pytest.raises(RenderError, match="metadata it cannot describe"):
+            engine.generate(plan, clips, GENERATED_AT)

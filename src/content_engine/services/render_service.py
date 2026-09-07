@@ -171,6 +171,28 @@ class _Staged:
     metadata: ClipMetadata
 
 
+@dataclass(frozen=True)
+class _Measurements:
+    """What was read back off the four files, before any record exists.
+
+    Separate from ``ClipRecord`` because of an ordering constraint that used to
+    be papered over: the record has to carry the digest of ``metadata.json``,
+    and the metadata has to be built from the measurements. Threading the
+    measurements through as their own value makes the sequence -- measure,
+    write metadata, hash it, build the record -- the obvious one rather than a
+    circular dependency to work around.
+    """
+
+    media: MediaInfo
+    sha256: str
+    size_bytes: int
+    srt_sha256: str
+    srt_size_bytes: int
+    ass_sha256: str
+    ass_size_bytes: int
+    cue_count: int
+
+
 class RenderService:
     def __init__(self, renderer: ClipRendererPort, probe: MediaProbePort) -> None:
         self.renderer = renderer
@@ -274,14 +296,25 @@ class RenderService:
             output,
             plan.config,
         )
-        record = self._measure(clip, output, srt_path, ass_path, len(cues), plan.config)
+        measurements = self._measure(clip, output, srt_path, ass_path, len(cues), plan.config)
+
+        # Written and hashed before the record exists, which is what lets the
+        # record carry its digest without the metadata having to contain one.
+        metadata = self._metadata(plan, clip, measurements, generated_at)
+        metadata_path = directory.joinpath(CLIP_METADATA_FILENAME)
+        write_json(metadata_path, metadata.model_dump(mode="json"))
+
+        record = self._record(
+            clip,
+            measurements,
+            sha256_file(metadata_path),
+            metadata_path.stat().st_size,
+            plan.config,
+        )
         # Read back before the clip is published rather than trusted: CE-046
         # asks whether the documents on disk are subtitle files a player will
         # accept, and the only honest way to answer is to parse them.
         _require_subtitles_within(directory, record)
-
-        metadata = self._metadata(plan, clip, record, generated_at)
-        write_json(directory.joinpath(CLIP_METADATA_FILENAME), metadata.model_dump(mode="json"))
         return _Staged(record=record, metadata=metadata)
 
     @staticmethod
@@ -301,7 +334,7 @@ class RenderService:
         ass_path: Path,
         cue_count: int,
         config: RenderStageConfig,
-    ) -> ClipRecord:
+    ) -> _Measurements:
         """Read back what was produced and refuse it if it is not what was asked for."""
         media = self._probe_clip(output)
         self._require_picture(clip, media, config)
@@ -313,6 +346,27 @@ class RenderService:
                 f"{clip.duration:.3f}s interval, {drift:.3f}s beyond the "
                 f"{config.duration_tolerance_seconds}s duration tolerance"
             )
+        return _Measurements(
+            media=media,
+            sha256=sha256_file(output),
+            size_bytes=output.stat().st_size,
+            srt_sha256=sha256_file(srt_path),
+            srt_size_bytes=srt_path.stat().st_size,
+            ass_sha256=sha256_file(ass_path),
+            ass_size_bytes=ass_path.stat().st_size,
+            cue_count=cue_count,
+        )
+
+    @staticmethod
+    def _record(
+        clip: RenderTargetClip,
+        measurements: _Measurements,
+        metadata_sha256: str,
+        metadata_size_bytes: int,
+        config: RenderStageConfig,
+    ) -> ClipRecord:
+        """The index entry for one finished clip, digests of all four files included."""
+        media = measurements.media
         try:
             return ClipRecord(
                 candidate_id=clip.candidate.id,
@@ -334,13 +388,15 @@ class RenderService:
                 measured_duration_seconds=media.duration_seconds,
                 video_codec=media.video_codec,
                 audio_codec=media.audio_codec or "",
-                sha256=sha256_file(output),
-                size_bytes=output.stat().st_size,
-                srt_sha256=sha256_file(srt_path),
-                srt_size_bytes=srt_path.stat().st_size,
-                ass_sha256=sha256_file(ass_path),
-                ass_size_bytes=ass_path.stat().st_size,
-                cue_count=cue_count,
+                sha256=measurements.sha256,
+                size_bytes=measurements.size_bytes,
+                srt_sha256=measurements.srt_sha256,
+                srt_size_bytes=measurements.srt_size_bytes,
+                ass_sha256=measurements.ass_sha256,
+                ass_size_bytes=measurements.ass_size_bytes,
+                metadata_sha256=metadata_sha256,
+                metadata_size_bytes=metadata_size_bytes,
+                cue_count=measurements.cue_count,
                 subtitles_burned=config.burn_subtitles,
             )
         except ValidationError as error:
@@ -404,46 +460,53 @@ class RenderService:
     def _metadata(
         plan: RenderPlan,
         clip: RenderTargetClip,
-        record: ClipRecord,
+        measurements: _Measurements,
         generated_at: datetime,
     ) -> ClipMetadata:
+        """The document that travels with the clip, built before it is hashed."""
         candidate = clip.candidate
-        return ClipMetadata(
-            schema_version=CLIP_METADATA_SCHEMA_VERSION,
-            generated_at=generated_at,
-            run_id=plan.run_id,
-            candidate_id=candidate.id,
-            rank=record.rank,
-            decision=record.decision,
-            category=candidate.category,
-            topic=candidate.topic,
-            hook=candidate.hook,
-            summary=candidate.summary,
-            reason=candidate.reason,
-            total_score=candidate.total_score,
-            original_start=record.original_start,
-            original_end=record.original_end,
-            start=record.start,
-            end=record.end,
-            duration=record.duration,
-            preset=plan.config.preset,
-            width=record.width,
-            height=record.height,
-            sample_aspect_ratio=record.sample_aspect_ratio,
-            video_codec=record.video_codec,
-            audio_codec=record.audio_codec,
-            measured_duration_seconds=record.measured_duration_seconds,
-            sha256=record.sha256,
-            size_bytes=record.size_bytes,
-            srt_sha256=record.srt_sha256,
-            ass_sha256=record.ass_sha256,
-            cue_count=record.cue_count,
-            subtitles_burned=record.subtitles_burned,
-            analysis_fingerprint=plan.target.analysis_fingerprint,
-            review_fingerprint=plan.target.review_fingerprint,
-            source_sha256=plan.target.source_sha256,
-            transcript_sha256=plan.target.transcript_sha256,
-        )
+        media = measurements.media
+        try:
+            return ClipMetadata(
+                schema_version=CLIP_METADATA_SCHEMA_VERSION,
+                generated_at=generated_at,
+                run_id=plan.run_id,
+                candidate_id=candidate.id,
+                rank=clip.rank,
+                decision=clip.decision,
+                category=candidate.category,
+                topic=candidate.topic,
+                hook=candidate.hook,
+                summary=candidate.summary,
+                reason=candidate.reason,
+                total_score=candidate.total_score,
+                original_start=clip.original_start,
+                original_end=clip.original_end,
+                start=clip.start,
+                end=clip.end,
+                duration=clip.duration,
+                preset=plan.config.preset,
+                width=media.width,
+                height=media.height,
+                sample_aspect_ratio=media.sample_aspect_ratio or "",
+                video_codec=media.video_codec,
+                audio_codec=media.audio_codec or "",
+                measured_duration_seconds=media.duration_seconds,
+                sha256=measurements.sha256,
+                size_bytes=measurements.size_bytes,
+                srt_sha256=measurements.srt_sha256,
+                ass_sha256=measurements.ass_sha256,
+                cue_count=measurements.cue_count,
+                subtitles_burned=plan.config.burn_subtitles,
+                analysis_fingerprint=plan.target.analysis_fingerprint,
+                review_fingerprint=plan.target.review_fingerprint,
+                source_sha256=plan.target.source_sha256,
+                transcript_sha256=plan.target.transcript_sha256,
+            )
+        except ValidationError as error:
+            raise RenderError(
+                f"The render stage produced metadata it cannot describe: {error}"
+            ) from error
 
     @staticmethod
     def _build_index(
@@ -608,18 +671,35 @@ def read_stage_config(directory: Path) -> RenderStageConfig:
 
 
 def _require_files(directory: Path, record: ClipRecord) -> None:
-    """Every artifact of one clip exists, with the size and digest it claims."""
+    """Every artifact of one clip exists, with the size and digest it claims.
+
+    All four of them, ``metadata.json`` included. Leaving the metadata out is
+    what let a clip's topic, its provenance fingerprints and the run it came
+    from be rewritten while the set stayed reusable.
+    """
     clip_directory = directory.joinpath(record.directory)
     if not clip_directory.is_dir():
         raise IncompatibleArtifactError(
             f"The clip directory {record.directory} is missing from {directory}, so candidate "
             f"{record.candidate_id} has no clip. Rerun with --force."
         )
-    for name, digest, size in (
-        (record.clip_filename, record.sha256, record.size_bytes),
-        (record.srt_filename, record.srt_sha256, record.srt_size_bytes),
-        (record.ass_filename, record.ass_sha256, record.ass_size_bytes),
-    ):
+    published = {
+        record.clip_filename: (record.sha256, record.size_bytes),
+        record.srt_filename: (record.srt_sha256, record.srt_size_bytes),
+        record.ass_filename: (record.ass_sha256, record.ass_size_bytes),
+        record.metadata_filename: (record.metadata_sha256, record.metadata_size_bytes),
+    }
+    # Nothing published escapes a digest, and nothing is published that the
+    # index does not name. A file smuggled into a clip directory would
+    # otherwise ride along through every republication, verified by nothing.
+    strays = sorted(path.name for path in clip_directory.iterdir() if path.name not in published)
+    if strays:
+        raise IncompatibleArtifactError(
+            f"{clip_directory} holds extra files the index does not describe: "
+            f"{', '.join(strays)}. A clip directory holds exactly its four artifacts. "
+            "Rerun with --force."
+        )
+    for name, (digest, size) in published.items():
         path = clip_directory.joinpath(name)
         if not path.is_file():
             raise IncompatibleArtifactError(
@@ -633,12 +713,41 @@ def _require_files(directory: Path, record: ClipRecord) -> None:
             )
 
 
+#: Every field ``ClipMetadata`` and ``ClipRecord`` both hold. Listed rather than
+#: intersected at runtime so that adding a field to either model is a decision
+#: about whether the two must agree on it, taken here, rather than a silent
+#: change to what verification covers.
+_METADATA_FIELDS_SHARED_WITH_THE_RECORD = (
+    "candidate_id",
+    "rank",
+    "decision",
+    "original_start",
+    "original_end",
+    "start",
+    "end",
+    "duration",
+    "width",
+    "height",
+    "sample_aspect_ratio",
+    "video_codec",
+    "audio_codec",
+    "measured_duration_seconds",
+    "sha256",
+    "size_bytes",
+    "srt_sha256",
+    "ass_sha256",
+    "cue_count",
+    "subtitles_burned",
+)
+
+
 def _require_metadata(directory: Path, record: ClipRecord) -> None:
     """The metadata beside a clip still says what the index says.
 
-    Not covered by a digest, because it would then have to hold its own. Parsing
-    it and comparing the fields is the stronger check anyway: a digest proves the
-    bytes have not moved, this proves the two artifacts still agree.
+    Its bytes are already proved by ``_require_files``, which digests all four
+    artifacts. This is the second half and it is not redundant: a digest proves
+    the file has not moved, and this proves the two artifacts still *agree* --
+    the case a rewrite of both together would otherwise pass.
     """
     path = directory.joinpath(record.directory, record.metadata_filename)
     payload = _load(path, f"the metadata for {record.candidate_id}")
@@ -654,22 +763,7 @@ def _require_metadata(directory: Path, record: ClipRecord) -> None:
         raise IncompatibleArtifactError(
             f"{path} is not valid clip metadata: {error}. Rerun with --force."
         ) from error
-    for field in (
-        "candidate_id",
-        "rank",
-        "decision",
-        "start",
-        "end",
-        "duration",
-        "sha256",
-        "size_bytes",
-        "srt_sha256",
-        "ass_sha256",
-        "cue_count",
-        "sample_aspect_ratio",
-        "video_codec",
-        "audio_codec",
-    ):
+    for field in _METADATA_FIELDS_SHARED_WITH_THE_RECORD:
         if getattr(metadata, field) != getattr(record, field):
             raise IncompatibleArtifactError(
                 f"The metadata in {path} disagrees with the index about {field} "

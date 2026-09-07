@@ -74,6 +74,8 @@ def record(candidate: Any, **overrides: Any) -> ClipRecord:
         "srt_size_bytes": 120,
         "ass_sha256": "c" * 64,
         "ass_size_bytes": 900,
+        "metadata_sha256": "d" * 64,
+        "metadata_size_bytes": 700,
         "cue_count": 4,
         "subtitles_burned": True,
     }

@@ -31,6 +31,7 @@ from content_engine.domain.render_rules import (
 from content_engine.domain.renders import (
     CLIP_FILENAME,
     CLIP_METADATA_FILENAME,
+    RENDER_INDEX_SCHEMA_VERSION,
     SUBTITLES_ASS_FILENAME,
     SUBTITLES_SRT_FILENAME,
 )
@@ -99,7 +100,7 @@ class TestHappyPath:
         stage = run.manifest()["stages"]["render"]
         assert len(stage["fingerprint"]) == 64
         assert len(stage["stage_config_sha256"]) == 64
-        assert stage["schema_version"] == 1
+        assert stage["schema_version"] == RENDER_INDEX_SCHEMA_VERSION
         assert stage["completed_at"]
 
     def test_the_recorded_digest_is_the_configuration_beside_the_clips(
