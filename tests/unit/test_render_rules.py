@@ -257,8 +257,10 @@ class TestTheSubtitleNameInTheGraph:
         assert require_plain_filter_name(SUBTITLES_ASS_FILENAME) == SUBTITLES_ASS_FILENAME
 
     def test_a_graph_built_with_an_unsafe_name_is_refused(self) -> None:
+        settings = config()
+
         with pytest.raises(ValueError, match="not safe"):
-            render_filter_complex(config(), "it's.ass")
+            render_filter_complex(settings, "it's.ass")
 
 
 class TestArguments:

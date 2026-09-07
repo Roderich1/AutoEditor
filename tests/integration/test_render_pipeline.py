@@ -578,7 +578,8 @@ class TestAwkwardPaths:
         assert len(outcome.index.clips) == 2
         for clip in outcome.index.clips:
             path = directory.joinpath(clip.directory, CLIP_FILENAME)
-            assert path.is_file() and path.stat().st_size > 0
+            assert path.is_file()
+            assert path.stat().st_size > 0
             raw = probe_json(path)
             assert (video_stream(raw)["width"], video_stream(raw)["height"]) == (1080, 1920)
             assert clip.subtitles_burned is True

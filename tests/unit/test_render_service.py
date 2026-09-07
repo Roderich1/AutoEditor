@@ -838,13 +838,9 @@ class TestWhereFfmpegRuns:
         elsewhere.parent.mkdir(parents=True)
         elsewhere.write_text("[Events]\n", encoding="utf-8")
         output = tmp_path.joinpath("aqui", CLIP_FILENAME)
+        source = tmp_path.joinpath("source.mp4")
+        settings = render_stage_config(load_settings().render)
+        renderer = FFmpegClipRenderer()
 
         with pytest.raises(RenderError, match="not beside the clip"):
-            FFmpegClipRenderer().render(
-                tmp_path.joinpath("source.mp4"),
-                0.0,
-                1.0,
-                elsewhere,
-                output,
-                render_stage_config(load_settings().render),
-            )
+            renderer.render(source, 0.0, 1.0, elsewhere, output, settings)
