@@ -213,6 +213,22 @@ class TestMinimumDuration:
         """A clip too short to show anything produces no cue rather than a zero-length one."""
         assert build_cues([word("x", 0.0, 0.0)], 0.0, 0.0001) == []
 
+    def test_a_cue_with_no_room_left_at_all_is_dropped(self) -> None:
+        """A long word reaching the clip end leaves the one behind it nowhere to go.
+
+        The words overlap, which the transcript permits across two segments: the
+        first runs to the end of the clip and ends a sentence, so it becomes a
+        cue of its own occupying everything. The second is then pushed to the
+        clip end by the no-overlap rule and has zero duration with nothing to
+        extend into, so it is dropped rather than written as an event no player
+        would show.
+        """
+        words = [word("final.", 0.0, 1.0), word("tarde", 0.5, 0.6)]
+
+        cues = build_cues(words, 0.0, 1.0)
+
+        assert [cue.text for cue in cues] == ["final."]
+
 
 class TestCustomRules:
     def test_the_rules_are_parameters_rather_than_constants(self) -> None:
@@ -229,17 +245,37 @@ class TestCustomRules:
 
         assert [cue.text for cue in cues] == ["a b", "c d"]
 
+    @staticmethod
+    def rules(**overrides: object) -> SubtitleRules:
+        payload: dict[str, object] = {
+            "max_words_per_cue": 8,
+            "min_words_before_soft_break": 6,
+            "max_lines": 2,
+            "max_chars_per_line": 42,
+            "pause_seconds": 0.6,
+            "min_cue_seconds": 0.2,
+        }
+        payload.update(overrides)
+        return SubtitleRules(**payload)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["max_words_per_cue", "max_lines", "max_chars_per_line"])
     @pytest.mark.parametrize("value", [0, -1])
-    def test_a_non_positive_word_budget_is_refused(self, value: int) -> None:
-        with pytest.raises(ValueError, match="max_words_per_cue"):
-            SubtitleRules(
-                max_words_per_cue=value,
-                min_words_before_soft_break=6,
-                max_lines=2,
-                max_chars_per_line=42,
-                pause_seconds=0.6,
-                min_cue_seconds=0.2,
-            )
+    def test_a_non_positive_count_is_refused(self, field: str, value: int) -> None:
+        with pytest.raises(ValueError, match=field):
+            self.rules(**{field: value})
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_a_non_positive_soft_break_threshold_is_refused(self, value: int) -> None:
+        with pytest.raises(ValueError, match="min_words_before_soft_break"):
+            self.rules(min_words_before_soft_break=value)
+
+    @pytest.mark.parametrize("field", ["pause_seconds", "min_cue_seconds"])
+    @pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
+    def test_a_non_positive_or_non_finite_duration_is_refused(
+        self, field: str, value: float
+    ) -> None:
+        with pytest.raises(ValueError, match=field):
+            self.rules(**{field: value})
 
 
 class TestRefusals:

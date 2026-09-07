@@ -103,6 +103,11 @@ class TestClipRecord:
         with pytest.raises(ValueError, match="at or before its start"):
             record(start=40.0, end=10.0, duration=30.0)
 
+    def test_an_inverted_original_interval_is_refused(self) -> None:
+        """The bounds a person was shown, which a decision copied from the candidate."""
+        with pytest.raises(ValueError, match="original interval"):
+            record(original_start=40.0, original_end=10.0, decision=ReviewDecisionType.EDITED)
+
     def test_a_declared_duration_that_is_not_the_interval_is_refused(self) -> None:
         with pytest.raises(ValueError, match="declares duration"):
             record(duration=25.0)
@@ -214,6 +219,10 @@ class TestRenderIndex:
     def test_a_clip_of_other_dimensions_is_refused(self) -> None:
         with pytest.raises(ValueError, match="in an index of"):
             index(clips=[record(width=720, height=1280)])
+
+    def test_a_clip_disagreeing_about_the_burn_setting_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="subtitles_burned"):
+            index(clips=[record(subtitles_burned=False)])
 
     def test_a_clip_reaching_past_the_source_is_refused(self) -> None:
         with pytest.raises(ValueError, match="beyond the source"):

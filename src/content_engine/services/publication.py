@@ -106,6 +106,10 @@ class PublicationLayout:
     the caller has to catch.
     """
 
+    #: Recorded rather than used here: the protocol never touches the staging
+    #: directory, because what gets staged and how is the stage's own business.
+    #: It is on the layout so one object describes the whole of a stage's
+    #: publication, which is what a reader comparing two stages wants.
     staging_dirname: str
     rollback_dirname: str
     journal_filename: str
@@ -121,9 +125,6 @@ class PublicationLayout:
     #: How the stage refers to what it publishes: ("preview set", "previews").
     set_noun: str
     plural_noun: str
-
-    def staging(self, directory: Path) -> Path:
-        return directory.joinpath(self.staging_dirname)
 
     def rollback(self, directory: Path) -> Path:
         return directory.joinpath(self.rollback_dirname)

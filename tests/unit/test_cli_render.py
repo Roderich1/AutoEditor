@@ -473,3 +473,148 @@ class TestIsolation:
         assert render(run).exit_code == EXIT_SUCCESS
 
         assert {path: path.read_bytes() for path in watched if path.is_file()} == before
+
+
+class TestManifestConsistency:
+    """The manifest and the directory have to agree before anything is reused.
+
+    Each of these is a run whose files are intact and whose manifest says
+    something else. None of them is recoverable by guessing, so each is a
+    refusal that names what disagrees.
+    """
+
+    def test_a_run_with_no_recorded_review_is_refused(
+        self, analysed: Analysed, media: FakeMedia
+    ) -> None:
+        run = reviewed(analysed)
+        manifest_path = run.run_path.joinpath("manifest.json")
+        payload = json.loads(manifest_path.read_text("utf-8"))
+        payload["stages"].pop("review")
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        result = render(run)
+
+        assert result.exit_code == EXIT_INVALID_INPUT, cli_output(result)
+        assert "no recorded review" in cli_output(result)
+
+    def test_decisions_of_another_schema_are_refused(
+        self, analysed: Analysed, media: FakeMedia
+    ) -> None:
+        run = reviewed(analysed)
+        manifest_path = run.run_path.joinpath("manifest.json")
+        payload = json.loads(manifest_path.read_text("utf-8"))
+        payload["stages"]["review"]["schema_version"] = 99
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        result = render(run)
+
+        assert result.exit_code == EXIT_INVALID_INPUT, cli_output(result)
+        assert "decisions use schema 99" in cli_output(result)
+
+    def test_clips_with_no_recorded_fingerprint_are_refused(
+        self, analysed: Analysed, media: FakeMedia
+    ) -> None:
+        """The index is on disk and the manifest never recorded the stage."""
+        run = reviewed(analysed)
+        assert render(run).exit_code == EXIT_SUCCESS
+        manifest_path = run.run_path.joinpath("manifest.json")
+        payload = json.loads(manifest_path.read_text("utf-8"))
+        payload["stages"].pop("render")
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        result = render(run)
+
+        assert result.exit_code == EXIT_INVALID_INPUT, cli_output(result)
+        assert "no fingerprint was recorded" in cli_output(result)
+
+    def test_clips_of_another_index_schema_are_refused(
+        self, analysed: Analysed, media: FakeMedia
+    ) -> None:
+        run = reviewed(analysed)
+        assert render(run).exit_code == EXIT_SUCCESS
+        manifest_path = run.run_path.joinpath("manifest.json")
+        payload = json.loads(manifest_path.read_text("utf-8"))
+        payload["stages"]["render"]["schema_version"] = 99
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        result = render(run)
+
+        assert result.exit_code == EXIT_INVALID_INPUT, cli_output(result)
+        assert "index schema 99" in cli_output(result)
+
+    def test_a_missing_source_is_refused_before_any_encode(
+        self, analysed: Analysed, media: FakeMedia
+    ) -> None:
+        run = reviewed(analysed)
+        Path(run.manifest()["input"]["path"]).unlink()
+        encodes = len(media.calls)
+
+        result = render(run)
+
+        assert result.exit_code == EXIT_INVALID_INPUT, cli_output(result)
+        assert "source is missing" in cli_output(result)
+        assert len(media.calls) == encodes
+
+
+class TestPendingRollback:
+    """A backup an earlier failure could not put back is resolved, or refused."""
+
+    def strand(self, run: Analysed) -> Path:
+        """Leave a pending backup in clips/, by failing the restore itself.
+
+        The patches go through a scoped ``MonkeyPatch`` of their own rather than
+        the test's fixture. The fixture is the same object the ``harness``
+        used to set CONTENT_ENGINE_WORKSPACE, so calling ``undo()`` on it here
+        would also unset the workspace and every later command would report the
+        run as missing.
+        """
+        from content_engine.services import render_service
+
+        assert render(run).exit_code == EXIT_SUCCESS
+        clips = run.run_path.joinpath("clips")
+        real_write = render_service.write_json
+        real_replace = Path.replace
+
+        def refuse_index(path: Path, value: Any) -> None:
+            if path.name == "index.json":
+                raise OSError("synthetic publication failure")
+            real_write(path, value)
+
+        def refuse_restore(self: Path, target: Any) -> Any:
+            if ".rollback" in str(self) and self.suffix != ".tmp":
+                raise OSError("synthetic restore failure")
+            return real_replace(self, target)
+
+        with pytest.MonkeyPatch.context() as patched:
+            patched.setattr(render_service, "write_json", refuse_index)
+            patched.setattr(Path, "replace", refuse_restore)
+            assert render(run, "--force").exit_code == EXIT_RENDER
+        assert clips.joinpath(".rollback").is_dir()
+        return clips
+
+    def test_a_later_invocation_finishes_the_restore_and_says_so(
+        self, analysed: Analysed, media: FakeMedia
+    ) -> None:
+        run = reviewed(analysed)
+        clips = self.strand(run)
+
+        result = render(run)
+
+        assert result.exit_code == EXIT_SUCCESS, cli_output(result)
+        assert "Recovered" in cli_output(result)
+        assert not clips.joinpath(".rollback").exists()
+
+    def test_a_backup_that_cannot_be_resolved_fails_the_run_and_keeps_the_data(
+        self, analysed: Analysed, media: FakeMedia
+    ) -> None:
+        run = reviewed(analysed)
+        clips = self.strand(run)
+        held = sorted(path.name for path in clips.joinpath(".rollback").iterdir())
+        clips.joinpath(".rollback", "rollback.json").unlink()
+
+        result = render(run)
+
+        assert result.exit_code == EXIT_RENDER, cli_output(result)
+        assert run.manifest()["status"] == RunStatus.FAILED_RENDER.value
+        remaining = sorted(path.name for path in clips.joinpath(".rollback").iterdir())
+        assert remaining == [name for name in held if name != "rollback.json"]

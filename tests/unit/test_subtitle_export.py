@@ -62,6 +62,23 @@ class TestSrtTimestamps:
         assert to_milliseconds(seconds) == expected
 
 
+class TestQuantisationRefusals:
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_second_count_is_refused(self, value: float) -> None:
+        """The last defence. A timestamp is a position in audio, never a limit."""
+        from content_engine.domain.subtitles import to_centiseconds, to_milliseconds
+
+        with pytest.raises(ValueError, match="finite"):
+            to_milliseconds(value)
+        with pytest.raises(ValueError, match="finite"):
+            to_centiseconds(value)
+
+    def test_a_negative_second_count_never_produces_a_negative_timestamp(self) -> None:
+        from content_engine.domain.subtitles import to_milliseconds
+
+        assert to_milliseconds(-1.0) == 0
+
+
 class TestAssTimestamps:
     @pytest.mark.parametrize(
         ("centiseconds", "expected"),
