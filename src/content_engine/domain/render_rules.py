@@ -468,10 +468,10 @@ def _shortlist_problem(index: RenderIndex, targets: Sequence[RenderTargetClip]) 
                 f"the clip for {target.candidate.id} covers [{entry.start}, {entry.end}] and "
                 f"the decision approved [{target.start}, {target.end}]"
             )
-        if entry.rank != target.candidate.rank:
+        if entry.rank != target.rank:
             return (
                 f"the clip for {target.candidate.id} is ranked {entry.rank} and the candidate "
-                f"is ranked {target.candidate.rank}"
+                f"is ranked {target.rank}"
             )
     extra = sorted(set(recorded) - {target.candidate.id for target in targets})
     if extra:

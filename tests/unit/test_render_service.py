@@ -306,30 +306,42 @@ class TestMeasurement:
     ) -> None:
         media.dimensions[CLIP_FILENAME] = (720, 1280)
 
+        engine = service(media)
+        plan = plan_for(tmp_path, count=1)
+
         with pytest.raises(RenderError, match="1080x1920 was requested"):
-            service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_a_clip_with_the_wrong_video_codec_is_refused(
         self, media: FakeMedia, tmp_path: Path, clips: Path
     ) -> None:
         media.video_codec = "hevc"
 
+        engine = service(media)
+        plan = plan_for(tmp_path, count=1)
+
         with pytest.raises(RenderError, match="hevc video"):
-            service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_a_clip_with_the_wrong_audio_codec_is_refused(
         self, media: FakeMedia, tmp_path: Path, clips: Path
     ) -> None:
         media.audio_codec = "mp3"
 
+        engine = service(media)
+        plan = plan_for(tmp_path, count=1)
+
         with pytest.raises(RenderError, match="mp3 audio"):
-            service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_a_silent_clip_is_refused(self, media: FakeMedia, tmp_path: Path, clips: Path) -> None:
         media.audio = False
 
+        engine = service(media)
+        plan = plan_for(tmp_path, count=1)
+
         with pytest.raises(RenderError, match="no audio stream"):
-            service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_non_square_pixels_are_refused(
         self, media: FakeMedia, tmp_path: Path, clips: Path
@@ -337,32 +349,44 @@ class TestMeasurement:
         """1080x1920 with a 4:3 pixel ratio is not a vertical video."""
         media.sample_aspect_ratio = "4:3"
 
+        engine = service(media)
+        plan = plan_for(tmp_path, count=1)
+
         with pytest.raises(RenderError, match="4:3"):
-            service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_an_undeclared_sample_aspect_ratio_is_refused(
         self, media: FakeMedia, tmp_path: Path, clips: Path
     ) -> None:
         media.sample_aspect_ratio = None
 
+        engine = service(media)
+        plan = plan_for(tmp_path, count=1)
+
         with pytest.raises(RenderError, match="square pixels"):
-            service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_a_clip_of_the_wrong_duration_is_refused(
         self, media: FakeMedia, tmp_path: Path, clips: Path
     ) -> None:
         media.measured[CLIP_FILENAME] = 3.0
 
+        engine = service(media)
+        plan = plan_for(tmp_path, count=1)
+
         with pytest.raises(RenderError, match="duration tolerance"):
-            service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_a_clip_that_cannot_be_probed_is_refused(
         self, media: FakeMedia, tmp_path: Path, clips: Path
     ) -> None:
         media.unprobeable.add(CLIP_FILENAME)
 
+        engine = service(media)
+        plan = plan_for(tmp_path, count=1)
+
         with pytest.raises(RenderError, match="cannot be read back"):
-            service(media).generate(plan_for(tmp_path, count=1), clips, GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
 
 class TestSubtitles:
@@ -438,8 +462,10 @@ class TestSubtitles:
         """The contract is stated rather than approximated from segment bounds."""
         plan = plan_for(tmp_path, count=1, words=False)
 
+        engine = service(media)
+
         with pytest.raises(RenderError, match="word_timestamps"):
-            service(media).generate(plan, clips, GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_a_transcript_with_no_word_timestamps_and_nothing_to_render_is_fine(
         self, media: FakeMedia, tmp_path: Path, clips: Path
@@ -679,8 +705,10 @@ class TestPublication:
         }
         media.fail_for.add(CLIP_FILENAME)
 
+        engine = service(media)
+
         with pytest.raises(RenderError):
-            service(media).generate(plan, clips, LATER)
+            engine.generate(plan, clips, LATER)
 
         after = {
             path.relative_to(clips).as_posix(): path.read_bytes()
@@ -734,8 +762,10 @@ class TestRefusals:
         plan = plan_for(tmp_path, count=1)
         plan.source_path.unlink()
 
+        engine = service(media)
+
         with pytest.raises(RenderError, match="source is missing"):
-            service(media).generate(plan, clips, GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
         assert media.calls == []
 

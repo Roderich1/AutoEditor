@@ -280,14 +280,20 @@ class TestCustomRules:
 
 class TestRefusals:
     def test_an_inverted_interval_is_refused(self) -> None:
+        words = [word("x", 1.0, 2.0)]
+
         with pytest.raises(ValueError, match="ends at"):
-            build_cues([word("x", 1.0, 2.0)], 20.0, 10.0)
+            build_cues(words, 20.0, 10.0)
 
     def test_a_negative_start_is_refused(self) -> None:
+        words = [word("x", 1.0, 2.0)]
+
         with pytest.raises(ValueError, match="negative"):
-            build_cues([word("x", 1.0, 2.0)], -1.0, 10.0)
+            build_cues(words, -1.0, 10.0)
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_a_non_finite_bound_is_refused(self, value: float) -> None:
+        words = [word("x", 1.0, 2.0)]
+
         with pytest.raises(ValueError, match="finite"):
-            build_cues([word("x", 1.0, 2.0)], 0.0, value)
+            build_cues(words, 0.0, value)

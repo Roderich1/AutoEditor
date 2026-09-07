@@ -313,10 +313,12 @@ class TestGenerationRefusals:
 
         monkeypatch.setattr(render_service, "ClipRecord", refuse)
 
+        engine = service()
+        plan = plan_for(tmp_path, count=1)
+        clips = tmp_path.joinpath("clips")
+
         with pytest.raises(RenderError, match="clip it cannot describe"):
-            service().generate(
-                plan_for(tmp_path, count=1), tmp_path.joinpath("clips"), GENERATED_AT
-            )
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_an_index_the_stage_cannot_describe_becomes_a_render_error(
         self, media: FakeMedia, tmp_path: Path
@@ -332,8 +334,11 @@ class TestGenerationRefusals:
             run_id=plan.run_id,
         )
 
+        engine = service()
+        clips = tmp_path.joinpath("clips")
+
         with pytest.raises(RenderError, match="cannot describe"):
-            service().generate(impossible, tmp_path.joinpath("clips"), GENERATED_AT)
+            engine.generate(impossible, clips, GENERATED_AT)
 
     def test_records_that_disagree_with_the_target_become_a_render_error(
         self, media: FakeMedia, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -345,8 +350,11 @@ class TestGenerationRefusals:
             lambda index, config, target: "a synthetic disagreement",
         )
 
+        engine = service()
+        clips = tmp_path.joinpath("clips")
+
         with pytest.raises(RenderError, match="records that disagree"):
-            service().generate(plan, tmp_path.joinpath("clips"), GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_a_silent_clip_is_refused_by_the_probe_adapter(
         self, media: FakeMedia, tmp_path: Path
@@ -360,10 +368,12 @@ class TestGenerationRefusals:
         """
         media.audio = False
 
+        engine = service()
+        plan = plan_for(tmp_path, count=1)
+        clips = tmp_path.joinpath("clips")
+
         with pytest.raises(RenderError, match="cannot be read back"):
-            service().generate(
-                plan_for(tmp_path, count=1), tmp_path.joinpath("clips"), GENERATED_AT
-            )
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_a_probe_reporting_no_audio_codec_is_refused_by_the_service(
         self, media: FakeMedia, tmp_path: Path
@@ -405,8 +415,11 @@ class TestGenerationRefusals:
         probe: MediaProbePort = SilentProbe()
         engine = RenderService(FFmpegClipRenderer(), probe)
 
+        plan = plan_for(tmp_path, count=1)
+        clips = tmp_path.joinpath("clips")
+
         with pytest.raises(RenderError, match="A silent clip is not publishable"):
-            engine.generate(plan_for(tmp_path, count=1), tmp_path.joinpath("clips"), GENERATED_AT)
+            engine.generate(plan, clips, GENERATED_AT)
 
     def test_subtitles_that_cannot_be_built_become_a_render_error(
         self, media: FakeMedia, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -417,10 +430,12 @@ class TestGenerationRefusals:
             lambda *arguments, **keywords: (_ for _ in ()).throw(ValueError("synthetic")),
         )
 
+        engine = service()
+        plan = plan_for(tmp_path, count=1)
+        clips = tmp_path.joinpath("clips")
+
         with pytest.raises(RenderError, match="cannot be built"):
-            service().generate(
-                plan_for(tmp_path, count=1), tmp_path.joinpath("clips"), GENERATED_AT
-            )
+            engine.generate(plan, clips, GENERATED_AT)
 
 
 class TestTheAdapter:
@@ -441,10 +456,12 @@ class TestTheAdapter:
             render_adapter, "run_command", lambda arguments, **_: fake_process(arguments)
         )
 
+        engine = service()
+        plan = plan_for(tmp_path, count=1)
+        clips = tmp_path.joinpath("clips")
+
         with pytest.raises(RenderError, match="produced no clip"):
-            service().generate(
-                plan_for(tmp_path, count=1), tmp_path.joinpath("clips"), GENERATED_AT
-            )
+            engine.generate(plan, clips, GENERATED_AT)
 
 
 class TestSilence:

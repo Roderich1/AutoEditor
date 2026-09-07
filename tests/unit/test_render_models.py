@@ -185,8 +185,10 @@ class TestRenderIndex:
         assert len(index().clips) == 1
 
     def test_two_records_for_one_candidate_are_refused(self) -> None:
+        twice = [record(), record()]
+
         with pytest.raises(ValueError, match="more than once"):
-            index(clips=[record(), record()])
+            index(clips=twice)
 
     def test_ranks_may_have_gaps_because_rejections_leave_them(self) -> None:
         built = index(
@@ -199,30 +201,34 @@ class TestRenderIndex:
         assert [clip.rank for clip in built.clips] == [1, 4]
 
     def test_ranks_out_of_order_are_refused(self) -> None:
+        backwards = [
+            record(candidate_id="cand_0002", rank=4, directory="clip_cand_0002"),
+            record(),
+        ]
+
         with pytest.raises(ValueError, match="rank order"):
-            index(
-                clips=[
-                    record(candidate_id="cand_0002", rank=4, directory="clip_cand_0002"),
-                    record(),
-                ]
-            )
+            index(clips=backwards)
 
     def test_a_repeated_rank_is_refused(self) -> None:
+        repeated = [
+            record(),
+            record(candidate_id="cand_0002", rank=1, directory="clip_cand_0002"),
+        ]
+
         with pytest.raises(ValueError, match="rank order"):
-            index(
-                clips=[
-                    record(),
-                    record(candidate_id="cand_0002", rank=1, directory="clip_cand_0002"),
-                ]
-            )
+            index(clips=repeated)
 
     def test_a_clip_of_other_dimensions_is_refused(self) -> None:
+        mismatched = [record(width=720, height=1280)]
+
         with pytest.raises(ValueError, match="in an index of"):
-            index(clips=[record(width=720, height=1280)])
+            index(clips=mismatched)
 
     def test_a_clip_disagreeing_about_the_burn_setting_is_refused(self) -> None:
+        unburned = [record(subtitles_burned=False)]
+
         with pytest.raises(ValueError, match="subtitles_burned"):
-            index(clips=[record(subtitles_burned=False)])
+            index(clips=unburned)
 
     def test_a_clip_reaching_past_the_source_is_refused(self) -> None:
         with pytest.raises(ValueError, match="beyond the source"):

@@ -353,24 +353,25 @@ class TestArguments:
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_a_non_finite_timestamp_is_refused(self, value: float, tmp_path: Path) -> None:
+        source = tmp_path.joinpath("s.mp4")
+        output = tmp_path.joinpath("o.mp4")
+        settings = config()
+
         with pytest.raises(ValueError, match="finite"):
-            render_arguments(
-                tmp_path.joinpath("s.mp4"),
-                value,
-                1.0,
-                None,
-                tmp_path.joinpath("o.mp4"),
-                config(),
-            )
+            render_arguments(source, value, 1.0, None, output, settings)
 
     def test_a_non_positive_duration_is_refused(self, tmp_path: Path) -> None:
+        source = tmp_path.joinpath("s.mp4")
+        output = tmp_path.joinpath("o.mp4")
+        settings = config()
+
         with pytest.raises(ValueError, match="positive"):
-            render_arguments(
-                tmp_path.joinpath("s.mp4"), 0.0, 0.0, None, tmp_path.joinpath("o.mp4"), config()
-            )
+            render_arguments(source, 0.0, 0.0, None, output, settings)
 
     def test_a_negative_start_is_refused(self, tmp_path: Path) -> None:
+        source = tmp_path.joinpath("s.mp4")
+        output = tmp_path.joinpath("o.mp4")
+        settings = config()
+
         with pytest.raises(ValueError, match="negative"):
-            render_arguments(
-                tmp_path.joinpath("s.mp4"), -1.0, 1.0, None, tmp_path.joinpath("o.mp4"), config()
-            )
+            render_arguments(source, -1.0, 1.0, None, output, settings)

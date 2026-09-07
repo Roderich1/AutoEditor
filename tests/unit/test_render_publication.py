@@ -158,8 +158,10 @@ class TestAFailedPublication:
         before = snapshot(directory)
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
 
+        engine = service()
+
         with pytest.raises(OSError, match=RENDER_INDEX_FILENAME):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
 
         assert snapshot(directory) == before
 
@@ -169,8 +171,10 @@ class TestAFailedPublication:
         """Files that merely exist are not the same as a set a later run accepts."""
         directory, plan, fingerprint, digest = published
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
+        engine = service()
+
         with pytest.raises(OSError):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
         assert verify_clips(directory, fingerprint, digest, plan).clips
@@ -192,8 +196,10 @@ class TestAFailedPublication:
 
         monkeypatch.setattr(Path, "replace", refuse_second_move_aside)
 
+        engine = service()
+
         with pytest.raises(OSError, match="move-aside"):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
         assert snapshot(directory) == before
@@ -205,8 +211,10 @@ class TestAFailedPublication:
         directory, plan, _, _ = published
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
 
+        engine = service()
+
         with pytest.raises(OSError):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
 
         assert not directory.joinpath(ROLLBACK_DIRNAME).exists()
 
@@ -220,8 +228,10 @@ class TestAFailedRestore:
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
         monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
 
+        engine = service()
+
         with pytest.raises(RenderError, match=ROLLBACK_DIRNAME):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
         after = recoverable(directory)
@@ -236,8 +246,10 @@ class TestAFailedRestore:
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
         monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
 
+        engine = service()
+
         with pytest.raises(RenderError):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
         assert directory.joinpath(ROLLBACK_DIRNAME).is_dir()
@@ -249,8 +261,10 @@ class TestAFailedRestore:
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
         monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
 
+        engine = service()
+
         with pytest.raises(RenderError) as raised:
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
         assert ROLLBACK_DIRNAME in str(raised.value)
@@ -265,8 +279,10 @@ class TestResuming:
         before = snapshot(directory)
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
         monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
+        engine = service()
+
         with pytest.raises(RenderError):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
         restored = resolve_pending_rollback(directory)
@@ -286,8 +302,10 @@ class TestResuming:
         before = snapshot(directory)
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
         monkeypatch.setattr(Path, "replace", fail_on_restore(position, persistent=True))
+        engine = service()
+
         with pytest.raises(RenderError):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
         resolve_pending_rollback(directory)
@@ -309,8 +327,10 @@ class TestResuming:
         before = snapshot(directory)
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
         monkeypatch.setattr(Path, "replace", fail_on_restore(2, persistent=True))
+        engine = service()
+
         with pytest.raises(RenderError):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
         journal = json.loads(
             directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL).read_text("utf-8")
@@ -329,8 +349,10 @@ class TestResuming:
         before = snapshot(directory)
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
         monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
+        engine = service()
+
         with pytest.raises(RenderError):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
         resolve_pending_rollback(directory)
@@ -359,8 +381,10 @@ class TestARefusedBackup:
     ) -> None:
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
         monkeypatch.setattr(Path, "replace", fail_on_restore(1, persistent=True))
+        engine = service()
+
         with pytest.raises(RenderError):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
     def test_a_backup_with_no_journal_is_left_untouched(
@@ -438,8 +462,10 @@ class TestARefusedBackup:
         self.strand(directory, plan, monkeypatch)
         directory.joinpath(ROLLBACK_DIRNAME, ROLLBACK_JOURNAL).unlink()
 
+        engine = service()
+
         with pytest.raises(RenderError, match=ROLLBACK_JOURNAL):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
 
 
 class TestTheJournalWriteItself:
@@ -451,8 +477,10 @@ class TestTheJournalWriteItself:
         before = snapshot(directory)
         monkeypatch.setattr(publication, "write_json", fail_on_write(ROLLBACK_JOURNAL))
 
+        engine = service()
+
         with pytest.raises(OSError, match=ROLLBACK_JOURNAL):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
         assert not directory.joinpath(ROLLBACK_DIRNAME).exists()
@@ -498,8 +526,10 @@ class TestOwnership:
         before = snapshot(directory)
         monkeypatch.setattr(render_service, "write_json", fail_on_write(RENDER_INDEX_FILENAME))
 
+        engine = service()
+
         with pytest.raises(OSError):
-            service().generate(plan, directory, LATER)
+            engine.generate(plan, directory, LATER)
         monkeypatch.undo()
 
         assert snapshot(directory) == before

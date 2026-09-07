@@ -48,6 +48,12 @@ class RenderTargetClip:
     decision: ReviewDecisionType
     start: float
     end: float
+    #: Copied from the candidate rather than read through it. The candidate's
+    #: rank is Optional because an unselected one has none, and narrowing that
+    #: at every use site with an assertion would put a runtime check in the
+    #: middle of a value object. ``build_render_target`` refuses an unranked
+    #: candidate before constructing one of these, so the type is honest here.
+    rank: int
 
     @property
     def duration(self) -> float:
@@ -60,13 +66,6 @@ class RenderTargetClip:
     @property
     def original_end(self) -> float:
         return self.candidate.end
-
-    @property
-    def rank(self) -> int:
-        # Guaranteed by build_render_target, which refuses an unranked
-        # candidate before constructing one of these.
-        assert self.candidate.rank is not None  # noqa: S101 - narrowing, not a check
-        return self.candidate.rank
 
 
 @dataclass(frozen=True)
@@ -146,7 +145,13 @@ def build_render_target(
             # never quietly become the authority on what gets cut.
             start, end = candidate.start, candidate.end
         clips.append(
-            RenderTargetClip(candidate=candidate, decision=decision.decision, start=start, end=end)
+            RenderTargetClip(
+                candidate=candidate,
+                decision=decision.decision,
+                start=start,
+                end=end,
+                rank=_rank_of(candidate),
+            )
         )
     return RenderTarget(
         clips=tuple(clips),

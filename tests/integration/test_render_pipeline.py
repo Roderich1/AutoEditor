@@ -465,8 +465,10 @@ class TestRealFailures:
         broken.write_bytes(b"this is not a container")
         directory = tmp_path.joinpath("clips")
 
+        plan = plan_for(broken)
+
         with pytest.raises(RenderError):
-            render(plan_for(broken), directory)
+            render(plan, directory)
 
         survivors = sorted(path.name for path in directory.rglob("*")) if directory.exists() else []
         assert survivors == []
@@ -499,8 +501,10 @@ class TestRealFailures:
             )
         directory = tmp_path.joinpath("clips")
 
+        plan = plan_for(silent)
+
         with pytest.raises(RenderError):
-            render(plan_for(silent), directory)
+            render(plan, directory)
 
         assert not directory.joinpath(RENDER_INDEX_FILENAME).exists()
 
@@ -518,8 +522,10 @@ class TestRealFailures:
         broken = tmp_path.joinpath("roto.mp4")
         broken.write_bytes(b"not a container")
 
+        unreadable = plan_for(broken)
+
         with pytest.raises(RenderError):
-            render(plan_for(broken), directory)
+            render(unreadable, directory)
 
         after = {
             path.relative_to(directory).as_posix(): path.read_bytes()

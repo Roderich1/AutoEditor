@@ -108,6 +108,7 @@ def target_of(kept: list[Any]) -> RenderTarget:
                 decision=ReviewDecisionType.APPROVED,
                 start=candidate.start,
                 end=candidate.end,
+                rank=candidate.rank,
             )
             for candidate in kept
         ),

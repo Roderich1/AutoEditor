@@ -370,12 +370,9 @@ def test_the_subtitle_builder_refuses_a_non_finite_interval(value: float, bound:
 def test_the_render_arguments_refuse_a_non_finite_timestamp(value: float, tmp_path: Path) -> None:
     from content_engine.domain.render_rules import render_arguments, render_stage_config
 
+    source = tmp_path.joinpath("s.mp4")
+    output = tmp_path.joinpath("o.mp4")
+    config = render_stage_config(load_settings().render)
+
     with pytest.raises(ValueError, match="finite"):
-        render_arguments(
-            tmp_path.joinpath("s.mp4"),
-            value,
-            1.0,
-            None,
-            tmp_path.joinpath("o.mp4"),
-            render_stage_config(load_settings().render),
-        )
+        render_arguments(source, value, 1.0, None, output, config)

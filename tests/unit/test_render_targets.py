@@ -172,14 +172,18 @@ class TestRefusals:
     def test_an_undecided_candidate_stops_the_render(self) -> None:
         candidates = shortlist(2)
 
+        partial = collection_of(approve(candidates[0]))
+
         with pytest.raises(IncompatibleArtifactError, match="no decision"):
-            target(candidates, collection_of(approve(candidates[0])))
+            target(candidates, partial)
 
     def test_the_message_names_how_many_are_missing(self) -> None:
         candidates = shortlist(3)
 
+        partial = collection_of(approve(candidates[0]))
+
         with pytest.raises(IncompatibleArtifactError, match="2 of 3"):
-            target(candidates, collection_of(approve(candidates[0])))
+            target(candidates, partial)
 
     def test_a_decision_for_an_unknown_candidate_stops_the_render(self) -> None:
         candidates = shortlist(1)
@@ -207,8 +211,10 @@ class TestRefusals:
         """
         candidates = shortlist(1)
 
+        past_the_end = edit(candidates[0], 5.0, 200.0)
+
         with pytest.raises(ValueError, match="beyond the source"):
-            collection_of(edit(candidates[0], 5.0, 200.0))
+            collection_of(past_the_end)
 
     def test_decisions_taken_against_another_duration_stop_the_render(self) -> None:
         candidates = shortlist(1)
@@ -249,5 +255,7 @@ class TestRefusals:
     def test_an_unranked_candidate_stops_the_render(self) -> None:
         candidate = shortlist(1)[0].model_copy(update={"rank": None})
 
+        decided = collection_of(approve(candidate))
+
         with pytest.raises(IncompatibleArtifactError, match="rank"):
-            target([candidate], collection_of(approve(candidate)))
+            target([candidate], decided)

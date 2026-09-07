@@ -527,7 +527,10 @@ def _require_subtitles_within(directory: Path, record: ClipRecord) -> None:
         path = directory.joinpath(name)
         try:
             events = parse(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError) as error:
+        # ValueError covers UnicodeDecodeError, which is a subclass of it, and
+        # is also what both parsers raise on a document they cannot read. One
+        # unreadable file, one refusal.
+        except (OSError, ValueError) as error:
             raise RenderError(
                 f"The subtitles for {record.candidate_id} in {name} cannot be read back: {error}"
             ) from error
