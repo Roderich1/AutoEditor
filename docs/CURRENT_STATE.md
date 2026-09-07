@@ -31,9 +31,9 @@ FFmpeg 9.0.1:
 | Check | Result |
 |---|---|
 | `uv run ruff check --no-cache .` | passed |
-| `uv run ruff format --check .` | passed, 128 files |
+| `uv run ruff format --check .` | passed, 130 files |
 | `uv run mypy --no-incremental src` | passed, 58 files, strict |
-| `uv run pytest -p no:cacheprovider` | 2179 passed, 1 skipped, 414 more than the 1765 on `main`; 99.70% over 4302 statements, 13 missed — the same 13 `main` already had |
+| `uv run pytest -p no:cacheprovider` | 2240 passed, 1 skipped, 475 more than the 1765 on `main`; 99.70% over 4298 statements, 13 missed — the same 13 `main` already had |
 | The one skipped test | `tests/ai/test_gemini_live.py`, which spends real quota; it skips unless `CONTENT_ENGINE_RUN_AI_TESTS=1` **and** a credential are both set |
 | `uv run pytest -m integration --no-cov` | 46 passed with real FFmpeg; 24 of them are the new render pipeline |
 | Coverage of every module added by CE-040–CE-046 | 100% |
@@ -42,6 +42,27 @@ FFmpeg 9.0.1:
 | GitHub Actions on Ubuntu, real FFmpeg | all steps pass (`.github/workflows/ci.yml`) |
 | Non-finite numbers refused | 142 parametrised cases for `nan`, `inf`, `-inf`, up from 88 |
 | `uv build` | wheel and sdist built |
+| SonarCloud quality gate | passes; all five conditions green, **0 open issues** on the new code |
+| GitHub Actions "Verify on Ubuntu" | passes |
+
+### From the installed wheel
+
+Python 3.12.10 in a clean venv, 38 packages, working directory
+`…\pruebas de ñandú` outside the repository, no `GEMINI_API_KEY` in the
+environment.
+
+| Check | Result |
+|---|---|
+| `render` on the real run | exit 3, "This run is READY_FOR_REVIEW…", `clips/` untouched, manifest byte-identical, no failure recorded |
+| Three clips on synthetic 640x360 media | 12.4 s, all 1080x1920, SAR 1:1, h264/aac, duration drift **0.000 s**, 9.0 MB total |
+| Subtitles | 5 cues per clip; SRT and ASS agree text for text; every event inside `[0, duration]` |
+| Second call | verified byte-identical in 0.00 s, no encoder invoked, no `.staging` or `.rollback` left |
+| A/B render differing only in `burn_subtitles` | **149,625 differing pixels** in the caption band and a 24% larger file, so the caption really is drawn rather than merely accepted by the filter |
+
+The A/B is the check worth having. FFmpeg fails the whole graph when `ass=`
+cannot open its file, so a clip that exists proves the escaped path resolved —
+but it does not prove libass *drew* anything, and an unresolvable font or a
+margin off the frame would leave a clean video and a zero exit code.
 
 ### What the render stage adds, asserted
 
