@@ -280,3 +280,102 @@ def test_the_effective_configuration_carries_no_non_standard_literal(
         pytest.fail(f"artifact contains the non-standard literal {name}")
 
     json.loads(target.read_text(encoding="utf-8"), parse_constant=refuse)
+
+
+# --- V0.6, the render stage --------------------------------------------------
+#
+# Every real number the render stage records is a position in a video, a
+# duration, a blur radius or a caption offset. None of them has a meaningful
+# non-finite value, and one reaching an artifact would produce a document only
+# Python can read.
+
+
+@NON_FINITE
+@pytest.mark.parametrize(
+    "field",
+    [
+        "original_start",
+        "original_end",
+        "start",
+        "end",
+        "duration",
+        "measured_duration_seconds",
+    ],
+)
+def test_a_clip_record_refuses_non_finite_numbers(value: float, field: str) -> None:
+    from tests.unit.test_render_models import record
+
+    with pytest.raises(ValidationError):
+        record(**{field: value})
+
+
+@NON_FINITE
+def test_a_render_index_refuses_a_non_finite_source_duration(value: float) -> None:
+    from tests.unit.test_render_models import index
+
+    with pytest.raises(ValidationError):
+        index(source_duration_seconds=value)
+
+
+@NON_FINITE
+@pytest.mark.parametrize("field", ["blur_sigma", "duration_tolerance_seconds"])
+def test_a_render_stage_configuration_refuses_non_finite_numbers(value: float, field: str) -> None:
+    from content_engine.domain.render_rules import render_stage_config
+    from content_engine.domain.renders import RenderStageConfig
+
+    built = render_stage_config(load_settings().render).model_dump(mode="json")
+
+    with pytest.raises(ValidationError):
+        RenderStageConfig.model_validate(built | {field: value})
+
+
+@NON_FINITE
+@pytest.mark.parametrize("field", ["pause_seconds", "min_cue_seconds", "outline", "shadow"])
+def test_the_subtitle_configuration_refuses_non_finite_numbers(value: float, field: str) -> None:
+    from content_engine.domain.render_rules import render_stage_config
+    from content_engine.domain.renders import RenderStageConfig
+
+    built = render_stage_config(load_settings().render).model_dump(mode="json")
+    built["subtitles"][field] = value
+
+    with pytest.raises(ValidationError):
+        RenderStageConfig.model_validate(built)
+
+
+@NON_FINITE
+@pytest.mark.parametrize("field", ["start", "end"])
+def test_a_subtitle_cue_refuses_non_finite_bounds(value: float, field: str) -> None:
+    from content_engine.domain.subtitles import SubtitleCue
+
+    payload: dict[str, Any] = {"index": 1, "start": 0.0, "end": 1.0, "lines": ["texto"]}
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        SubtitleCue(**payload)
+
+
+@NON_FINITE
+@pytest.mark.parametrize("bound", ["clip_start", "clip_end"])
+def test_the_subtitle_builder_refuses_a_non_finite_interval(value: float, bound: str) -> None:
+    from content_engine.domain.subtitles import build_cues
+
+    bounds: dict[str, float] = {"clip_start": 0.0, "clip_end": 10.0}
+    bounds[bound] = value
+
+    with pytest.raises(ValueError, match="finite"):
+        build_cues([], bounds["clip_start"], bounds["clip_end"])
+
+
+@NON_FINITE
+def test_the_render_arguments_refuse_a_non_finite_timestamp(value: float, tmp_path: Path) -> None:
+    from content_engine.domain.render_rules import render_arguments, render_stage_config
+
+    with pytest.raises(ValueError, match="finite"):
+        render_arguments(
+            tmp_path.joinpath("s.mp4"),
+            value,
+            1.0,
+            None,
+            tmp_path.joinpath("o.mp4"),
+            render_stage_config(load_settings().render),
+        )

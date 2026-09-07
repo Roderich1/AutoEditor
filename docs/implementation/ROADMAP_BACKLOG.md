@@ -113,6 +113,8 @@ Autoscaling/GPU pools/distributed queue/cloud orchestration/Kubernetes only when
 
 ## V0.5 — Human Evaluation
 
+Merged in `1609bc1` (PR #7).
+
 - **CE-034** low-cost preview renderer.
 - **CE-035** interactive `review` command.
 - **CE-036** approve decision.
@@ -123,6 +125,8 @@ Autoscaling/GPU pools/distributed queue/cloud orchestration/Kubernetes only when
 **Exit:** creator can review all candidates and produce persisted decisions.
 
 ## V0.6 — Final Render
+
+Implemented on `feat/final-render`, pending review.
 
 - **CE-040** subtitle builder from source word timestamps.
 - **CE-041** clip-local SRT generation.

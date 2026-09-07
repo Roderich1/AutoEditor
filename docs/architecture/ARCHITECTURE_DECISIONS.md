@@ -1554,3 +1554,197 @@ directory would preserve that too, and buys nothing else.
 - `review` does not resolve a pending backup. It must not mutate the previews
   directory, so it fails verification with a message pointing at `preview`,
   which is the command that owns those files.
+
+---
+
+## ADR-032 — Subtitles are built from words, and nothing else
+
+**Status:** Accepted for V0.6 (CE-040, CE-041, CE-042)
+
+### Context
+
+CE-040 turns transcript timestamps into clip-local subtitles. The specification
+gives the conversion — `local = absolute - clip_start` — and a baseline for
+grouping: around six to eight visible words, at most two lines, break at
+punctuation and pauses. It does not say what happens when the transcript has no
+word timestamps, how times are rounded, or what to do with the characters SRT
+and ASS give structural meaning to. Each of those can produce two different,
+apparently valid files from the same input, which is exactly the kind of gap
+this project resolves explicitly rather than inside a helper.
+
+### Decision
+
+**Words are the only source.** A transcript with segments but no word
+timestamps is refused with a message naming `transcription.word_timestamps`.
+`RenderStageConfig.subtitles.source` records the value `words`, so a future
+segment-level mode is a version bump and not a silent change of meaning.
+
+An interval with no words in it is a different thing entirely, and is not a
+failure: it produces an empty SRT and an ASS holding only its header. A clip of
+a command running in silence is a real thing to publish.
+
+**Selection is a strict intersection.** A word is in the clip when
+`word.end > clip_start` and `word.start < clip_end`, both strictly. A word
+ending exactly at the start or beginning exactly at the end shares no time with
+the clip, and including it would put a caption on screen for material the viewer
+cannot hear. Words that straddle either edge are clamped.
+
+**Grouping is greedy and versioned.** A cue ends when it holds
+`max_words_per_cue` words, when the previous word ends a sentence, when the gap
+to the next word reaches `pause_seconds`, when the previous word ends on a comma
+and the cue already holds `min_words_before_soft_break` words, or when adding
+the next word would exceed two lines' worth of characters. Lines are split at
+the word boundary that minimises the longer line. Greedy rather than optimal on
+purpose: an optimiser gives prettier breaks and makes the output depend on a
+search whose result changes whenever the cost function is touched.
+
+A word longer than the line budget is kept whole and overflows. A caption
+reading `systemct` / `l` is worse than one that is slightly too wide.
+
+**Rounding is stated.** SRT quantises to milliseconds and ASS to centiseconds,
+both with `Decimal` and `ROUND_HALF_UP`. Python's `round` is half-even, so it
+would put 0.0005 s at 0 ms and 0.0015 s at 2 ms — correct for statistics, wrong
+for timestamps, and different from what every other subtitle tool does. Cues are
+given a minimum visible duration *before* quantisation, so the smallest cue is
+250 ms and no rounding step can collapse one to zero; quantisation is monotone,
+so an ordered list stays ordered.
+
+**ASS's three structural characters are transliterated, not escaped.** `{` and
+`}` delimit an override block whose contents libass interprets as formatting
+commands and then removes from the picture, and `\` begins an escape. The format
+defines no portable escape for any of them, and libass and VSFilter disagree
+about what an unmatched brace does. A brace becomes a parenthesis and a
+backslash a forward slash, under `SUBTITLE_RULES_VERSION`.
+
+**The subtitle rules and the caption style are stage constants.** ADR-028's
+reasoning applies unchanged: a new key in `[render]` folds into `config_sha256`
+and changes the logical identity of every run that already exists, to describe a
+caption layout. They are recorded in full in `clips/config.effective.json`, and
+the builder is driven from that artifact rather than from the module constants,
+so a set of clips and the configuration beside it cannot describe two different
+policies.
+
+### Consequences
+
+- The transliteration is lossy, and it is the smaller cost. `transcript.json`
+  and the SRT export keep the exact characters, and the JSON is the artifact
+  every measurement reads.
+- A run transcribed with `word_timestamps = false` cannot be rendered without
+  re-transcribing. That is the honest outcome: segment-level blocks would be an
+  artifact claiming a synchronisation it does not have.
+- Burned-in captions are not byte-reproducible across platforms, because libass
+  resolves the font through fontconfig and Arial substitutes differently on
+  Windows and Linux. The two sidecar documents *are* byte-identical everywhere;
+  only the picture is not, and previews already carry the same caveat.
+- Two documents, one list of cues. Building the SRT and the ASS from separate
+  passes would let them disagree about the same clip, which is the defect nobody
+  notices until a viewer compares the burned caption with the sidecar file.
+
+---
+
+## ADR-033 — One durable publication protocol, two stages
+
+**Status:** Accepted for V0.6
+
+### Context
+
+The render stage has to replace a published set of artifacts under exactly the
+conditions the preview stage does: a failure part-way through must not leave a
+mixture of two runs, a failed `--force` must destroy nothing, and a restore that
+cannot finish must lose nothing.
+
+That protocol is where three defects were found in review of PR #7, and the
+third was the expensive one: a restore interrupted half-way could be resumed in
+a way that deleted the files it had just recovered. ADR-031 records the fix — a
+three-phase journal in which `restoring` is written after the last deletion and
+before the first move back.
+
+Copying it into the render stage would put that defect one edit away from coming
+back, in a place where the tests that caught it do not run.
+
+### Decision
+
+The protocol moves to `services/publication.py` and both stages use it. A
+`PublicationLayout` carries everything that differs between them: the directory
+names, the journal filename, the predicate that says which entries the stage
+owns, the exception type a failure raises, and the nouns the messages use. The
+caller places its new set inside a `with publish(...)` block, so *what* is
+published stays with the stage that knows.
+
+Generalising cost one thing. An item is now a file **or** a directory, because a
+clip is a directory of four artifacts while a preview is a single MP4. Every
+rename works on both; the deletion in the `placing` phase is the one step that
+has to tell them apart.
+
+The preview stage was migrated rather than left alone. Its 76-test publication
+suite is the regression proof that the generalisation preserved behaviour, and
+it passes unchanged except for two monkeypatches retargeted at the module that
+now owns the journal write — a test patching only `preview_service` would inject
+a failure the journal write never sees, and would pass while proving nothing.
+
+### Consequences
+
+- The guarantee is stated once. It is **durability, not atomicity**: two
+  outcomes are atomic — the new set is published, or the previous one is
+  restored byte for byte — and the third is a restore that cannot complete,
+  after which every item stays in the published directory or in the backup, the
+  backup is never deleted while the restore is unfinished, the error names the
+  directory holding the data, and the next invocation of the same command
+  finishes the job.
+- `ClipRollbackError` is separate from `PreviewRollbackError` rather than shared.
+  An operator reading the message needs to know which directory holds their
+  data, and the two failures call for different next steps: a stranded preview
+  set costs an encode to rebuild, a stranded clip set costs a render.
+- Publishing by directory rename is still rejected, for the reasons ADR-031
+  gives, and they get stronger here: a clip is what somebody opens in a player,
+  and on Windows a directory rename fails while any handle inside it is open.
+- The two stages keep their own `resolve_pending_rollback`, each a one-line call
+  into the shared resolver. The CLI imports them under distinct names, so a
+  command can never finish the wrong stage's restore.
+
+---
+
+## ADR-034 — A review that kept nothing is a result, not a failure
+
+**Status:** Accepted for V0.6
+
+### Context
+
+`render` acts on a completed review. A completed review can reject every
+candidate, and that is not an unusual case: the whole point of CE-034 to CE-039
+is that a person may decide the analyzer found nothing worth publishing. The
+stage has to do something coherent, and the obvious options each say something
+different about what happened.
+
+### Decision
+
+The stage succeeds. It writes `clips/index.json` with an empty `clips` list and
+`clips/config.effective.json` beside it, records the render stage in the
+manifest with a real fingerprint, advances the run to `RENDERED`, and prints a
+warning saying the review kept none of the candidates.
+
+Nothing is fabricated. There is no clip, no directory and no subtitle file.
+
+### Rejected alternatives
+
+**Failing the stage.** `FAILED_RENDER` means the render could not be performed.
+Here it was performed and its correct output is empty, so the state would be a
+lie — and it would leave the run in a failure state that every later invocation
+retries, permanently, over a decision a person deliberately made.
+
+**Refusing to run at all.** Leaving the run at `REVIEWED` would make "the review
+rejected everything" indistinguishable from "nobody has run render yet", which
+is exactly the distinction the state machine exists to keep.
+
+**Rendering the best candidate anyway.** Beyond the scope of any decision a
+person took, and a direct violation of the rule that a rejection renders
+nothing.
+
+### Consequences
+
+- The empty index is a real artifact with a real fingerprint, so a second
+  invocation reuses it and rewrites nothing, exactly as a non-empty one does.
+- CE-053 to CE-059 can read a run that rendered nothing and see *why*: the
+  decisions are there, and the rejection rate is the measurement.
+- `preview` already behaves this way for an analysis that selected no
+  candidates, so the two stages agree about what an empty stage means.

@@ -23,6 +23,7 @@ uv run content-engine analyze RUN_ID                      # llama a Gemini
 uv run content-engine analyze RUN_ID --fixture fixture.json   # reproduce un archivo
 uv run content-engine preview RUN_ID                      # proxies 540x960
 uv run content-engine review RUN_ID                       # decisión humana
+uv run content-engine render RUN_ID                       # clips 1080x1920
 ```
 
 `doctor --require-ai` convierte las credenciales y el modelo de análisis en
@@ -174,6 +175,144 @@ el estado a `READY_FOR_REVIEW`: es la única transición hacia atrás de la máq
 de estados, y existe porque un run cuyas decisiones acaban de borrarse no puede
 seguir afirmando una revisión terminada (ADR-030).
 
+## Render final
+
+`render` no lee `GEMINI_API_KEY`, no abre un socket y no vuelve a llamar al
+proveedor. Trabaja sobre artefactos que ya existen.
+
+### `render` — clips verticales definitivos (CE-040 a CE-046)
+
+```console
+uv run content-engine render RUN_ID [--config PATH] [--force]
+```
+
+Un directorio por decisión conservada, en `clips/clip_<candidate_id>/`:
+
+```text
+clips/
+├── clip_cand_3762331fe118880c/
+│   ├── clip.mp4          # 1080x1920, H.264, AAC, píxeles cuadrados
+│   ├── subtitles.srt
+│   ├── subtitles.ass
+│   └── metadata.json
+├── index.json
+└── config.effective.json
+```
+
+Exige un run `REVIEWED` y permite el reintento controlado desde
+`FAILED_RENDER`. Una revisión incompleta se rechaza: un candidato sin decisión
+no es uno que alguien haya descartado, sino uno al que todavía no ha llegado.
+
+**Qué se renderiza.** Una aprobación se corta sobre el intervalo del propio
+candidato. Una edición se corta sobre `final_start` y `final_end` y nada más: no
+se ensancha hasta el mínimo del analizador ni se vuelve a ajustar a un borde de
+segmento, porque quien miró el preview es la autoridad sobre dónde termina su
+clip. Un rechazo no produce nada. El orden es el rango del candidato, nunca el
+orden en que se respondieron las decisiones, así que revisar la lista al revés o
+retomar una sesión a la mitad da los mismos clips en el mismo orden. Los rangos
+conservan los huecos que deja un rechazo: el rango 4 junto al 1 es el registro
+honesto.
+
+Si la revisión rechazó todo, la etapa termina con éxito, escribe un índice vacío
+y avisa. Rechazarlo todo es un resultado, no un fallo, y fabricar un clip sería
+inventar una decisión que nadie tomó (ADR-034).
+
+### Subtítulos
+
+Se construyen desde los timestamps de palabra del transcript, nunca desde los
+límites de segmento. Un transcript sin timestamps de palabra se rechaza nombrando
+`transcription.word_timestamps`: aproximarlos daría bloques de cinco a treinta
+segundos que aparecen de golpe, un artefacto que afirma una sincronización que no
+tiene (ADR-032).
+
+Un intervalo sin habla es distinto y es legítimo: produce un SRT vacío y un ASS
+con solo su cabecera.
+
+```text
+local = absolute - final_start
+```
+
+Las palabras que cruzan un borde se recortan; una que termina exactamente en el
+inicio del clip no comparte tiempo con él y queda fuera. La agrupación es
+determinista: hasta 8 palabras, hasta 2 líneas, corte en fin de frase, en una
+pausa de 0.6 s o más, en una coma cuando la señal ya lleva 6 palabras, y en el
+presupuesto de caracteres de dos líneas.
+
+| Formato | Redondeo | Nota |
+|---|---|---|
+| SRT | milisegundos, `ROUND_HALF_UP` | numerado desde 1 |
+| ASS | centésimas, `ROUND_HALF_UP` | `PlayRes` del propio clip, sin re-ajuste de línea |
+
+`ROUND_HALF_UP` explícito porque `round()` de Python es *half-even* y pondría
+0.0005 s en 0 ms. Cada señal recibe una duración mínima visible **antes** de
+redondear, así que ninguna puede colapsar a cero ni desordenarse.
+
+`{`, `}` y `\` se transliteran a `(`, `)` y `/` en el ASS. El formato no ofrece
+un escape portable para ellos y libass y VSFilter no coinciden sobre una llave
+sin cerrar. El SRT y `transcript.json` conservan el texto exacto.
+
+### Presets
+
+| Preset | Qué hace |
+|---|---|
+| `vertical_blur` | fondo escalado para cubrir 9:16, recortado y desenfocado; primer plano escalado para caber entero y superpuesto centrado |
+| `vertical_crop` | escalado para cubrir 9:16 y recorte central |
+
+`vertical_blur` es el predeterminado para grabaciones de pantalla: un recorte
+duro se lleva la esquina de la terminal donde suele estar el punto del clip. Nada
+usa un `scale=w:h` a secas, que deformaría cualquier origen que no sea ya 9:16.
+Ambos escaladores llevan `force_divisible_by=2` porque `yuv420p` no puede
+representar una dimensión impar, y ambos terminan en `setsar=1`.
+
+La lista de argumentos de FFmpeg la construye una función pura y se verifica
+elemento por elemento. `-ss` va antes de `-i` para que el codificador busque en
+lugar de decodificar hasta el intervalo —lo que además rebasa los timestamps de
+salida a cero, que es lo que hace que los subtítulos locales cuadren— y `-t` va
+después para que el límite se aplique a lo que se escribe. El *texto* del
+subtítulo nunca aparece en el comando: está en un archivo, y al filtro se le pasa
+la ruta.
+
+Esa ruta es el único lugar del motor donde un path se vuelve parte de una cadena
+que FFmpeg analiza, porque `ass=` la recibe como valor de opción dentro del grafo
+de filtros y se desescapa dos veces. `escape_filter_path` cubre ambos niveles y
+tiene sus propias pruebas, con rutas de Windows y POSIX, espacios, acentos, dos
+puntos, comillas y cada separador del grafo.
+
+### Verificación
+
+Nada de lo pedido a FFmpeg se da por hecho. Cada clip se lee con ffprobe en el
+directorio de staging —dimensiones, relación de aspecto de píxel, ambos códecs y
+duración contra una tolerancia documentada de 1.0 s— y ambos subtítulos se
+vuelven a parsear y se comprueba su orden y sus límites, antes de publicar nada.
+
+La relación de aspecto de píxel se comprueba porque 1080x1920 con píxeles no
+cuadrados no es un video vertical, y ninguna otra comprobación notaría un render
+que perdiera `setsar`.
+
+Una invocación posterior lo prueba todo otra vez sin codificador: tamaño y digest
+de cada artefacto, cada `metadata.json` contra su registro campo por campo, ambos
+documentos parseados, ningún directorio de clip que el índice no nombre, el
+conjunto contra las decisiones que la revisión registró, y el fingerprint
+reconstruido. Un artefacto borrado, truncado, manipulado o renombrado no se
+reutiliza, y el rechazo nombra `--force`.
+
+El fingerprint de la revisión se **reconstruye** desde `decisions.json` en lugar
+de leerse del manifiesto. Eso detecta un archivo de decisiones editado después de
+registrarse la revisión: el único artefacto del motor que no se puede regenerar, y
+el único cuya alteración cambiaría en silencio lo que se publica.
+
+### Publicación
+
+`clips/` se reemplaza con el mismo protocolo duradero que `previews/`, compartido
+en `services/publication.py` (ADR-033). La diferencia es que aquí un elemento es
+un **directorio** de cuatro artefactos y no un archivo suelto.
+
+La garantía es **durabilidad, no atomicidad**: o se publica el conjunto nuevo, o
+se restaura el anterior byte a byte, o —si la restauración misma falla— cada
+artefacto sigue en `clips/` o en `clips/.rollback/`, el respaldo no se borra, el
+error nombra el directorio que tiene los datos, y la siguiente ejecución de
+`render` termina el trabajo desde la fase anotada en el diario.
+
 ## Configuración
 
 Los valores predeterminados viven dentro del paquete, en
@@ -228,6 +367,9 @@ Cada ejecución vive en `workspace/runs/RUN_ID` y es un experimento:
   `config.effective.json`
 - `previews/` — `candidate_<id>.mp4`, `index.json` y `config.effective.json`
 - `review/` — `decisions.json` y `config.effective.json`
+- `clips/` — un `clip_<id>/` por decisión conservada con `clip.mp4`,
+  `subtitles.srt`, `subtitles.ass` y `metadata.json`, más `index.json` y
+  `config.effective.json`
 
 ### Dos niveles de configuración
 
@@ -240,6 +382,7 @@ Un run guarda dos configuraciones, deliberadamente:
 | `analysis/config.effective.json` | Lo que la etapa de análisis ejecutó realmente |
 | `previews/config.effective.json` | Lo que la etapa de preview ejecutó realmente |
 | `review/config.effective.json` | Sobre qué material se tomaron las decisiones |
+| `clips/config.effective.json` | La política con la que se renderizó: preset, códecs, reglas y estilo de subtítulo |
 
 Difieren siempre que `transcribe --config` apunta a otro perfil, algo legítimo
 —es como se compara un modelo contra otro sobre el mismo audio— pero nunca
@@ -288,11 +431,13 @@ código produce los mismos bytes en Windows 11 y Ubuntu 24.04. Un fallo de
 escritura no deja ni un archivo parcial ni un `.tmp`. `.gitattributes` aplica la
 misma política al texto del propio repositorio.
 
-La única excepción a la comparabilidad byte a byte son los `.mp4` de preview:
-x264 incrusta su propia identidad de compilación y su salida no es determinista
-entre versiones. La garantía para ellos es que un run sin cambios no reescribe
-nada, no que dos máquinas produzcan bytes idénticos. Son también los únicos
-artefactos desechables.
+La excepción a la comparabilidad byte a byte son los `.mp4`, de preview y de
+render: x264 incrusta su propia identidad de compilación y su salida no es
+determinista entre versiones. En un clip se suma que libass resuelve la
+tipografía por fontconfig, así que `Arial` sustituye distinto en Windows y en
+Ubuntu y los píxeles del subtítulo quemado difieren. La garantía para ellos es
+que un run sin cambios no reescribe nada, no que dos máquinas produzcan bytes
+idénticos. El `.srt` y el `.ass` sí son idénticos en todas partes.
 
 Ningún artefacto puede contener `NaN`, `Infinity` ni `-Infinity`: no son JSON
 estándar y no describen duraciones, posiciones ni probabilidades. Se rechazan en
