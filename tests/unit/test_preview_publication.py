@@ -44,7 +44,7 @@ from content_engine.domain.preview_rules import (
     preview_filename,
     preview_stage_config,
 )
-from content_engine.services import preview_service
+from content_engine.services import preview_service, publication
 from content_engine.services.preview_service import (
     ROLLBACK_DIRNAME,
     ROLLBACK_JOURNAL,
@@ -55,6 +55,19 @@ from content_engine.services.preview_service import (
     verify_previews,
 )
 from tests.conftest import chunk_of, collect, raw_candidate, speech_transcript
+
+def patch_writes(monkeypatch: pytest.MonkeyPatch, replacement: Callable[..., None]) -> None:
+    """Intercept every JSON write a publication performs.
+
+    Two modules write during one publication: ``preview_service`` writes the
+    index and the stage configuration, and ``services.publication`` writes the
+    rollback journal, because the durable protocol is shared with the render
+    stage (ADR-033). A test that patched only the first would inject a failure
+    the journal write never sees, and would pass while proving nothing.
+    """
+    monkeypatch.setattr(preview_service, "write_json", replacement)
+    monkeypatch.setattr(publication, "write_json", replacement)
+
 
 GENERATED_AT = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
 LATER = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
@@ -775,7 +788,7 @@ class TestTheJournalWriteItself:
         """
         directory, plan, fingerprint, digest = published
         before = snapshot(directory)
-        monkeypatch.setattr(preview_service, "write_json", fail_on_write(ROLLBACK_JOURNAL))
+        patch_writes(monkeypatch, fail_on_write(ROLLBACK_JOURNAL))
 
         engine = service("second")
         with pytest.raises(OSError, match=ROLLBACK_JOURNAL):
@@ -1035,7 +1048,7 @@ class TestResumingAPartialRestore:
                 raise OSError("synthetic phase transition failure")
             real_write(path, value)
 
-        monkeypatch.setattr(preview_service, "write_json", refuse_the_transition)
+        patch_writes(monkeypatch, refuse_the_transition)
         engine = service("second")
         with pytest.raises(RenderError):
             engine.generate(plan, directory, LATER)
