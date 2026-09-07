@@ -441,7 +441,6 @@ def read_srt_events(text: str) -> list[SubtitleEvent]:
     events: list[SubtitleEvent] = []
     blocks = [block for block in text.replace("\r\n", "\n").split("\n\n") if block.strip()]
     for position, block in enumerate(blocks, start=1):
-        lines = [line for line in block.split("\n") if line.strip() or events]
         lines = block.strip("\n").split("\n")
         if len(lines) < 3:
             raise ValueError(f"SRT cue {position} has no text: {block!r}")

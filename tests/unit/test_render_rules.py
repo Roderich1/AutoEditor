@@ -91,7 +91,11 @@ class TestStageConfig:
         digest is what a later run compares against the manifest -- on another
         machine, in another process.
         """
-        assert render_stage_config_sha256(config()) == render_stage_config_sha256(config())
+        first = config()
+        second = config()
+
+        assert first is not second, "the two must really be separate objects"
+        assert render_stage_config_sha256(first) == render_stage_config_sha256(second)
 
     @pytest.mark.parametrize(
         ("field", "value"),
